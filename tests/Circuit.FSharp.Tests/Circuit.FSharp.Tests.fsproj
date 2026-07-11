@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="SmokeTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Circuit.FSharp/Circuit.FSharp.fsproj" />
+    <ProjectReference Include="../../src/Circuit.Testing/Circuit.Testing.fsproj" />
+  </ItemGroup>
+</Project>

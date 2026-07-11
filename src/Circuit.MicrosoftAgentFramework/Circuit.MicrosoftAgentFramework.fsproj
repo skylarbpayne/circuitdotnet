@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>CircuitDotNet.MicrosoftAgentFramework</PackageId>
+    <Description>Microsoft Agent Framework adapter package skeleton for Circuit runtimes.</Description>
+    <PackageTags>circuit;agents;dotnet;maf</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Circuit.Core/Circuit.Core.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="PublicAPI.Shipped.txt" />
+    <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
+  </ItemGroup>
+</Project>

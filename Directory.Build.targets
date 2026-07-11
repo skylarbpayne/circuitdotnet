@@ -1,0 +1,13 @@
+<Project>
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="" Visible="false" Link="README.md" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="" Visible="false" Link="LICENSE" />
+    <None Include="$(MSBuildThisFileDirectory)icon.png" Pack="true" PackagePath="" Visible="false" Link="icon.png" />
+  </ItemGroup>
+
+  <Target Name="EnsurePackageMetadata" BeforeTargets="GenerateNuspec" Condition="'$(IsPackable)' != 'false'">
+    <Error Condition="'$(Description)' == ''" Text="Packable project $(MSBuildProjectName) must define Description." />
+    <Error Condition="'$(PackageTags)' == ''" Text="Packable project $(MSBuildProjectName) must define PackageTags." />
+    <Error Condition="'$(RepositoryUrl)' == ''" Text="Packable project $(MSBuildProjectName) must define RepositoryUrl." />
+  </Target>
+</Project>

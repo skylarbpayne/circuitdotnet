@@ -1,0 +1,40 @@
+## Build output
+bin/
+obj/
+out/
+artifacts/
+.docfx/
+
+## Visual Studio / VS Code
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/
+
+## Test / coverage
+TestResults/
+coverage/
+coverage-*/
+*.coverage
+*.coveragexml
+
+## Packages
+*.nupkg
+*.snupkg
+
+## Local tools
+.mise.local.toml
+
+## Secrets / local provider config
+.env
+.env.*
+secrets/
+*.secrets.json
+local.settings.json
+appsettings.Development.json
+
+## OS files
+.DS_Store
+Thumbs.db
