@@ -1,0 +1,11 @@
+T:Circuit.FSharp.Agent
+M:Circuit.FSharp.Agent.run(Circuit.Core.ICircuitRuntime,Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.RunResult{``1}}
+T:Circuit.FSharp.AgentDefinition
+M:Circuit.FSharp.AgentDefinition.create(System.String,System.String,System.String,System.String)~Circuit.Core.AgentDefinition
+M:Circuit.FSharp.AgentDefinition.withModelHint(System.String,Circuit.Core.AgentDefinition)~Circuit.Core.AgentDefinition
+M:Circuit.FSharp.AgentDefinition.withSkills(System.Collections.Generic.IEnumerable{Circuit.Core.SkillReference},Circuit.Core.AgentDefinition)~Circuit.Core.AgentDefinition
+M:Circuit.FSharp.AgentDefinition.withToolTags(System.Collections.Generic.IEnumerable{System.String},Circuit.Core.AgentDefinition)~Circuit.Core.AgentDefinition
+T:Circuit.FSharp.Signature
+M:Circuit.FSharp.Signature.create(System.String,System.String,System.String,System.String)~Circuit.Core.Signature{``0,``1}
+M:Circuit.FSharp.Signature.withInputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``0,``1})~Circuit.Core.Signature{``0,``1}
+M:Circuit.FSharp.Signature.withOutputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``1,``0})~Circuit.Core.Signature{``1,``0}

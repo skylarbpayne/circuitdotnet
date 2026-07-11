@@ -7,5 +7,19 @@
 
   <ItemGroup>
     <Compile Include="SmokeTests.fs" />
+    <Compile Include="PublicApiTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Circuit.Core/Circuit.Core.fsproj" />
+    <ProjectReference Include="../../src/Circuit.FSharp/Circuit.FSharp.fsproj" />
+    <ProjectReference Include="../../src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
+    <ProjectReference Include="../../src/Circuit.Testing/Circuit.Testing.fsproj" />
+    <ProjectReference Include="../../src/Circuit/Circuit.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
 </Project>

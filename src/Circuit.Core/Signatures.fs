@@ -19,6 +19,7 @@ type Signature<'Input, 'Output>
         version: SemanticVersion,
         description: string,
         instructions: string,
+        jsonOptions: JsonSerializerOptions,
         input: Contract<'Input>,
         output: Contract<'Output>
     ) =
@@ -28,6 +29,7 @@ type Signature<'Input, 'Output>
     member _.Input = input
     member _.Output = output
     member _.Instructions = instructions
+    member internal _.JsonSerializerOptions = jsonOptions
 
     static member Create
         (
@@ -54,11 +56,15 @@ type Signature<'Input, 'Output>
         let normalizedInstructions =
             SignatureValidation.requireNonBlank "instructions" instructions
 
+        let jsonOptionsSnapshot = JsonSerializerOptions(jsonOptions)
+        jsonOptionsSnapshot.MakeReadOnly()
+
         Signature(
             DefinitionId.Create id,
             SemanticVersion.Parse version,
             normalizedDescription,
             normalizedInstructions,
-            Contract<'Input>.Create(jsonOptions, inputValidators),
-            Contract<'Output>.Create(jsonOptions, outputValidators)
+            jsonOptionsSnapshot,
+            Contract<'Input>.Create(jsonOptionsSnapshot, inputValidators),
+            Contract<'Output>.Create(jsonOptionsSnapshot, outputValidators)
         )

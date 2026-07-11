@@ -8,10 +8,22 @@
 
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="MafOptions.fs" />
+    <Compile Include="MafSessions.fs" />
+    <Compile Include="MafAgentFactory.fs" />
+    <Compile Include="MafErrors.fs" />
+    <Compile Include="MafRuntime.fs" />
+    <Compile Include="MafStreaming.fs" />
+    <Compile Include="DependencyInjection.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Circuit.Core/Circuit.Core.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
 
   <ItemGroup>

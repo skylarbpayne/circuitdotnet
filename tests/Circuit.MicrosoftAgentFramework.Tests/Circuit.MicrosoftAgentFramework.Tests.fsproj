@@ -6,7 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="SmokeTests.fs" />
+    <Compile Include="MafRuntimeTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
