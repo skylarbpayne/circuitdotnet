@@ -16,10 +16,10 @@
     <Compile Include="Tools.fs" />
     <Compile Include="Skills.fs" />
     <Compile Include="Agents.fs" />
-    <Compile Include="Workflows.fs" />
     <Compile Include="Runs.fs" />
     <Compile Include="Runtime.fs" />
     <Compile Include="Programs.fs" />
+    <Compile Include="Workflows.fs" />
     <Compile Include="Telemetry.fs" />
   </ItemGroup>
 

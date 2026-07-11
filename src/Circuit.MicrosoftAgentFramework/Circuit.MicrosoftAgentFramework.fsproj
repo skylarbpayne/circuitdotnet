@@ -15,6 +15,7 @@
     <Compile Include="MafErrors.fs" />
     <Compile Include="MafRuntime.fs" />
     <Compile Include="MafStreaming.fs" />
+    <Compile Include="MafWorkflows.fs" />
     <Compile Include="DependencyInjection.fs" />
   </ItemGroup>
 
@@ -24,6 +25,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
 

@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="ContractsTests.fs" />
     <Compile Include="SkillsTests.fs" />
+    <Compile Include="WorkflowDefinitionTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

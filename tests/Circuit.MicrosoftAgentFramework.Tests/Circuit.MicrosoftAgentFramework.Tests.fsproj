@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="MafRuntimeTests.fs" />
+    <Compile Include="WorkflowRuntimeTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

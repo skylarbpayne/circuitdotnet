@@ -1,4 +1,4 @@
-namespace Circuit.FSharp
+namespace CircuitFSharpAssembly
 
 module internal Package =
     let placeholder = ()

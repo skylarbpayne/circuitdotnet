@@ -1,4 +1,9 @@
 namespace Circuit.Core
 
+open System.Diagnostics
+
 module internal TelemetryContracts =
-    let placeholder = ()
+    [<Literal>]
+    let ActivitySourceName = "CircuitDotNet"
+
+    let ActivitySource = new ActivitySource(ActivitySourceName)

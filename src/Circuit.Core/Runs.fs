@@ -128,6 +128,19 @@ type RunResult<'T>
     member _.StartedAt = startedAt
     member _.CompletedAt = completedAt
 
+[<Sealed>]
+type ApprovalRequest internal (requestId: string, toolName: string, argumentsJson: string voption) =
+    do
+        if String.IsNullOrWhiteSpace requestId then
+            invalidArg "requestId" "requestId cannot be blank."
+
+        if String.IsNullOrWhiteSpace toolName then
+            invalidArg "toolName" "toolName cannot be blank."
+
+    member _.RequestId = requestId
+    member _.ToolName = toolName
+    member _.ArgumentsJson = argumentsJson
+
 type RunEventKind =
     | RunStarted = 0
     | OutputDelta = 1
