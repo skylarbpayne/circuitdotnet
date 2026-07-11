@@ -171,6 +171,13 @@
         "resolved": "10.0.8",
         "contentHash": "pcyglC5R0BXGyD8cntjFXJhACpPyk7H7eN0zKW/5d5MIcmRUPVZrjytZ2Bsn9igzQJGg5xIOOokPHFLnfiEuxQ=="
       },
+      "CircuitDotNet": {
+        "type": "Project",
+        "dependencies": {
+          "CircuitDotNet.Core": "[0.1.0-alpha.1, )",
+          "Microsoft.Extensions.AI": "[10.6.0, )"
+        }
+      },
       "CircuitDotNet.Core": {
         "type": "Project",
         "dependencies": {

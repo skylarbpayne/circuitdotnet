@@ -1,3 +1,4 @@
+#nullable enable
 T:Circuit.MicrosoftAgentFramework.DependencyInjection
 M:Circuit.MicrosoftAgentFramework.DependencyInjection.IServiceCollection.AddMafRuntime(Microsoft.Extensions.DependencyInjection.IServiceCollection,Microsoft.Extensions.AI.IChatClient,Circuit.MicrosoftAgentFramework.MafRuntimeOptions)~Microsoft.Extensions.DependencyInjection.IServiceCollection
 T:Circuit.MicrosoftAgentFramework.IRunObserver
@@ -38,4 +39,8 @@ P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.ToolResolvers~System.Collect
 T:Circuit.MicrosoftAgentFramework.ToolApprovalContext
 P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.Arguments~System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object}
 P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.RunContext~Circuit.Core.RunContext
-P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.Tool~Circuit.Core.ResolvedTool
+P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.Tool~Circuit.ResolvedTool
+T:Circuit.MicrosoftAgentFrameworkRuntimeFactory
+M:Circuit.MicrosoftAgentFrameworkRuntimeFactory.CreateClient(Microsoft.Extensions.AI.IChatClient,Circuit.MicrosoftAgentFrameworkOptions,System.Collections.Generic.IReadOnlyList{Circuit.IToolResolver},System.Collections.Generic.IReadOnlyList{Circuit.ISkillResolver},System.Collections.Generic.IReadOnlyList{Circuit.IRunObserver})~Circuit.ICircuitClient
+T:Circuit.ServiceCollectionExtensions
+M:Circuit.ServiceCollectionExtensions.AddCircuit(Microsoft.Extensions.DependencyInjection.IServiceCollection,System.Action{Circuit.CircuitOptions})~Microsoft.Extensions.DependencyInjection.IServiceCollection

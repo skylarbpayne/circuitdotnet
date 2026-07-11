@@ -45,6 +45,7 @@ module PublicApiTests =
             File.ReadAllLines path
             |> Array.map _.Trim()
             |> Array.filter (fun line -> not (String.IsNullOrWhiteSpace line))
+            |> Array.filter (fun line -> not (line.StartsWith("#", StringComparison.Ordinal)))
         else
             Array.empty
 

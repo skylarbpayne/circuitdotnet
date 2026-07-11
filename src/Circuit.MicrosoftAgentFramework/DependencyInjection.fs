@@ -18,9 +18,11 @@ module DependencyInjection =
             if isNull (box options) then
                 nullArg "options"
 
-            services.AddSingleton(options) |> ignore
+            let snapshot = options.Snapshot()
 
-            services.AddSingleton<ICircuitRuntime>(MafRuntime(chatClient, options))
+            services.AddSingleton(snapshot) |> ignore
+
+            services.AddSingleton<ICircuitRuntime>(MafRuntime(chatClient, snapshot))
             |> ignore
 
             services

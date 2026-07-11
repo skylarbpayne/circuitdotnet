@@ -4,6 +4,7 @@
     <PackageId>CircuitDotNet.MicrosoftAgentFramework</PackageId>
     <Description>Microsoft Agent Framework adapter package skeleton for Circuit runtimes.</Description>
     <PackageTags>circuit;agents;dotnet;maf</PackageTags>
+    <NoWarn>$(NoWarn);RS0016;RS0017;RS0037</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,11 +17,13 @@
     <Compile Include="MafRuntime.fs" />
     <Compile Include="MafStreaming.fs" />
     <Compile Include="MafWorkflows.fs" />
+    <Compile Include="CSharpFacade.fs" />
     <Compile Include="DependencyInjection.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Circuit.Core/Circuit.Core.fsproj" />
+    <ProjectReference Include="../Circuit/Circuit.csproj" />
   </ItemGroup>
 
   <ItemGroup>

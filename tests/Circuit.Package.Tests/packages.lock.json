@@ -220,7 +220,7 @@
         "type": "Project",
         "dependencies": {
           "CircuitDotNet.Core": "[0.1.0-alpha.1, )",
-          "CircuitDotNet.MicrosoftAgentFramework": "[0.1.0-alpha.1, )"
+          "Microsoft.Extensions.AI": "[10.6.0, )"
         }
       },
       "CircuitDotNet.Core": {
@@ -239,6 +239,7 @@
       "CircuitDotNet.MicrosoftAgentFramework": {
         "type": "Project",
         "dependencies": {
+          "CircuitDotNet": "[0.1.0-alpha.1, )",
           "CircuitDotNet.Core": "[0.1.0-alpha.1, )",
           "FSharp.Core": "[10.1.301, )",
           "Microsoft.Agents.AI": "[1.13.0, )",
