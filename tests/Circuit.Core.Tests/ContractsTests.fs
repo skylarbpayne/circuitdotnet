@@ -8,6 +8,8 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.Json.Serialization
 open System.Text.Json.Serialization.Metadata
+open System.Threading
+open System.Threading.Tasks
 open Circuit.Core
 open Xunit
 
@@ -75,6 +77,10 @@ type NamingPolicyRoot() =
 type CacheProbe<'T>() =
     member val Value = Unchecked.defaultof<'T> with get, set
 
+type NullServiceProvider() =
+    interface IServiceProvider with
+        member _.GetService(_serviceType) = null
+
 type SignatureInput() =
     member val Name: string = null with get, set
 
@@ -84,6 +90,20 @@ type SignatureOutput() =
 module ContractsTests =
     let private createCacheProbeContract<'T> () =
         Contract<CacheProbe<'T>>.Create(CircuitJson.createOptions (), Seq.empty)
+
+    let private createTestTool id version approval approvalPolicy =
+        ToolDefinition<SignatureInput, SignatureOutput>
+            .Create(
+                id,
+                version,
+                $"{id} description",
+                Contract<SignatureInput>.Create(CircuitJson.createOptions (), Seq.empty),
+                Contract<SignatureOutput>.Create(CircuitJson.createOptions (), Seq.empty),
+                approval,
+                approvalPolicy,
+                Func<ToolContext, SignatureInput, Task<SignatureOutput>>(fun _ _ ->
+                    Task.FromResult(SignatureOutput(Accepted = true)))
+            )
 
     [<Fact>]
     let ``generated schema uses camel case, descriptions, required members, and disallows unknown members`` () =
@@ -441,3 +461,65 @@ module ContractsTests =
         Assert.Single issues |> ignore
         Assert.Equal("$", issues[0].Path)
         Assert.Equal("required", issues[0].Code)
+
+    [<Fact>]
+    let ``tool resolution returns no tools for an empty resolver list`` () =
+        let context =
+            ToolResolutionContext(RunId.New(), ValueNone, ValueNone, NullServiceProvider())
+
+        let tools =
+            (ToolResolution.resolveAllAsync
+                (Array.empty<IToolResolver> :> IReadOnlyList<IToolResolver>)
+                context
+                CancellationToken.None)
+                .Result
+
+        Assert.Empty tools
+
+    [<Fact>]
+    let ``tool resolution rejects duplicate name and major version identities case insensitively`` () =
+        let first =
+            createTestTool "tool.read" "1.0.0" ApprovalMode.Never ValueNone
+            |> ResolvedTool.Create
+
+        let second =
+            createTestTool "tool.read" "1.2.0" ApprovalMode.Never ValueNone
+            |> ResolvedTool.Create
+
+        let resolver = StaticToolResolver([| first; second |]) :> IToolResolver
+
+        let context =
+            ToolResolutionContext(RunId.New(), ValueNone, ValueNone, NullServiceProvider())
+
+        let ex =
+            Assert.Throws<AggregateException>(fun () ->
+                (ToolResolution.resolveAllAsync
+                    ([| resolver |] :> IReadOnlyList<IToolResolver>)
+                    context
+                    CancellationToken.None)
+                    .Result
+                |> ignore)
+
+        Assert.Contains("Duplicate tool identity 'tool.read' with major version '1'", ex.InnerException.Message)
+
+    [<Fact>]
+    let ``static tool resolver snapshots the supplied tool list`` () =
+        let first =
+            createTestTool "tool.read" "1.0.0" ApprovalMode.Never ValueNone
+            |> ResolvedTool.Create
+
+        let second =
+            createTestTool "tool.write" "1.0.0" ApprovalMode.Never ValueNone
+            |> ResolvedTool.Create
+
+        let mutable source = [| first |]
+        let resolver = StaticToolResolver(source) :> IToolResolver
+        source <- [| second |]
+
+        let context =
+            ToolResolutionContext(RunId.New(), ValueNone, ValueNone, NullServiceProvider())
+
+        let tools = resolver.ResolveAsync(context, CancellationToken.None).Result
+
+        Assert.Single tools |> ignore
+        Assert.Equal("tool.read", tools[0].Name.Value)
