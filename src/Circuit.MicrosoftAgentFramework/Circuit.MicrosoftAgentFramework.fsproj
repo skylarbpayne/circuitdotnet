@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="MafOptions.fs" />
+    <Compile Include="MafSkills.fs" />
     <Compile Include="MafSessions.fs" />
     <Compile Include="MafAgentFactory.fs" />
     <Compile Include="MafErrors.fs" />

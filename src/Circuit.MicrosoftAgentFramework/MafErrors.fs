@@ -6,6 +6,7 @@ open System
 open System.Collections.Frozen
 open System.Collections.Generic
 open System.Text.Json
+open System.Text.RegularExpressions
 open System.Threading
 open Circuit.Core
 open Microsoft.Extensions.AI
@@ -46,6 +47,16 @@ module internal MafErrors =
 
     let skillFailure runId message innerException =
         createFailure CircuitFailureCode.Skill runId ValueNone message ValueNone innerException
+
+    let sanitizeModelVisibleMessage (defaultMessage: string) (message: string) =
+        if String.IsNullOrWhiteSpace message then
+            defaultMessage
+        elif message.IndexOfAny([| '\r'; '\n' |]) >= 0 then
+            defaultMessage
+        elif Regex.IsMatch(message, "(^|[\\s(])([A-Za-z]:\\\\|/)") then
+            defaultMessage
+        else
+            message
 
     let checkpointMismatchFailure runId message =
         createFailure CircuitFailureCode.CheckpointMismatch runId ValueNone message ValueNone ValueNone

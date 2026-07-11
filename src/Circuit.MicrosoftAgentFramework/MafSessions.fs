@@ -31,6 +31,18 @@ module internal MafSessionContracts =
     let private appendPart (builder: StringBuilder) (name: string) (value: string) =
         builder.Append(name).Append('=').Append(value).Append('\n') |> ignore
 
+    let private sortStringsOrdinal (values: seq<string>) =
+        values
+        |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right))
+
+    let private sortMetadataOrdinal (entries: seq<KeyValuePair<string, string>>) =
+        entries
+        |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left.Key, right.Key))
+
+    let private sortPropertiesOrdinal (entries: seq<KeyValuePair<string, obj>>) =
+        entries
+        |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left.Key, right.Key))
+
     let private computeFingerprint (configure: StringBuilder -> unit) =
         let builder = StringBuilder()
         configure builder
@@ -49,6 +61,37 @@ module internal MafSessionContracts =
         else
             dictionary.ToFrozenDictionary(StringComparer.Ordinal) :> IReadOnlyDictionary<string, string>
 
+    let private appendBytesFingerprint (builder: StringBuilder) (kind: string) (bytes: byte[]) =
+        appendPart builder "payloadKind" kind
+        appendPart builder "payloadLength" (bytes.LongLength.ToString())
+        appendPart builder "payloadSha256" (SHA256.HashData(bytes) |> Convert.ToHexStringLower)
+
+    let private appendStaticResourceFingerprint (builder: StringBuilder) (resource: SkillResource) =
+        if not resource.IsDynamic then
+            match resource.StaticValue with
+            | :? string as text -> text |> Encoding.UTF8.GetBytes |> appendBytesFingerprint builder "text"
+            | :? (byte[]) as bytes -> appendBytesFingerprint builder "bytes" bytes
+            | :? JsonElement as element ->
+                element.GetRawText()
+                |> Encoding.UTF8.GetBytes
+                |> appendBytesFingerprint builder "json"
+            | :? JsonDocument as document ->
+                document.RootElement.GetRawText()
+                |> Encoding.UTF8.GetBytes
+                |> appendBytesFingerprint builder "json"
+            | value when not (isNull value) ->
+                try
+                    JsonSerializer.SerializeToUtf8Bytes(value, value.GetType())
+                    |> appendBytesFingerprint builder $"json:{value.GetType().FullName}"
+                with _ ->
+                    let fallback = value.ToString()
+                    let text = if isNull fallback then String.Empty else fallback
+
+                    text
+                    |> Encoding.UTF8.GetBytes
+                    |> appendBytesFingerprint builder $"stringified:{value.GetType().FullName}"
+            | _ -> ()
+
     let createSessionMetadata (bindingFingerprint: string) =
         freezeMetadata [ KeyValuePair(SessionBindingMetadataKey, bindingFingerprint) ]
 
@@ -66,13 +109,37 @@ module internal MafSessionContracts =
                  | ValueSome value -> value
                  | ValueNone -> "")
 
-            for toolTag in agent.ToolTags |> Seq.sort do
+            for toolTag in sortStringsOrdinal agent.ToolTags do
                 appendPart builder "toolTag" toolTag
 
             for skill in agent.Skills do
-                appendPart builder "skill" $"{skill.Id.Value}@{skill.Version}"
+                appendPart builder "skillId" skill.Id.Value
+                appendPart builder "skillVersion" (skill.Version.ToString())
+                appendPart builder "skillDescription" skill.Description
+                appendPart builder "skillSourceKind" (skill.Source.Kind.ToString())
 
-            for entry in agent.Metadata |> Seq.sortBy _.Key do
+                for fileRoot in sortStringsOrdinal skill.Source.FileRoots do
+                    appendPart builder "skillFileRoot" fileRoot
+
+                appendPart builder "skillInstructions" skill.Source.Instructions
+
+                for resource in skill.Source.Resources do
+                    appendPart builder "skillResourceName" resource.Name
+                    appendPart builder "skillResourceDescription" resource.Description
+                    appendPart builder "skillResourceDynamic" (resource.IsDynamic.ToString())
+                    appendStaticResourceFingerprint builder resource
+
+                for script in skill.Source.Scripts do
+                    appendPart builder "skillScriptName" script.Name
+                    appendPart builder "skillScriptDescription" script.Description
+
+                    for entry in sortMetadataOrdinal script.Metadata do
+                        appendPart builder "skillScriptMetadata" $"{entry.Key}={entry.Value}"
+
+                for entry in sortMetadataOrdinal skill.Metadata do
+                    appendPart builder "skillMetadata" $"{entry.Key}={entry.Value}"
+
+            for entry in sortMetadataOrdinal agent.Metadata do
                 appendPart builder "metadata" $"{entry.Key}={entry.Value}")
 
     let private signatureFingerprint<'Input, 'Output> (signature: Signature<'Input, 'Output>) =
@@ -108,14 +175,52 @@ module internal MafSessionContracts =
                 appendPart builder "toolInputSchema" (tool.Tool.InputSchema.ToJsonString())
                 appendPart builder "toolOutputSchema" (tool.Tool.OutputSchema.ToJsonString())
 
-                for tag in tool.Tags |> Seq.sort do
+                for tag in sortStringsOrdinal tool.Tags do
                     appendPart builder "toolTag" tag
 
             for skill in
                 skills
                 |> Seq.sortBy (fun skill -> skill.Reference.Id.Value, skill.Reference.Version) do
                 appendPart builder "skillId" skill.Reference.Id.Value
-                appendPart builder "skillVersion" (skill.Reference.Version.ToString()))
+                appendPart builder "skillVersion" (skill.Reference.Version.ToString())
+                appendPart builder "skillDescription" skill.Reference.Description
+                appendPart builder "skillSourceKind" (skill.Reference.Source.Kind.ToString())
+
+                for fileRoot in sortStringsOrdinal skill.Reference.Source.FileRoots do
+                    appendPart builder "skillFileRoot" fileRoot
+
+                appendPart builder "skillInstructions" skill.Reference.Source.Instructions
+
+                for resource in skill.Reference.Source.Resources do
+                    appendPart builder "skillResourceName" resource.Name
+                    appendPart builder "skillResourceDescription" resource.Description
+                    appendPart builder "skillResourceDynamic" (resource.IsDynamic.ToString())
+                    appendStaticResourceFingerprint builder resource
+
+                for script in skill.Reference.Source.Scripts do
+                    appendPart builder "skillScriptName" script.Name
+                    appendPart builder "skillScriptDescription" script.Description
+
+                    for entry in sortMetadataOrdinal script.Metadata do
+                        appendPart builder "skillScriptMetadata" $"{entry.Key}={entry.Value}"
+
+                for entry in sortMetadataOrdinal skill.Reference.Metadata do
+                    appendPart builder "skillMetadata" $"{entry.Key}={entry.Value}"
+
+                match
+                    skill.TryGetProperty<MafSkillAdapter.MafPreparedFileSkills>(MafSkillAdapterProperties.FileSkills)
+                with
+                | ValueSome preparedFileSkills ->
+                    for snapshot in
+                        preparedFileSkills.Snapshots.Values
+                        |> Seq.sortWith (fun left right ->
+                            StringComparer.Ordinal.Compare(left.CanonicalRoot, right.CanonicalRoot)) do
+                        appendPart builder "skillFileSnapshot" snapshot.ManifestFingerprint
+                | ValueNone -> ()
+
+                for entry in sortPropertiesOrdinal skill.Properties do
+                    if not (StringComparer.Ordinal.Equals(entry.Key, MafSkillAdapterProperties.FileSkills)) then
+                        appendPart builder "skillProperty" $"{entry.Key}:{entry.Value.GetType().FullName}")
 
     let createSessionBinding<'Input, 'Output>
         (runContext: RunContext)

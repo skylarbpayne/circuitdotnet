@@ -1,9 +1,14 @@
+#nowarn "57"
+
 namespace Circuit.MicrosoftAgentFramework.Tests
 
 open System
+open System.Collections.Frozen
 open System.Collections.Generic
 open System.ComponentModel.DataAnnotations
+open System.IO
 open System.Reflection
+open System.Text
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Text.RegularExpressions
@@ -100,6 +105,14 @@ type ThrowingInputEnvelopeConverter() =
     override _.Write(_writer, _value, _options) =
         raise (InvalidOperationException("converter-secret: write should not be exposed"))
 
+type ThrowingTestOutputConverter(secret: string) =
+    inherit JsonConverter<TestOutput>()
+
+    override _.Read(_reader, _typeToConvert, _options) = raise (JsonException(secret))
+
+    override _.Write(writer, value, options) =
+        JsonSerializer.Serialize(writer, value.Text, options)
+
 type CancellingInputEnvelopeConverter(cancellationSource: CancellationTokenSource) =
     inherit JsonConverter<TestInput>()
 
@@ -117,6 +130,27 @@ type StubToolApprovalPolicy(result: bool) =
 type NullServiceProvider() =
     interface IServiceProvider with
         member _.GetService(_serviceType) = null
+
+type DummyAgentSession() =
+    inherit AgentSession()
+
+type DummyAIAgent() =
+    inherit AIAgent()
+
+    override _.CreateSessionCoreAsync(_cancellationToken) =
+        raise (InvalidOperationException("This test agent does not create sessions."))
+
+    override _.SerializeSessionCoreAsync(_session, _options, _cancellationToken) =
+        raise (InvalidOperationException("This test agent does not serialize sessions."))
+
+    override _.DeserializeSessionCoreAsync(_element, _options, _cancellationToken) =
+        raise (InvalidOperationException("This test agent does not deserialize sessions."))
+
+    override _.RunCoreAsync(_messages, _session, _options, _cancellationToken) =
+        raise (InvalidOperationException("This test agent does not execute runs."))
+
+    override _.RunCoreStreamingAsync(_messages, _session, _options, _cancellationToken) =
+        raise (InvalidOperationException("This test agent does not execute streaming runs."))
 
 type ArrayAsyncEnumerable<'T>(items: 'T[]) =
     interface IAsyncEnumerable<'T> with
@@ -380,9 +414,9 @@ module private Helpers =
                     | :? ToolApprovalRequestContent as approvalRequest -> Some approvalRequest
                     | _ -> None))
 
-    let buildSessionAgent (runtime: MafRuntime) agent =
+    let buildSessionAgent (runtime: MafRuntime) agent : AIAgent =
         match (runtime.BuildSessionAgentAsync (RunId.New()) agent CancellationToken.None).Result with
-        | Ok sessionAgent -> sessionAgent
+        | Ok sessionAgent -> sessionAgent.Agent
         | Error failure -> failwith failure.Message
 
     let resolveSingleMappedTool (runtime: MafRuntime) agent runOptions =
@@ -794,6 +828,126 @@ module MafRuntimeTests =
         Assert.False(result.Result.IsSuccess)
         Assert.Equal(CircuitFailureCode.Cancelled, result.Result.Failure.Code)
         Assert.True(fake.SawCancellation)
+
+    [<Fact>]
+    let ``provider failures are sanitized before reaching public failures and observer events`` () =
+        let observer = RecordingObserver()
+
+        let fake =
+            new FakeChatClient(
+                (fun _messages _options _ct ->
+                    raise (InvalidOperationException("provider-secret /tmp/provider-secret-path"))),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime = createRuntime fake None [| observer :> IRunObserver |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Follow directions.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "provider-secret"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Provider, result.Result.Failure.Code)
+        Assert.Equal("The provider request failed.", result.Result.Failure.Message)
+        Assert.DoesNotContain("provider-secret", result.Result.Failure.Message)
+
+        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
+        |> ignore
+
+        Assert.Equal("The provider request failed.", observer.Events[0].Failure.Value.Message)
+        Assert.DoesNotContain("provider-secret", observer.Events[0].Failure.Value.Message)
+        Assert.Single(observer.Observations) |> ignore
+        Assert.Equal("The provider request failed.", observer.Observations[0].Failure.Value.Message)
+
+    [<Fact>]
+    let ``output decode failures are sanitized before reaching public failures and observer events`` () =
+        let observer = RecordingObserver()
+        let jsonOptions = CircuitJson.createOptions ()
+        jsonOptions.Converters.Add(ThrowingTestOutputConverter("decode-secret /tmp/decode-secret.json"))
+
+        let fake =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"ok\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime = createRuntime fake None [| observer :> IRunObserver |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Follow directions.",
+                    createSignatureWith<TestOutput> "signature.test" "1.0.0" jsonOptions,
+                    TestInput(Token = "decode-secret"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Decode, result.Result.Failure.Code)
+        Assert.Equal("The provider response could not be decoded.", result.Result.Failure.Message)
+        Assert.DoesNotContain("decode-secret", result.Result.Failure.Message)
+
+        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
+        |> ignore
+
+        Assert.Equal("The provider response could not be decoded.", observer.Events[0].Failure.Value.Message)
+        Assert.DoesNotContain("decode-secret", observer.Events[0].Failure.Value.Message)
+        Assert.Single(observer.Observations) |> ignore
+        Assert.Equal("The provider response could not be decoded.", observer.Observations[0].Failure.Value.Message)
+
+    [<Fact>]
+    let ``skill resolver failures are sanitized before reaching public failures and observer events`` () =
+        let observer = RecordingObserver()
+
+        let fake =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createRuntimeWith
+                (fun options ->
+                    options.SkillResolvers <-
+                        [| { new ISkillResolver with
+                               member _.ResolveAsync(_context, _cancellationToken) =
+                                   raise (InvalidOperationException("skill-secret /tmp/skill-secret-root/SKILL.md")) } |])
+                fake
+                None
+                [| observer |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Follow directions.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "skill-secret"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Skill, result.Result.Failure.Code)
+        Assert.Equal("Skill resolution failed.", result.Result.Failure.Message)
+        Assert.DoesNotContain("skill-secret", result.Result.Failure.Message)
+
+        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
+        |> ignore
+
+        Assert.Equal("Skill resolution failed.", observer.Events[0].Failure.Value.Message)
+        Assert.DoesNotContain("skill-secret", observer.Events[0].Failure.Value.Message)
+        Assert.Single(observer.Observations) |> ignore
+        Assert.Equal("Skill resolution failed.", observer.Observations[0].Failure.Value.Message)
 
     [<Fact>]
     let ``native only does not make a second model call`` () =
@@ -1290,7 +1444,7 @@ module MafRuntimeTests =
                 (fun options ->
                     options.SkillResolvers <-
                         [| { new ISkillResolver with
-                               member _.ResolveSkillsAsync(_context, _cancellationToken) =
+                               member _.ResolveAsync(_context, _cancellationToken) =
                                    use cancelled = new CancellationTokenSource()
                                    cancelled.Cancel()
 
@@ -2775,6 +2929,222 @@ module MafRuntimeTests =
         Assert.Equal(2, primary.ResponseCalls)
 
     [<Fact>]
+    let ``file skill session bindings change when resource or script snapshots change`` () =
+        let skillRoot =
+            Path.Combine(Path.GetTempPath(), $"circuit-maf-session-skill-{Guid.NewGuid():N}", "session-skill")
+
+        Directory.CreateDirectory(skillRoot) |> ignore
+
+        File.WriteAllText(
+            Path.Combine(skillRoot, "SKILL.md"),
+            "---\nname: session-skill\ndescription: Session skill\n---\nUse the session skill.\n"
+        )
+
+        let referencesDirectory = Path.Combine(skillRoot, "references")
+        Directory.CreateDirectory(referencesDirectory) |> ignore
+
+        let guidePath = Path.Combine(referencesDirectory, "guide.md")
+        let scriptPath = Path.Combine(skillRoot, "run.py")
+        File.WriteAllText(guidePath, "Guide text")
+        File.WriteAllText(scriptPath, "print('safe')")
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"ok\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.session", "1.0.0", "Session skill", SkillSource.CreateFile(skillRoot))
+
+            let agent =
+                AgentDefinition.Create(
+                    "agent.skill.session",
+                    "1.0.0",
+                    "Agent Skill Session",
+                    "Use the available skills.",
+                    ValueNone,
+                    Seq.empty,
+                    [| skillReference |],
+                    Seq.empty
+                )
+
+            let runtime =
+                createRuntimeWith
+                    (fun options ->
+                        options.SkillResolvers <-
+                            [| StaticSkillResolver([| ResolvedSkill.Create(skillReference) |]) :> ISkillResolver |])
+                    primary
+                    None
+                    Array.empty<IRunObserver>
+
+            let signature = createSignature<TestOutput> ()
+
+            let createRestoredSession token =
+                let first =
+                    runtime
+                        .RunAsync(
+                            agent,
+                            signature,
+                            TestInput(Token = token),
+                            createRunOptions None StructuredOutputPolicy.NativeOnly,
+                            CancellationToken.None
+                        )
+                        .Result
+
+                let session = first.Session |> ValueOption.get
+
+                let serialized =
+                    runtime.SerializeSessionAsync(agent, session, CancellationToken.None).Result
+
+                runtime.DeserializeSessionAsync(agent, serialized, CancellationToken.None).Result
+
+            let assertCheckpointMismatch token restoredSession =
+                let callsBefore = primary.ResponseCalls
+
+                let result =
+                    runtime
+                        .RunAsync(
+                            agent,
+                            signature,
+                            TestInput(Token = token),
+                            createRunOptionsWith (Some restoredSession) None None StructuredOutputPolicy.NativeOnly,
+                            CancellationToken.None
+                        )
+                        .Result
+
+                Assert.False(result.Result.IsSuccess)
+                Assert.Equal(CircuitFailureCode.CheckpointMismatch, result.Result.Failure.Code)
+                Assert.Equal(callsBefore, primary.ResponseCalls)
+
+            let mutatedSession = createRestoredSession "mutated-session"
+            File.WriteAllText(guidePath, "Guide text changed")
+            assertCheckpointMismatch "mutated-resource" mutatedSession
+
+            File.WriteAllText(guidePath, "Guide text")
+            let addedSession = createRestoredSession "added-session"
+            let addedResourcePath = Path.Combine(skillRoot, "notes.md")
+            File.WriteAllText(addedResourcePath, "Additional note")
+            assertCheckpointMismatch "added-resource" addedSession
+
+            File.Delete(addedResourcePath)
+            let removedSession = createRestoredSession "removed-session"
+            File.Delete(scriptPath)
+            assertCheckpointMismatch "removed-script" removedSession
+        finally
+            let parent = Path.GetDirectoryName(skillRoot)
+
+            if Directory.Exists(parent) then
+                Directory.Delete(parent, true)
+
+    [<Fact>]
+    let ``inline static skill resource payload changes invalidate restored sessions`` () =
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"ok\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let mutable guideText = "Guide v1"
+        let mutable archiveBytes = Encoding.UTF8.GetBytes("Archive v1")
+
+        let createSkillReference () =
+            SkillReference.Create(
+                "skill.inline.session",
+                "1.0.0",
+                "Inline session skill",
+                SkillSource.CreateInline(
+                    "Use the inline skill.",
+                    [| SkillResource.Create("guide.txt", box guideText, "Guide")
+                       SkillResource.Create("archive.bin", box archiveBytes, "Archive") |],
+                    Seq.empty
+                )
+            )
+
+        let createAgent () =
+            let skillReference = createSkillReference ()
+
+            AgentDefinition.Create(
+                "agent.inline.skill.session",
+                "1.0.0",
+                "Agent Inline Skill Session",
+                "Use the available skills.",
+                ValueNone,
+                Seq.empty,
+                [| skillReference |],
+                Seq.empty
+            )
+
+        let runtime =
+            createRuntimeWith
+                (fun options ->
+                    options.SkillResolvers <-
+                        [| DelegateSkillResolver(
+                               Func<SkillResolutionContext, CancellationToken, ValueTask<IReadOnlyList<ResolvedSkill>>>
+                                   (fun _ _ ->
+                                       let skillReference = createSkillReference ()
+
+                                       ValueTask<IReadOnlyList<ResolvedSkill>>(
+                                           [| ResolvedSkill.Create(skillReference) |] :> IReadOnlyList<ResolvedSkill>
+                                       ))
+                           )
+                           :> ISkillResolver |])
+                primary
+                None
+                Array.empty<IRunObserver>
+
+        let signature = createSignature<TestOutput> ()
+
+        let createRestoredSession token agent =
+            let first =
+                runtime
+                    .RunAsync(
+                        agent,
+                        signature,
+                        TestInput(Token = token),
+                        createRunOptions None StructuredOutputPolicy.NativeOnly,
+                        CancellationToken.None
+                    )
+                    .Result
+
+            let session = first.Session |> ValueOption.get
+
+            let serialized =
+                runtime.SerializeSessionAsync(agent, session, CancellationToken.None).Result
+
+            runtime.DeserializeSessionAsync(agent, serialized, CancellationToken.None).Result
+
+        let assertCheckpointMismatch token restoredSession agent =
+            let callsBefore = primary.ResponseCalls
+
+            let result =
+                runtime
+                    .RunAsync(
+                        agent,
+                        signature,
+                        TestInput(Token = token),
+                        createRunOptionsWith (Some restoredSession) None None StructuredOutputPolicy.NativeOnly,
+                        CancellationToken.None
+                    )
+                    .Result
+
+            Assert.False(result.Result.IsSuccess)
+            Assert.Equal(CircuitFailureCode.CheckpointMismatch, result.Result.Failure.Code)
+            Assert.Equal(callsBefore, primary.ResponseCalls)
+
+        let textAgent = createAgent ()
+        let textSession = createRestoredSession "inline-text" textAgent
+        guideText <- "Guide v2"
+        assertCheckpointMismatch "inline-text-mismatch" textSession (createAgent ())
+
+        guideText <- "Guide v1"
+        archiveBytes <- Encoding.UTF8.GetBytes("Archive v1")
+        let bytesSession = createRestoredSession "inline-bytes" (createAgent ())
+        archiveBytes <- Encoding.UTF8.GetBytes("Archive v2")
+        assertCheckpointMismatch "inline-bytes-mismatch" bytesSession (createAgent ())
+
+    [<Fact>]
     let ``streaming concurrency preserves run isolation and monotonic sequences`` () =
         let markerRegex = Regex("run-\\d+", RegexOptions.CultureInvariant)
 
@@ -2883,3 +3253,797 @@ module MafRuntimeTests =
             if index % 10 <> 0 then
                 Assert.Equal(RunEventKind.RunCompleted, events[events.Length - 1].Kind)
                 Assert.True(events[events.Length - 1].Value.IsSome)
+
+    let private createTempSkillRoot (name: string) (description: string) (body: string) =
+        let parent =
+            Path.Combine(Path.GetTempPath(), $"circuit-maf-skill-{Guid.NewGuid():N}")
+
+        let root = Path.Combine(parent, name)
+        Directory.CreateDirectory(root) |> ignore
+
+        File.WriteAllText(
+            Path.Combine(root, "SKILL.md"),
+            $"---\nname: {name}\ndescription: {description}\n---\n{body}\n"
+        )
+
+        root
+
+    let private deleteDirectory path =
+        if Directory.Exists path then
+            Directory.Delete(path, true)
+
+    let private createSkillAgent skillReference =
+        AgentDefinition.Create(
+            "agent.skill",
+            "1.0.0",
+            "Agent Skill",
+            "Use the available skills.",
+            ValueNone,
+            Seq.empty,
+            [| skillReference |],
+            Seq.empty
+        )
+
+    let private createApprovalMessage (approvalRequest: ToolApprovalRequestContent) =
+        let response = approvalRequest.CreateResponse(true, "approved")
+
+        ChatMessage(ChatRole.User, ResizeArray<AIContent>([ response :> AIContent ]) :> IList<AIContent>)
+
+    let private createSkillResolver skillReference =
+        StaticSkillResolver([| ResolvedSkill.Create(skillReference) |]) :> ISkillResolver
+
+    let private collectRequestStrings (request: SkillScriptRequest) =
+        seq {
+            match request.SkillRoot with
+            | ValueSome value -> yield value
+            | ValueNone -> ()
+
+            match request.ScriptPath with
+            | ValueSome value -> yield value
+            | ValueNone -> ()
+
+            yield request.Skill.Id.Value
+            yield request.Skill.Version.ToString()
+            yield request.Skill.Description
+            yield request.Skill.Source.Instructions
+
+            for fileRoot in request.Skill.Source.FileRoots do
+                yield fileRoot
+
+            for resource in request.Skill.Source.Resources do
+                yield resource.Name
+                yield resource.Description
+
+            for script in request.Skill.Source.Scripts do
+                yield script.Name
+                yield script.Description
+
+                for entry in script.Metadata do
+                    yield entry.Key
+                    yield entry.Value
+
+            for entry in request.Skill.Metadata do
+                yield entry.Key
+                yield entry.Value
+
+            yield request.Script.Name
+            yield request.Script.Description
+
+            for entry in request.Script.Metadata do
+                yield entry.Key
+                yield entry.Value
+        }
+        |> Seq.filter (String.IsNullOrEmpty >> not)
+        |> Seq.toArray
+
+    let private createSkillSourceContext () =
+        AgentSkillsSourceContext(DummyAIAgent(), DummyAgentSession())
+
+    let private createSkillProviderInvocation () =
+        AIContextProvider.InvokingContext(DummyAIAgent(), DummyAgentSession(), AIContext())
+
+    let private createSkillRunContext skillReference =
+        let agent = createSkillAgent skillReference
+        RunContext(RunId.New(), agent, agent.Id, agent.Version, RunOptions.Default)
+
+    let private loadSingleFileSkill options skillReference =
+        MafSkillAdapter.loadFileSkill
+            options
+            (createSkillRunContext skillReference)
+            skillReference
+            skillReference.Source.FileRoots[0]
+
+    let private disabledAgentFileScriptRunner =
+        AgentFileSkillScriptRunner(fun _skill _script _arguments _services _cancellationToken ->
+            Task.FromException<obj>(InvalidOperationException("Skill scripts are disabled.")))
+
+    [<Fact>]
+    let ``real maf file skills load content and resources through progressive disclosure`` () =
+        let skillRoot = createTempSkillRoot "inspect-skill" "Skill" "Use the skill."
+        let referencesDirectory = Path.Combine(skillRoot, "references")
+        Directory.CreateDirectory(referencesDirectory) |> ignore
+        File.WriteAllText(Path.Combine(referencesDirectory, "guide.md"), "Guide text")
+
+        try
+            let sourceOptions = AgentFileSkillsSourceOptions()
+
+            use source =
+                new AgentFileSkillsSource(skillRoot, disabledAgentFileScriptRunner, sourceOptions, null)
+
+            let fileSkill =
+                source.GetSkillsAsync(createSkillSourceContext (), CancellationToken.None).Result
+                |> Assert.Single
+                |> Assert.IsType<AgentFileSkill>
+
+            let content = fileSkill.GetContentAsync(CancellationToken.None).Result
+            Assert.Contains("Use the skill.", content)
+            Assert.Contains("<available_resources>", content)
+            Assert.Contains("references/guide.md", content)
+
+            let resource =
+                fileSkill.GetResourceAsync("references/guide.md", CancellationToken.None).Result
+
+            Assert.NotNull(resource)
+            Assert.Equal("Guide text", Assert.IsType<string>(resource.ReadAsync(null, CancellationToken.None).Result))
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``maf skill provider creation rejects escaping symlink resources before provider build`` () =
+        let skillRoot =
+            createTempSkillRoot "secure-skill" "Secure skill" "Use the secure skill."
+
+        let outsideRoot = Path.GetDirectoryName(skillRoot)
+        let outsideFile = Path.Combine(outsideRoot, "outside.md")
+        let outsideDirectory = Path.Combine(outsideRoot, "outside")
+        Directory.CreateDirectory(outsideDirectory) |> ignore
+        File.WriteAllText(outsideFile, "secret")
+        File.WriteAllText(Path.Combine(outsideDirectory, "secret.md"), "secret")
+
+        File.CreateSymbolicLink(Path.Combine(skillRoot, "linked.md"), outsideFile)
+        |> ignore
+
+        Directory.CreateSymbolicLink(Path.Combine(skillRoot, "linked-dir"), outsideDirectory)
+        |> ignore
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.secure", "1.0.0", "Secure skill", SkillSource.CreateFile(skillRoot))
+
+            let runContext = createSkillRunContext skillReference
+            let options = MafRuntimeOptions()
+
+            let ex =
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    MafSkillAdapter.createAttachment
+                        options
+                        runContext
+                        ([| ResolvedSkill.Create(skillReference) |] :> IReadOnlyList<ResolvedSkill>)
+                    |> ignore)
+
+            Assert.DoesNotContain(outsideFile, ex.ToString())
+            Assert.DoesNotContain(outsideDirectory, ex.ToString())
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``safe file skill resources snapshot in-root symlinks and ignore later swaps`` () =
+        if not (OperatingSystem.IsLinux()) then
+            ()
+        else
+            let skillRoot = createTempSkillRoot "linked-skill" "Skill" "Use the linked skill."
+            let referencesDirectory = Path.Combine(skillRoot, "references")
+            Directory.CreateDirectory(referencesDirectory) |> ignore
+
+            let targetFile = Path.Combine(referencesDirectory, "guide.md")
+            let linkedFile = Path.Combine(skillRoot, "linked.md")
+            File.WriteAllText(targetFile, "Guide text")
+            File.CreateSymbolicLink(linkedFile, targetFile) |> ignore
+
+            let outsideRoot = Path.GetDirectoryName(skillRoot)
+            let outsideFile = Path.Combine(outsideRoot, "outside-guide.md")
+            File.WriteAllText(outsideFile, "Outside")
+
+            try
+                let skillReference =
+                    SkillReference.Create("skill.linked", "1.0.0", "Linked skill", SkillSource.CreateFile(skillRoot))
+
+                let skill = loadSingleFileSkill (MafRuntimeOptions()) skillReference
+
+                let resource =
+                    skill.GetResourceAsync("linked.md", CancellationToken.None).AsTask().Result
+
+                Assert.NotNull(resource)
+
+                Assert.Equal(
+                    "Guide text",
+                    Assert.IsType<string>(resource.ReadAsync(null, CancellationToken.None).Result)
+                )
+
+                File.Delete(linkedFile)
+                File.CreateSymbolicLink(linkedFile, outsideFile) |> ignore
+
+                let reread =
+                    resource.ReadAsync(null, CancellationToken.None).GetAwaiter().GetResult()
+                    |> Assert.IsType<string>
+
+                Assert.Equal("Guide text", reread)
+                Assert.DoesNotContain("Outside", reread)
+            finally
+                deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``safe file skill resources keep snapshot content after original target disappears`` () =
+        if not (OperatingSystem.IsLinux()) then
+            ()
+        else
+            let skillRoot = createTempSkillRoot "broken-skill" "Skill" "Use the broken skill."
+            let referencesDirectory = Path.Combine(skillRoot, "references")
+            Directory.CreateDirectory(referencesDirectory) |> ignore
+
+            let targetFile = Path.Combine(referencesDirectory, "guide.md")
+            let linkedFile = Path.Combine(skillRoot, "linked.md")
+            File.WriteAllText(targetFile, "Guide text")
+            File.CreateSymbolicLink(linkedFile, targetFile) |> ignore
+
+            try
+                let skillReference =
+                    SkillReference.Create("skill.broken", "1.0.0", "Broken skill", SkillSource.CreateFile(skillRoot))
+
+                let skill = loadSingleFileSkill (MafRuntimeOptions()) skillReference
+
+                let resource =
+                    skill.GetResourceAsync("linked.md", CancellationToken.None).AsTask().Result
+
+                File.Delete(targetFile)
+
+                let reread =
+                    resource.ReadAsync(null, CancellationToken.None).GetAwaiter().GetResult()
+                    |> Assert.IsType<string>
+
+                Assert.Equal("Guide text", reread)
+            finally
+                deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``skill providers omit script tools and instructions when no runner is configured`` () =
+        let skillRoot = createTempSkillRoot "inspect-skill" "Skill" "Use the skill."
+        File.WriteAllText(Path.Combine(skillRoot, "run.py"), "print('hi')")
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.inspect", "1.0.0", "Inspect skill", SkillSource.CreateFile(skillRoot))
+
+            let agent = createSkillAgent skillReference
+
+            let runContext =
+                RunContext(RunId.New(), agent, agent.Id, agent.Version, RunOptions.Default)
+
+            let options = MafRuntimeOptions()
+
+            let attachment =
+                MafSkillAdapter.createAttachment
+                    options
+                    runContext
+                    ([| ResolvedSkill.Create(skillReference) |] :> IReadOnlyList<ResolvedSkill>)
+                |> ValueOption.get
+
+            let provider = MafSkillAdapter.getProviders (ValueSome attachment) |> Assert.Single
+
+            let aiContext =
+                provider.InvokingAsync(createSkillProviderInvocation (), CancellationToken.None).AsTask().Result
+
+            let toolNames = aiContext.Tools |> Seq.map _.Name |> Seq.toArray
+            Assert.Contains(AgentSkillsProvider.LoadSkillToolName, toolNames)
+            Assert.Contains(AgentSkillsProvider.ReadSkillResourceToolName, toolNames)
+            Assert.DoesNotContain(AgentSkillsProvider.RunSkillScriptToolName, toolNames)
+            Assert.DoesNotContain("run_skill_script", aiContext.Instructions)
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``configured skill script tools are approval-gated and invoke the configured runner`` () =
+        let skillRoot = createTempSkillRoot "inspect-skill" "Skill" "Use the skill."
+        let scriptPath = Path.Combine(skillRoot, "run.py")
+        File.WriteAllText(scriptPath, "print('hi')")
+
+        let mutable executions = 0
+        let mutable capturedRequest = ValueNone
+        let mutable capturedSnapshotRoot = ValueNone
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.inspect", "1.0.0", "Inspect skill", SkillSource.CreateFile(skillRoot))
+
+            let agent = createSkillAgent skillReference
+
+            let runContext =
+                RunContext(RunId.New(), agent, agent.Id, agent.Version, RunOptions.Default)
+
+            let options = MafRuntimeOptions()
+
+            options.SkillScriptRunner <-
+                ValueSome
+                    { new ISkillScriptRunner with
+                        member _.RunAsync(request, _cancellationToken) =
+                            executions <- executions + 1
+                            capturedRequest <- ValueSome request
+                            Task.FromResult(SkillScriptResult.Create(box "script-output")) }
+
+            let attachment =
+                MafSkillAdapter.createAttachment
+                    options
+                    runContext
+                    ([| ResolvedSkill.Create(skillReference) |] :> IReadOnlyList<ResolvedSkill>)
+                |> ValueOption.get
+
+            let provider = MafSkillAdapter.getProviders (ValueSome attachment) |> Assert.Single
+
+            let aiContext =
+                provider.InvokingAsync(createSkillProviderInvocation (), CancellationToken.None).AsTask().Result
+
+            let runScriptTool =
+                aiContext.Tools
+                |> Seq.find (fun tool ->
+                    StringComparer.Ordinal.Equals(tool.Name, AgentSkillsProvider.RunSkillScriptToolName))
+
+            Assert.Equal("ApprovalRequiredAIFunction", runScriptTool.GetType().Name)
+            Assert.Equal(0, executions)
+
+            let runScriptFunction = runScriptTool |> Assert.IsAssignableFrom<AIFunction>
+            let arguments = Dictionary<string, obj>()
+            arguments["skillName"] <- "inspect-skill"
+            arguments["scriptName"] <- "run.py"
+
+            use argumentDocument = JsonDocument.Parse("[\"hello\"]")
+            arguments["arguments"] <- argumentDocument.RootElement.Clone()
+
+            let result =
+                runScriptFunction.InvokeAsync(AIFunctionArguments(arguments), CancellationToken.None).AsTask().Result
+
+            let resultElement = Assert.IsType<JsonElement>(result)
+            Assert.Equal(JsonValueKind.String, resultElement.ValueKind)
+            Assert.Equal("script-output", resultElement.GetString())
+            Assert.Equal(1, executions)
+
+            match capturedRequest with
+            | ValueSome request ->
+                Assert.Equal("run.py", request.Script.Name)
+                Assert.True(request.SkillRoot.IsSome)
+                Assert.True(request.ScriptPath.IsSome)
+                Assert.NotEqual(ValueSome(Path.GetFullPath skillRoot), request.SkillRoot)
+                Assert.NotEqual(ValueSome(Path.GetFullPath scriptPath), request.ScriptPath)
+                Assert.True(Directory.Exists(request.SkillRoot.Value))
+                Assert.True(File.Exists(request.ScriptPath.Value))
+                Assert.Equal("print('hi')", File.ReadAllText(request.ScriptPath.Value))
+                Assert.True((request.Skill.Source.FileRoots |> Seq.toArray) = [| request.SkillRoot.Value |])
+
+                let requestStrings = collectRequestStrings request
+
+                let pathComparison =
+                    if OperatingSystem.IsWindows() then
+                        StringComparison.OrdinalIgnoreCase
+                    else
+                        StringComparison.Ordinal
+
+                Assert.DoesNotContain(
+                    requestStrings,
+                    fun value -> value.IndexOf(Path.GetFullPath skillRoot, pathComparison) >= 0
+                )
+
+                Assert.DoesNotContain(
+                    requestStrings,
+                    fun value -> value.IndexOf(Path.GetFullPath scriptPath, pathComparison) >= 0
+                )
+
+                if not (OperatingSystem.IsWindows()) then
+                    let expectedDirectoryMode =
+                        UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute
+
+                    let expectedFileMode = UnixFileMode.UserRead ||| UnixFileMode.UserWrite
+                    Assert.Equal(expectedDirectoryMode, File.GetUnixFileMode(request.SkillRoot.Value))
+                    Assert.Equal(expectedFileMode, File.GetUnixFileMode(request.ScriptPath.Value))
+
+                capturedSnapshotRoot <- request.SkillRoot
+                Assert.True(request.Arguments.HasValue)
+                Assert.Equal(1, request.Arguments.Value.GetArrayLength())
+
+                let argumentValue = request.Arguments.Value.EnumerateArray() |> Seq.exactlyOne
+                Assert.Equal("hello", argumentValue.GetString())
+            | ValueNone -> Assert.Fail("Expected the skill script runner to receive a request.")
+
+            (attachment :> IDisposable).Dispose()
+
+            match capturedSnapshotRoot with
+            | ValueSome snapshotRoot -> Assert.False(Directory.Exists snapshotRoot)
+            | ValueNone -> Assert.Fail("Expected a snapshot root path to be captured.")
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``safe file skill scripts use immutable snapshot paths after symlink swaps`` () =
+        if not (OperatingSystem.IsLinux()) then
+            ()
+        else
+            let skillRoot = createTempSkillRoot "script-skill" "Skill" "Use the script skill."
+            let scriptsDirectory = Path.Combine(skillRoot, "scripts")
+            Directory.CreateDirectory(scriptsDirectory) |> ignore
+
+            let targetScript = Path.Combine(scriptsDirectory, "run.py")
+            let linkedScript = Path.Combine(skillRoot, "run.py")
+            File.WriteAllText(targetScript, "print('safe')")
+            File.CreateSymbolicLink(linkedScript, targetScript) |> ignore
+
+            let outsideRoot = Path.GetDirectoryName(skillRoot)
+            let outsideScript = Path.Combine(outsideRoot, "outside-run.py")
+            File.WriteAllText(outsideScript, "print('outside')")
+
+            let mutable executions = 0
+            let mutable capturedRequest = ValueNone
+
+            try
+                let skillReference =
+                    SkillReference.Create("skill.script", "1.0.0", "Script skill", SkillSource.CreateFile(skillRoot))
+
+                let options = MafRuntimeOptions()
+
+                options.SkillScriptRunner <-
+                    ValueSome
+                        { new ISkillScriptRunner with
+                            member _.RunAsync(request, _cancellationToken) =
+                                executions <- executions + 1
+                                capturedRequest <- ValueSome request
+                                Task.FromResult(SkillScriptResult.Create(box "script-output")) }
+
+                let skill = loadSingleFileSkill options skillReference
+
+                let script = skill.GetScriptAsync("run.py", CancellationToken.None).AsTask().Result
+
+                let initialResult =
+                    script.RunAsync(skill, Nullable(), null, CancellationToken.None).GetAwaiter().GetResult()
+
+                Assert.Equal("script-output", Assert.IsType<string>(initialResult))
+                Assert.Equal(1, executions)
+
+                let initialSnapshotPath =
+                    match capturedRequest with
+                    | ValueSome request ->
+                        Assert.True(request.ScriptPath.IsSome)
+                        Assert.NotEqual(ValueSome(Path.GetFullPath targetScript), request.ScriptPath)
+                        request.ScriptPath.Value
+                    | ValueNone ->
+                        Assert.Fail("Expected an initial script invocation.")
+                        String.Empty
+
+                File.Delete(linkedScript)
+                File.CreateSymbolicLink(linkedScript, outsideScript) |> ignore
+
+                let rerunResult =
+                    script.RunAsync(skill, Nullable(), null, CancellationToken.None).GetAwaiter().GetResult()
+
+                Assert.Equal("script-output", Assert.IsType<string>(rerunResult))
+                Assert.Equal(2, executions)
+
+                match capturedRequest with
+                | ValueSome request ->
+                    Assert.Equal(ValueSome initialSnapshotPath, request.ScriptPath)
+                    Assert.DoesNotContain(outsideScript, request.ScriptPath.Value)
+                | ValueNone -> Assert.Fail("Expected the snapshot-backed script invocation.")
+            finally
+                deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``safe file skill scripts keep snapshot content after original target disappears`` () =
+        if not (OperatingSystem.IsLinux()) then
+            ()
+        else
+            let skillRoot =
+                createTempSkillRoot "broken-script-skill" "Skill" "Use the script skill."
+
+            let scriptsDirectory = Path.Combine(skillRoot, "scripts")
+            Directory.CreateDirectory(scriptsDirectory) |> ignore
+
+            let targetScript = Path.Combine(scriptsDirectory, "run.py")
+            let linkedScript = Path.Combine(skillRoot, "run.py")
+            File.WriteAllText(targetScript, "print('safe')")
+            File.CreateSymbolicLink(linkedScript, targetScript) |> ignore
+
+            let mutable executions = 0
+
+            try
+                let skillReference =
+                    SkillReference.Create(
+                        "skill.broken-script",
+                        "1.0.0",
+                        "Broken script skill",
+                        SkillSource.CreateFile(skillRoot)
+                    )
+
+                let options = MafRuntimeOptions()
+
+                options.SkillScriptRunner <-
+                    ValueSome
+                        { new ISkillScriptRunner with
+                            member _.RunAsync(_request, _cancellationToken) =
+                                executions <- executions + 1
+                                Task.FromResult(SkillScriptResult.Create(box "script-output")) }
+
+                let skill = loadSingleFileSkill options skillReference
+
+                let script = skill.GetScriptAsync("run.py", CancellationToken.None).AsTask().Result
+
+                File.Delete(targetScript)
+
+                let result =
+                    script.RunAsync(skill, Nullable(), null, CancellationToken.None).GetAwaiter().GetResult()
+
+                Assert.Equal("script-output", Assert.IsType<string>(result))
+                Assert.Equal(1, executions)
+            finally
+                deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``snapshot capture rejects symlink swaps between validation and open`` () =
+        if not (OperatingSystem.IsLinux()) then
+            ()
+        else
+            let skillRoot = createTempSkillRoot "swap-skill" "Skill" "Use the swap skill."
+            let referencesDirectory = Path.Combine(skillRoot, "references")
+            Directory.CreateDirectory(referencesDirectory) |> ignore
+
+            let targetFile = Path.Combine(referencesDirectory, "guide.md")
+            let linkedFile = Path.Combine(skillRoot, "linked.md")
+            File.WriteAllText(targetFile, "Guide text")
+            File.CreateSymbolicLink(linkedFile, targetFile) |> ignore
+
+            let outsideRoot = Path.GetDirectoryName(skillRoot)
+            let outsideFile = Path.Combine(outsideRoot, "outside-guide.md")
+            File.WriteAllText(outsideFile, "Outside")
+
+            try
+                let canonicalRoot = SkillPathSecurity.validateSkillRootPath skillRoot
+
+                let hooks: MafSkillAdapter.SnapshotCaptureHooks =
+                    { BeforeOpen =
+                        ValueSome(
+                            Action<MafSkillAdapter.SnapshotCaptureEntryState>(fun _ ->
+                                File.Delete(linkedFile)
+                                File.CreateSymbolicLink(linkedFile, outsideFile) |> ignore)
+                        ) }
+
+                let ex =
+                    Assert.Throws<InvalidOperationException>(fun () ->
+                        MafSkillAdapter.SnapshotCapture.readTextFileWithHooks
+                            canonicalRoot
+                            linkedFile
+                            "linked.md"
+                            hooks
+                        |> ignore)
+
+                Assert.DoesNotContain(outsideFile, ex.ToString())
+            finally
+                deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``materialized snapshots report cleanup success and remove private roots`` () =
+        let skillRoot = createTempSkillRoot "cleanup-skill" "Skill" "Use the cleanup skill."
+        File.WriteAllText(Path.Combine(skillRoot, "run.py"), "print('hi')")
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.cleanup", "1.0.0", "Cleanup skill", SkillSource.CreateFile(skillRoot))
+
+            let preparedSkill =
+                MafSkillAdapter.prepareResolvedSkill (ResolvedSkill.Create(skillReference))
+
+            let preparedFileSkills =
+                preparedSkill.TryGetProperty<MafSkillAdapter.MafPreparedFileSkills>(
+                    MafSkillAdapterProperties.FileSkills
+                )
+                |> ValueOption.get
+
+            let snapshot = preparedFileSkills.Snapshots.Values |> Seq.exactlyOne
+
+            let materializedRoot =
+                match snapshot.TryResolveScriptLocation("run.py") with
+                | ValueSome(struct (root, _)) ->
+                    Assert.True(Directory.Exists root)
+                    root
+                | ValueNone ->
+                    Assert.Fail("Expected a materialized snapshot script location.")
+                    String.Empty
+
+            (preparedFileSkills :> IDisposable).Dispose()
+
+            Assert.Equal(MafSkillAdapter.SnapshotCleanupResult.Deleted, snapshot.CleanupResult)
+            Assert.False(Directory.Exists materializedRoot)
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``materialized snapshot cleanup failures are sanitized and non-fatal`` () =
+        let skillRoot =
+            createTempSkillRoot "cleanup-failure-skill" "Skill" "Use the cleanup failure skill."
+
+        let canonicalRoot = SkillPathSecurity.validateSkillRootPath skillRoot
+        let runPath = Path.Combine(skillRoot, "run.py")
+        File.WriteAllText(runPath, "print('hi')")
+
+        let fileContents =
+            Dictionary<string, string>(seq [ KeyValuePair("run.py", "print('hi')") ], StringComparer.Ordinal)
+            |> fun value -> value.ToFrozenDictionary(StringComparer.Ordinal) :> IReadOnlyDictionary<string, string>
+
+        let resolvedPaths =
+            Dictionary<string, string>(
+                seq
+                    [ KeyValuePair("SKILL.md", Path.Combine(skillRoot, "SKILL.md"))
+                      KeyValuePair("run.py", runPath) ],
+                StringComparer.Ordinal
+            )
+            |> fun value -> value.ToFrozenDictionary(StringComparer.Ordinal) :> IReadOnlyDictionary<string, string>
+
+        let emptyResourceNames =
+            HashSet<string>(StringComparer.Ordinal).ToFrozenSet(StringComparer.Ordinal) :> IReadOnlySet<string>
+
+        let scriptNames =
+            HashSet<string>(seq [ "run.py" ], StringComparer.Ordinal).ToFrozenSet(StringComparer.Ordinal)
+            :> IReadOnlySet<string>
+
+        let mutable createdRoot = String.Empty
+
+        let snapshot =
+            new MafSkillAdapter.MafFileSkillSnapshot(
+                canonicalRoot,
+                File.ReadAllText(Path.Combine(skillRoot, "SKILL.md")),
+                fileContents,
+                resolvedPaths,
+                emptyResourceNames,
+                scriptNames,
+                "fingerprint",
+                Func<string>(fun () ->
+                    createdRoot <- Path.Combine(Path.GetTempPath(), $"circuit-maf-cleanup-failure-{Guid.NewGuid():N}")
+                    Directory.CreateDirectory(createdRoot) |> ignore
+                    createdRoot),
+                Action<string>(fun _ -> raise (IOException($"super-secret cleanup failure at {skillRoot}")))
+            )
+
+        let prepared =
+            new MafSkillAdapter.MafPreparedFileSkills(
+                Dictionary<string, MafSkillAdapter.MafFileSkillSnapshot>(
+                    seq [ KeyValuePair(canonicalRoot, snapshot) ],
+                    SkillPathSecurity.PathComparer
+                )
+                    .ToFrozenDictionary(SkillPathSecurity.PathComparer)
+                :> IReadOnlyDictionary<string, MafSkillAdapter.MafFileSkillSnapshot>
+            )
+
+        try
+            match snapshot.TryResolveScriptLocation("run.py") with
+            | ValueSome _ -> ()
+            | ValueNone -> Assert.Fail("Expected a materialized snapshot before cleanup.")
+
+            let ex = Record.Exception(fun () -> (prepared :> IDisposable).Dispose())
+            Assert.Null(ex)
+
+            match snapshot.CleanupResult with
+            | MafSkillAdapter.SnapshotCleanupResult.Failed reason ->
+                Assert.Equal("IOException", reason)
+                Assert.DoesNotContain(skillRoot, reason)
+            | other -> Assert.Fail($"Expected a sanitized cleanup failure, got {other}.")
+
+            Assert.True(Directory.Exists createdRoot)
+        finally
+            deleteDirectory createdRoot
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``skill script failures are sanitized before becoming model-visible output`` () =
+        let skillRoot = createTempSkillRoot "inspect-skill" "Skill" "Use the skill."
+        let scriptPath = Path.Combine(skillRoot, "run.py")
+        File.WriteAllText(scriptPath, "print('hi')")
+
+        try
+            let skillReference =
+                SkillReference.Create("skill.inspect", "1.0.0", "Inspect skill", SkillSource.CreateFile(skillRoot))
+
+            let agent = createSkillAgent skillReference
+
+            let runContext =
+                RunContext(RunId.New(), agent, agent.Id, agent.Version, RunOptions.Default)
+
+            let options = MafRuntimeOptions()
+
+            options.SkillScriptRunner <-
+                ValueSome
+                    { new ISkillScriptRunner with
+                        member _.RunAsync(_request, _cancellationToken) =
+                            Task.FromException<SkillScriptResult>(
+                                InvalidOperationException($"super-secret failure at {Path.GetFullPath scriptPath}")
+                            ) }
+
+            let attachment =
+                MafSkillAdapter.createAttachment
+                    options
+                    runContext
+                    ([| ResolvedSkill.Create(skillReference) |] :> IReadOnlyList<ResolvedSkill>)
+                |> ValueOption.get
+
+            let provider = MafSkillAdapter.getProviders (ValueSome attachment) |> Assert.Single
+
+            let aiContext =
+                provider.InvokingAsync(createSkillProviderInvocation (), CancellationToken.None).AsTask().Result
+
+            let runScriptFunction =
+                aiContext.Tools
+                |> Seq.find (fun tool ->
+                    StringComparer.Ordinal.Equals(tool.Name, AgentSkillsProvider.RunSkillScriptToolName))
+                |> Assert.IsAssignableFrom<AIFunction>
+
+            let arguments = Dictionary<string, obj>()
+            arguments["skillName"] <- "inspect-skill"
+            arguments["scriptName"] <- "run.py"
+
+            let ex =
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    runScriptFunction
+                        .InvokeAsync(AIFunctionArguments(arguments), CancellationToken.None)
+                        .AsTask()
+                        .GetAwaiter()
+                        .GetResult()
+                    |> ignore)
+
+            Assert.DoesNotContain("super-secret", ex.Message)
+            Assert.DoesNotContain(Path.GetFullPath scriptPath, ex.Message)
+            Assert.Equal("Skill script execution failed.", ex.Message)
+        finally
+            deleteDirectory skillRoot
+
+    [<Fact>]
+    let ``duplicate skill sources report a deterministic conflict`` () =
+        let skillRoot1 =
+            createTempSkillRoot "duplicate-skill" "Duplicate skill" "Use the first skill."
+
+        let skillRoot2 =
+            createTempSkillRoot "duplicate-skill" "Duplicate skill" "Use the second skill."
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "completed")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let reference1 =
+            SkillReference.Create("skill.duplicate", "1.0.0", "Duplicate skill", SkillSource.CreateFile(skillRoot1))
+
+        let reference2 =
+            SkillReference.Create("skill.duplicate", "1.0.0", "Duplicate skill", SkillSource.CreateFile(skillRoot2))
+
+        let runtime =
+            createRuntimeWith
+                (fun options ->
+                    options.SkillResolvers <-
+                        [| StaticSkillResolver([| ResolvedSkill.Create(reference1) |]) :> ISkillResolver
+                           StaticSkillResolver([| ResolvedSkill.Create(reference2) |]) :> ISkillResolver |])
+                primary
+                None
+                Array.empty<IRunObserver>
+
+        let result =
+            runtime
+                .RunAsync(
+                    createSkillAgent reference1,
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "duplicate-skills"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        try
+            Assert.False(result.Result.IsSuccess)
+            Assert.Equal(CircuitFailureCode.Skill, result.Result.Failure.Code)
+
+            Assert.Equal("Skill resolution failed.", result.Result.Failure.Message)
+        finally
+            deleteDirectory skillRoot1
+            deleteDirectory skillRoot2
