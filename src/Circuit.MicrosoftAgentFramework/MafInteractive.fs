@@ -378,27 +378,22 @@ module internal MafInteractive =
 
                                                 let updateRoundMetadata (response: AgentResponse) =
                                                     updateUsage response
-                                                    repaired <- repaired || MafStructuredOutput.wasRepaired response
 
-                                                    let roundMetadata =
+                                                    diagnosticMetadata <-
                                                         runtime.CreateDiagnosticMetadata(runOptions, response)
-
-                                                    if roundMetadata.Count > 0 then
-                                                        diagnosticMetadata <- roundMetadata
 
                                                 let createResponseMessage (storedRequests: PendingApproval array) =
                                                     let responseContents = ResizeArray<AIContent>()
 
                                                     lock gate (fun () ->
                                                         for item in storedRequests do
-                                                            match responseDecisions.TryGetValue item.PublicId with
-                                                            | true, struct (approved, note) ->
-                                                                responseContents.Add(
-                                                                    item.Request.CreateResponse(approved, note)
-                                                                    :> AIContent
-                                                                )
-                                                            | false, _ ->
-                                                                invalidOp "An approval decision was not recorded."
+                                                            let struct (approved, note) =
+                                                                responseDecisions[item.PublicId]
+
+                                                            responseContents.Add(
+                                                                item.Request.CreateResponse(approved, note)
+                                                                :> AIContent
+                                                            )
 
                                                         responseDecisions.Clear())
 

@@ -2043,6 +2043,54 @@ module MafRuntimeTests =
         (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
     [<Fact>]
+    let ``interactive MAF start validates required arguments`` () =
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver> :> IInteractiveCircuitRuntime
+
+        let agent = createAgent "Validate arguments."
+        let signature = createSignature<TestOutput> ()
+        let input = TestInput(Token = "validation")
+        let options = createRunOptions None StructuredOutputPolicy.NativeOnly
+
+        let nullAgent =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(
+                    Unchecked.defaultof<AgentDefinition>,
+                    signature,
+                    input,
+                    options,
+                    CancellationToken.None
+                )
+                |> ignore)
+
+        let nullSignature =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(
+                    agent,
+                    Unchecked.defaultof<Signature<TestInput, TestOutput>>,
+                    input,
+                    options,
+                    CancellationToken.None
+                )
+                |> ignore)
+
+        let nullOptions =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(agent, signature, input, Unchecked.defaultof<RunOptions>, CancellationToken.None)
+                |> ignore)
+
+        Assert.Equal("agent", nullAgent.ParamName)
+        Assert.Equal("signature", nullSignature.ParamName)
+        Assert.Equal("options", nullOptions.ParamName)
+        Assert.Equal(0, primary.ResponseCalls)
+
+    [<Fact>]
     let ``interactive MAF native rounds preserve object primitive and array response formats`` () =
         let responses = Queue<string>([| "{\"text\":\"object\"}"; "7"; "[\"a\",\"b\"]" |])
 
