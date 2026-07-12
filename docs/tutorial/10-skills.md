@@ -2,19 +2,37 @@
 
 ## What you will build
 
-Add versioned guidance without confusing it with executable code. This project is a compiling chapter skeleton; its complete lesson will replace the placeholder in the next tutorial-writing pass.
+Attach versioned support-policy guidance to the agent and use it in a live ticket response. The skill is inline, contains no scripts, and is resolved from an explicit fixed catalog.
 
 ## The idea
 
-Each chapter changes one main idea while remaining an independent project.
+A skill contributes reusable guidance; a tool executes host code:
+
+```text
+skill -> instructions available to agent
+tool  -> model-requested host operation
+```
+
+The agent references `skill.support-policy@1.0.0`, and `StaticSkillResolver` supplies that exact version. Versioning makes the guidance dependency visible. This source is script-free, and `SkillScriptRunner` remains `ValueNone`.
+
+Skill instructions can influence model behavior but do not enforce business policy. Scripts require an explicitly configured, trusted runner; Circuit does not sandbox them. Treat externally sourced skill text as untrusted content and review it before registration.
 
 ## Create or open the project
 
-From the repository root, open `tutorials/fsharp/10-skills`. Live chapters will require explicit provider environment variables; chapter 16 remains offline.
+From the repository root, install the SDK selected by `global.json`, then set reader-owned provider configuration:
+
+```bash
+export OPENAI_API_KEY="your key from your secret store"
+export OPENAI_MODEL="a model available to your account"
+```
+
+The chapter makes a paid OpenAI request. It has no credential or model default and no fake fallback when provider execution fails.
 
 ## Complete source
 
 [!code-fsharp](../../tutorials/fsharp/10-skills/Program.fs)
+
+`SkillSource.CreateInline` contains only policy prose. `AgentDefinition.withSkills` records the dependency, while the runtime resolver materializes it for this run.
 
 ## Run it
 
@@ -22,26 +40,32 @@ From the repository root, open `tutorials/fsharp/10-skills`. Live chapters will 
 dotnet run --project tutorials/fsharp/10-skills
 ```
 
-Representative placeholder output (the completed live chapter's provider-generated values will be variable):
+Representative output (category and reply are provider-variable):
 
 ```text
-Chapter 10 will build on the support-ticket agent.
+Policy skill: skill.support-policy@1.0.0
+Category: account-access
+Suggested reply: Check spam and verify the email address on the account...
 ```
 
 ## What changed
 
-This skeleton reserves chapter 10's approved project and documentation boundary. The completed lesson will explain its single delta from chapter 9.
+Chapter 9 introduced controlled host execution. Chapter 10 adds reusable versioned instructions without exposing an executable capability.
 
 ## Check your understanding
 
-1. Why should this chapter remain independently runnable?
-2. Which one boundary will this chapter introduce?
-3. Which values will be deterministic, and which will be provider-variable?
+1. What does a skill contribute that a tool does not?
+2. Why is the skill version part of the agent dependency?
+3. What changes before a skill script could execute?
 
 ## Try it yourself
 
-Build this project from the repository root and confirm that it does not depend on another tutorial project.
+Change the inline guidance to require replies under two sentences, increment the skill version to `1.0.1`, and update the output. Observe the provider-variable response length.
 
 ## Recap and next step
 
-The project, page, and complete-source include now have stable names. The next writing pass will replace this placeholder with the approved support-ticket lesson without changing that structure.
+- Skills provide versioned guidance rather than host operations.
+- Inline, script-free sources keep this chapter's capability narrow.
+- Script execution requires an explicit trusted runner and is not sandboxed.
+
+Next, compose multiple typed calls into a lightweight `circuit {}` program.

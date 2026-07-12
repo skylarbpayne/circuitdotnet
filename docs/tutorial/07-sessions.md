@@ -2,19 +2,34 @@
 
 ## What you will build
 
-Carry provider-owned conversation state into another request. This project is a compiling chapter skeleton; its complete lesson will replace the placeholder in the next tutorial-writing pass.
+Send a support ticket, retain the returned `CircuitSession`, and ask a follow-up that refers to the first request. Both requests are live OpenAI calls.
 
 ## The idea
 
-Each chapter changes one main idea while remaining an independent project.
+A session is opaque conversation state owned by the provider adapter:
+
+```text
+first run -> CircuitSession -> RunOptions.withSession -> follow-up run
+```
+
+The host may serialize it only through `ICircuitRuntime.SerializeSessionAsync` and restore it through the matching adapter's deserializer. Session state can contain sensitive conversation/provider data and is bound to its compatible agent/runtime. It is not a durable Circuit workflow checkpoint and provides no workflow replay or resume guarantee.
 
 ## Create or open the project
 
-From the repository root, open `tutorials/fsharp/07-sessions`. Live chapters will require explicit provider environment variables; chapter 16 remains offline.
+From a repository clone, use the .NET SDK selected by `global.json` and set both variables in your shell or secret manager:
+
+```bash
+export OPENAI_API_KEY="your key from your secret store"
+export OPENAI_MODEL="a model available to your account"
+```
+
+This chapter makes two paid provider requests, so account limits and charges apply. There is no built-in model default or offline fallback.
 
 ## Complete source
 
 [!code-fsharp](../../tutorials/fsharp/07-sessions/Program.fs)
+
+The second options value is an immutable copy of `RunOptions.Default`. The first result must contain a session before the follow-up can continue.
 
 ## Run it
 
@@ -22,26 +37,33 @@ From the repository root, open `tutorials/fsharp/07-sessions`. Live chapters wil
 dotnet run --project tutorials/fsharp/07-sessions
 ```
 
-Representative placeholder output (the completed live chapter's provider-generated values will be variable):
+Representative output (all categories and replies are provider-variable):
 
 ```text
-Chapter 7 will build on the support-ticket agent.
+First response category: account-access
+First response reply: Check your spam folder and verify the account address...
+Follow-up category: account-access
+Follow-up reply: Since those checks are complete, contact support to verify delivery...
 ```
 
 ## What changed
 
-This skeleton reserves chapter 7's approved project and documentation boundary. The completed lesson will explain its single delta from chapter 6.
+Chapter 6 followed one request through its stream. Chapter 7 performs two complete requests and explicitly passes adapter-owned state between them.
 
 ## Check your understanding
 
-1. Why should this chapter remain independently runnable?
-2. Which one boundary will this chapter introduce?
-3. Which values will be deterministic, and which will be provider-variable?
+1. Who defines the opaque contents of `CircuitSession`?
+2. Why should session serialization be protected as sensitive data?
+3. Why is a session not a durable workflow checkpoint?
 
 ## Try it yourself
 
-Build this project from the repository root and confirm that it does not depend on another tutorial project.
+Change only the follow-up message to ask for a one-sentence recap. Verify that the second reply still refers to the original ticket.
 
 ## Recap and next step
 
-The project, page, and complete-source include now have stable names. The next writing pass will replace this placeholder with the approved support-ticket lesson without changing that structure.
+- A returned session can continue a compatible conversation.
+- `RunOptions.withSession` preserves the other run-option defaults.
+- Sessions are sensitive adapter state, not durable workflow state.
+
+Next, let the model request fresh application data through a typed tool.

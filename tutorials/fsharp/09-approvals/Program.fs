@@ -1,6 +1,169 @@
 module Circuit.Tutorial.Approvals
 
+open System
+open System.ComponentModel.DataAnnotations
+open System.Threading
+open System.Threading.Tasks
+open Circuit.Core
+open Circuit.FSharp
+open Circuit.MicrosoftAgentFramework
+open Microsoft.Extensions.AI
+open OpenAI.Chat
+
+[<AllowNullLiteral>]
+type TicketInput() =
+    [<property: Required; StringLength(120)>]
+    member val Subject = "" with get, set
+
+    [<property: Required; StringLength(2000)>]
+    member val Message = "" with get, set
+
+[<AllowNullLiteral>]
+type TicketOutput() =
+    [<property: Required; StringLength(40)>]
+    member val Category = "" with get, set
+
+    [<property: Required; StringLength(500)>]
+    member val SuggestedReply = "" with get, set
+
+[<AllowNullLiteral>]
+type EscalationInput() =
+    [<property: Required; RegularExpression("^[A-Z]{3}-[0-9]{4}$")>]
+    member val AccountId = "" with get, set
+
+    [<property: Required; StringLength(120)>]
+    member val Reason = "" with get, set
+
+[<AllowNullLiteral>]
+type EscalationOutput() =
+    [<property: Required; StringLength(30)>]
+    member val Status = "" with get, set
+
+let createEscalationTool () =
+    ToolDefinition.create<EscalationInput, EscalationOutput>
+        "ticket.escalate"
+        "1.0.0"
+        "Escalate an account's support ticket to a specialist queue."
+        (fun context _input ->
+            context.CancellationToken.ThrowIfCancellationRequested()
+            Task.FromResult(EscalationOutput(Status = "queued-for-specialist")))
+    |> ToolDefinition.withApproval ApprovalMode.Always
+    |> fun definition -> ResolvedTool.Create(definition, [ "ticket.escalate" ])
+
+let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
+    task {
+        let agent =
+            AgentDefinition.create
+                "support.agent"
+                "1.0.0"
+                "Support assistant"
+                "The customer explicitly requests escalation. Call the escalation tool, then draft a concise reply."
+            |> AgentDefinition.withToolTags [ "ticket.escalate" ]
+
+        let signature =
+            Signature.create<TicketInput, TicketOutput>
+                "support.reply"
+                "1.0.0"
+                "Support ticket reply"
+                "Return category and suggestedReply as structured output."
+
+        let ticket =
+            TicketInput(
+                Subject = "Escalate account ACM-2048",
+                Message =
+                    "Repeated password-reset emails have not arrived. Please escalate this account to a specialist."
+            )
+
+        let! run = Agent.start runtime agent signature ticket RunOptions.Default cancellationToken
+        let enumerator = run.Events.GetAsyncEnumerator(cancellationToken)
+        let mutable terminalCount = 0
+        let mutable approvalCount = 0
+        let mutable resultCode = 1
+        let mutable keepReading = true
+
+        try
+            while keepReading do
+                let! hasEvent = enumerator.MoveNextAsync().AsTask()
+
+                if not hasEvent then
+                    keepReading <- false
+                else
+                    let event = enumerator.Current
+
+                    match event.Kind with
+                    | RunEventKind.ApprovalRequested ->
+                        approvalCount <- approvalCount + 1
+                        let request = event.Approval.Value
+                        // ArgumentsJson may contain customer data. Inspect only opaque metadata here.
+                        printfn "Approval requested for tool '%s' (request %s)." request.ToolName request.RequestId
+                        printfn "Host decision: %s" (if approved then "approve" else "reject")
+
+                        let response =
+                            ApprovalResponse(
+                                request.RequestId,
+                                approved,
+                                (if approved then
+                                     "authorized by tutorial operator"
+                                 else
+                                     "rejected by tutorial operator")
+                            )
+
+                        do! run.RespondAsync(response, cancellationToken).AsTask()
+                    | RunEventKind.RunCompleted ->
+                        terminalCount <- terminalCount + 1
+                        let output = event.Value.Value
+                        printfn "Category: %s" output.Category
+                        printfn "Suggested reply: %s" output.SuggestedReply
+                        resultCode <- 0
+                    | RunEventKind.RunFailed ->
+                        terminalCount <- terminalCount + 1
+                        let failure = event.Failure.Value
+                        eprintfn "Circuit could not complete the request (%O): %s" failure.Code failure.Message
+                    | _ -> ()
+        finally
+            do enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            do (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        if approvalCount <> 1 || terminalCount <> 1 then
+            eprintfn "Expected one approval request and one terminal event."
+            return 1
+        else
+            return resultCode
+    }
+
 [<EntryPoint>]
-let main _ =
-    printfn "Chapter 9 will build on the support-ticket agent."
-    0
+let main args =
+    let decision =
+        match args with
+        | [| "--approve" |] -> ValueSome true
+        | [| "--reject" |] -> ValueSome false
+        | _ -> ValueNone
+
+    let apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+    let model = Environment.GetEnvironmentVariable("OPENAI_MODEL")
+
+    match decision with
+    | ValueNone ->
+        eprintfn "Run with exactly one decision: --approve or --reject."
+        2
+    | ValueSome _ when String.IsNullOrWhiteSpace(apiKey) || String.IsNullOrWhiteSpace(model) ->
+        eprintfn "Set OPENAI_API_KEY and OPENAI_MODEL before running this chapter."
+        2
+    | ValueSome approved ->
+        try
+            let openAiClient = ChatClient(model, apiKey)
+            use chatClient = openAiClient.AsIChatClient()
+            let options = MafRuntimeOptions()
+            options.ToolResolvers <- [| StaticToolResolver([| createEscalationTool () |]) :> IToolResolver |]
+            let runtime = MafRuntime(chatClient, options) :> IInteractiveCircuitRuntime
+            use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45.0))
+
+            runAsync runtime approved timeout.Token
+            |> fun work -> work.GetAwaiter().GetResult()
+        with
+        | :? OperationCanceledException ->
+            eprintfn "The request timed out or was cancelled."
+            1
+        | _ ->
+            eprintfn "Configuration or provider request failed. See your provider and account diagnostics."
+            1
