@@ -50,27 +50,32 @@ module internal MafRuntimeStreamingDispatch =
 
 [<Sealed>]
 type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
+    let runtimeOptions =
+        if isNull (box options) then
+            nullArg "options"
+
+        options.Snapshot()
+
+    let options = runtimeOptions
+
     do
         if isNull (box chatClient) then
             nullArg "chatClient"
 
-        if isNull (box options) then
-            nullArg "options"
-
-        if isNull options.JsonSerializerOptions then
+        if isNull runtimeOptions.JsonSerializerOptions then
             nullArg "options.JsonSerializerOptions"
 
-        if isNull options.ToolResolvers then
+        if isNull runtimeOptions.ToolResolvers then
             nullArg "options.ToolResolvers"
 
-        if isNull options.SkillResolvers then
+        if isNull runtimeOptions.SkillResolvers then
             nullArg "options.SkillResolvers"
 
-        if isNull options.Observers then
+        if isNull runtimeOptions.Observers then
             nullArg "options.Observers"
 
     member internal _.ChatClient = chatClient
-    member internal _.RuntimeOptions = options
+    member internal _.RuntimeOptions = runtimeOptions
 
     member internal _.CreateRunContext<'Input, 'Output>
         (runId: RunId, agent: AgentDefinition, signature: Signature<'Input, 'Output>, runOptions: RunOptions)

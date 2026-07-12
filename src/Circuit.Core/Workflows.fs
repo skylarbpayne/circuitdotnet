@@ -151,15 +151,15 @@ module internal WorkflowGraph =
         abstract OutputType: Type
         abstract InvokeAsync: obj list * CancellationToken -> Task<obj>
 
-    type AggregateHandler<'Item, 'Output>(aggregate: 'Item list -> Task<'Output>) =
+    type AggregateHandler<'Item, 'Output>(aggregate: 'Item list -> CancellationToken -> Task<'Output>) =
         interface IAggregateHandler with
             member _.ItemType = typeof<'Item>
             member _.OutputType = typeof<'Output>
 
-            member _.InvokeAsync(items, _cancellationToken) =
+            member _.InvokeAsync(items, cancellationToken) =
                 task {
                     let typedItems = items |> List.map unbox<'Item>
-                    let! output = aggregate typedItems
+                    let! output = aggregate typedItems cancellationToken
                     return box output
                 }
 
@@ -721,7 +721,12 @@ module Workflow =
         =
         chooseCases id selector (cases |> Map.toList) defaultCase
 
-    let ``parallel`` id maxConcurrency (branches: WorkflowDefinition<'A, 'B> list) aggregate =
+    let internal parallelWithCancellation
+        id
+        maxConcurrency
+        (branches: WorkflowDefinition<'A, 'B> list)
+        (aggregate: 'B list -> CancellationToken -> Task<'C>)
+        =
         WorkflowValidation.requireNonBlank "id" id |> ignore
 
         if isNull (box branches) then
@@ -839,6 +844,9 @@ module Workflow =
             { merged with
                 Edges = merged.Edges @ (extraEdges |> Seq.toList) }
         )
+
+    let ``parallel`` id maxConcurrency (branches: WorkflowDefinition<'A, 'B> list) aggregate =
+        parallelWithCancellation id maxConcurrency branches (fun values _ -> aggregate values)
 
     let request id prompt =
         WorkflowValidation.requireNonBlank "id" id |> ignore

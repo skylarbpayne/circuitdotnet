@@ -22,8 +22,10 @@ type internal ResolvedMafTool(tool: Circuit.Core.ResolvedTool, modelName: string
 [<Sealed>]
 type ToolApprovalContext
     internal (runContext: RunContext, tool: Circuit.Core.ResolvedTool, arguments: IReadOnlyDictionary<string, obj>) =
+    let toolView = Circuit.ResolvedTool.FromCore tool
+
     member _.RunContext = runContext
-    member _.Tool = tool
+    member _.Tool = toolView
     member _.Arguments = arguments
 
 type IToolApprovalPolicy =
@@ -130,10 +132,24 @@ module internal MafObserver =
 
 [<Sealed>]
 type MafRuntimeOptions() =
-    let serializerOptions =
+    let createDefaultSerializerOptions () =
         let options = CircuitJson.createOptions ()
         options.MakeReadOnly()
         options
+
+    let snapshotJsonOptions (options: JsonSerializerOptions) =
+        if isNull options then
+            null
+        else
+            let snapshot = JsonSerializerOptions(options)
+            snapshot.MakeReadOnly()
+            snapshot
+
+    let snapshotResolvers (resolvers: IReadOnlyList<'T>) =
+        if isNull resolvers then
+            null
+        else
+            resolvers |> Seq.toArray :> IReadOnlyList<'T>
 
     let emptyToolResolvers =
         Array.empty<Circuit.Core.IToolResolver> :> IReadOnlyList<Circuit.Core.IToolResolver>
@@ -143,11 +159,91 @@ type MafRuntimeOptions() =
 
     let emptyObservers = Array.empty<IRunObserver> :> IReadOnlyList<IRunObserver>
 
-    member val DefaultModelId: string voption = ValueNone with get, set
-    member val JsonSerializerOptions: JsonSerializerOptions = serializerOptions with get, set
-    member val SecondaryStructuredOutputClient: IChatClient voption = ValueNone with get, set
-    member val ToolResolvers: IReadOnlyList<Circuit.Core.IToolResolver> = emptyToolResolvers with get, set
-    member val ToolApprovalPolicy: IToolApprovalPolicy voption = ValueNone with get, set
-    member val SkillResolvers: IReadOnlyList<Circuit.Core.ISkillResolver> = emptySkillResolvers with get, set
-    member val SkillScriptRunner: Circuit.Core.ISkillScriptRunner voption = ValueNone with get, set
-    member val Observers: IReadOnlyList<IRunObserver> = emptyObservers with get, set
+    let mutable isFrozen = false
+    let mutable defaultModelId: string voption = ValueNone
+    let mutable jsonSerializerOptions = createDefaultSerializerOptions ()
+    let mutable secondaryStructuredOutputClient: IChatClient voption = ValueNone
+
+    let mutable toolResolvers: IReadOnlyList<Circuit.Core.IToolResolver> =
+        emptyToolResolvers
+
+    let mutable toolApprovalPolicy: IToolApprovalPolicy voption = ValueNone
+
+    let mutable skillResolvers: IReadOnlyList<Circuit.Core.ISkillResolver> =
+        emptySkillResolvers
+
+    let mutable skillScriptRunner: Circuit.Core.ISkillScriptRunner voption = ValueNone
+    let mutable observers: IReadOnlyList<IRunObserver> = emptyObservers
+
+    let throwIfFrozen () =
+        if isFrozen then
+            invalidOp "Options are frozen."
+
+    member _.DefaultModelId
+        with get () = defaultModelId
+        and set value =
+            throwIfFrozen ()
+            defaultModelId <- value
+
+    member _.JsonSerializerOptions
+        with get () = jsonSerializerOptions
+        and set value =
+            throwIfFrozen ()
+            jsonSerializerOptions <- value
+
+    member _.SecondaryStructuredOutputClient
+        with get () = secondaryStructuredOutputClient
+        and set value =
+            throwIfFrozen ()
+            secondaryStructuredOutputClient <- value
+
+    member _.ToolResolvers
+        with get () = toolResolvers
+        and set value =
+            throwIfFrozen ()
+            toolResolvers <- value
+
+    member _.ToolApprovalPolicy
+        with get () = toolApprovalPolicy
+        and set value =
+            throwIfFrozen ()
+            toolApprovalPolicy <- value
+
+    member _.SkillResolvers
+        with get () = skillResolvers
+        and set value =
+            throwIfFrozen ()
+            skillResolvers <- value
+
+    member _.SkillScriptRunner
+        with get () = skillScriptRunner
+        and set value =
+            throwIfFrozen ()
+            skillScriptRunner <- value
+
+    member _.Observers
+        with get () = observers
+        and set value =
+            throwIfFrozen ()
+            observers <- value
+
+    member internal this.Freeze() =
+        if not isFrozen then
+            jsonSerializerOptions <- snapshotJsonOptions jsonSerializerOptions
+            toolResolvers <- snapshotResolvers toolResolvers
+            skillResolvers <- snapshotResolvers skillResolvers
+            observers <- snapshotResolvers observers
+            isFrozen <- true
+
+    member internal this.Snapshot() =
+        let snapshot = MafRuntimeOptions()
+        snapshot.DefaultModelId <- defaultModelId
+        snapshot.JsonSerializerOptions <- snapshotJsonOptions jsonSerializerOptions
+        snapshot.SecondaryStructuredOutputClient <- secondaryStructuredOutputClient
+        snapshot.ToolResolvers <- snapshotResolvers toolResolvers
+        snapshot.ToolApprovalPolicy <- toolApprovalPolicy
+        snapshot.SkillResolvers <- snapshotResolvers skillResolvers
+        snapshot.SkillScriptRunner <- skillScriptRunner
+        snapshot.Observers <- snapshotResolvers observers
+        snapshot.Freeze()
+        snapshot
