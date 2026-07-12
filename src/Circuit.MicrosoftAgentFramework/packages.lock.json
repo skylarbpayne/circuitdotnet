@@ -26,6 +26,26 @@
           "Microsoft.ML.Tokenizers": "2.0.0"
         }
       },
+      "Microsoft.Agents.AI.Workflows": {
+        "type": "Direct",
+        "requested": "[1.13.0, )",
+        "resolved": "1.13.0",
+        "contentHash": "Tor3pjedKR5lnbQUUkfkfNb5nMCYFfldJBRpxxBJfrn3WWHsnOUCvmX1OENTVqGBhreDkIDsMzdnNleU06Vb4A==",
+        "dependencies": {
+          "Microsoft.Agents.AI": "1.13.0",
+          "Microsoft.Agents.AI.Abstractions": "1.13.0",
+          "Microsoft.Extensions.AI": "10.6.0",
+          "Microsoft.Extensions.AI.Abstractions": "10.6.0",
+          "Microsoft.Extensions.AI.Evaluation": "10.6.0",
+          "Microsoft.Extensions.Compliance.Abstractions": "10.5.0",
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.9",
+          "Microsoft.Extensions.FileSystemGlobbing": "10.0.6",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.9",
+          "Microsoft.Extensions.VectorData.Abstractions": "9.7.0",
+          "Microsoft.ML.Tokenizers": "2.0.0",
+          "OpenTelemetry.Api": "1.15.3"
+        }
+      },
       "Microsoft.CodeAnalysis.PublicApiAnalyzers": {
         "type": "Direct",
         "requested": "[5.6.0, )",
@@ -169,6 +189,12 @@
           "Microsoft.Extensions.Logging.Abstractions": "10.0.8",
           "System.Numerics.Tensors": "10.0.8"
         }
+      },
+      "OpenTelemetry.Api": {
+        "type": "CentralTransitive",
+        "requested": "[1.15.3, )",
+        "resolved": "1.15.3",
+        "contentHash": "fX+fkCysfPut+qCcT3bKqyX4QN9Saf4CgX8HLOHywEVD+Xr7sULtfuypITpoDysjx8R59dn/3mWhgimMH8cm/g=="
       }
     }
   }

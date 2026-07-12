@@ -1,7 +1,8 @@
-namespace Circuit.FSharp
+module Circuit.FSharp
 
 open System
 open System.Text.Json
+open System.Threading
 open System.Threading.Tasks
 open Circuit.Core
 
@@ -144,3 +145,74 @@ module ToolDefinition =
 module Agent =
     let run (runtime: ICircuitRuntime) agent signature input options cancellationToken =
         runtime.RunAsync(agent, signature, input, options, cancellationToken)
+
+[<Sealed>]
+type CircuitProgram<'T> internal (program: CircuitPrograms.ProgramExpr<'T>) =
+    member internal _.Program = program
+
+[<Sealed>]
+type CircuitBuilder() =
+    member _.Return(value: 'T) =
+        CircuitProgram<'T>(CircuitPrograms.succeed value)
+
+    member _.ReturnFrom(program: CircuitProgram<'T>) = program
+
+    member _.Bind(program: CircuitProgram<'T>, binder: 'T -> CircuitProgram<'U>) =
+        if isNull (box program) then
+            nullArg "program"
+
+        if isNull (box binder) then
+            nullArg "binder"
+
+        CircuitProgram<'U>(CircuitPrograms.bind program.Program (fun value -> (binder value).Program))
+
+    member _.Zero() =
+        CircuitProgram<unit>(CircuitPrograms.succeed ())
+
+    member _.Delay(generator: unit -> CircuitProgram<'T>) =
+        CircuitProgram<'T>(CircuitPrograms.delay (fun () -> (generator ()).Program))
+
+    member _.Combine(first: CircuitProgram<unit>, second: CircuitProgram<'T>) =
+        CircuitProgram<'T>(CircuitPrograms.combine first.Program second.Program)
+
+    member _.TryWith(body: CircuitProgram<'T>, handler: exn -> CircuitProgram<'T>) =
+        CircuitProgram<'T>(CircuitPrograms.tryWith body.Program (fun ex -> (handler ex).Program))
+
+    member _.TryFinally(body: CircuitProgram<'T>, compensation: unit -> unit) =
+        CircuitProgram<'T>(CircuitPrograms.tryFinally body.Program compensation)
+
+    member _.Using(resource: 'T, binder: 'T -> CircuitProgram<'U>) : CircuitProgram<'U> when 'T :> IDisposable =
+        CircuitProgram<'U>(CircuitPrograms.using resource (fun value -> (binder value).Program))
+
+let circuit = CircuitBuilder()
+
+module Circuit =
+    let call agent signature input =
+        CircuitProgram<_>(CircuitPrograms.call agent signature input)
+
+    let code name operation =
+        CircuitProgram<_>(CircuitPrograms.code name (fun cancellationToken -> operation cancellationToken))
+
+    let ``parallel`` maxConcurrency (programs: CircuitProgram<'T> list) =
+        let innerPrograms = programs |> List.map _.Program
+        CircuitProgram<'T list>(CircuitPrograms.parallelPrograms maxConcurrency innerPrograms)
+
+    let fail failure =
+        CircuitProgram<_>(CircuitPrograms.fail failure)
+
+    let run runtime options cancellationToken (program: CircuitProgram<'T>) =
+        CircuitPrograms.run runtime options cancellationToken program.Program
+
+module Workflow =
+    let code = Circuit.Core.Workflow.code
+    let agent = Circuit.Core.Workflow.agent
+    let thenStep = Circuit.Core.Workflow.thenStep
+    let choose = Circuit.Core.Workflow.choose
+    let ``parallel`` = Circuit.Core.Workflow.``parallel``
+    let request = Circuit.Core.Workflow.request
+    let loop = Circuit.Core.Workflow.loop
+    let define = Circuit.Core.Workflow.define
+    let validate = Circuit.Core.Workflow.validate
+    let run = Circuit.Core.Workflow.run
+    let start = Circuit.Core.Workflow.start
+    let resume = Circuit.Core.Workflow.resume

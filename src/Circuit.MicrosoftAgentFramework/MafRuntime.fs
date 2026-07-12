@@ -630,3 +630,110 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
 
         member this.DeserializeSessionAsync(agent, state, cancellationToken) =
             this.DeserializeSessionAsyncCore(agent, state, cancellationToken)
+
+    interface IWorkflowRuntime with
+        member this.RunAsync<'Input, 'Output>
+            (
+                definition: WorkflowDefinition<'Input, 'Output>,
+                input: 'Input,
+                workflowOptions: WorkflowRunOptions,
+                cancellationToken: CancellationToken
+            ) =
+            let dispatchType =
+                this.GetType().Assembly.GetTypes()
+                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
+
+            let methodInfo =
+                dispatchType.GetMethods(
+                    Reflection.BindingFlags.Static
+                    ||| Reflection.BindingFlags.Public
+                    ||| Reflection.BindingFlags.NonPublic
+                )
+                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Run" && methodInfo.IsGenericMethodDefinition)
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Run' was not found.")
+
+            let result =
+                methodInfo
+                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
+                    .Invoke(
+                        null,
+                        [| box this
+                           box definition
+                           box input
+                           box workflowOptions
+                           box cancellationToken |]
+                    )
+
+            if isNull result then
+                invalidOp "Workflow runtime dispatch method 'Run' returned null."
+
+            result :?> Task<RunResult<'Output>>
+
+        member this.StartAsync<'Input, 'Output>
+            (
+                definition: WorkflowDefinition<'Input, 'Output>,
+                input: 'Input,
+                workflowOptions: WorkflowRunOptions,
+                cancellationToken: CancellationToken
+            ) =
+            let dispatchType =
+                this.GetType().Assembly.GetTypes()
+                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
+
+            let methodInfo =
+                dispatchType.GetMethods(
+                    Reflection.BindingFlags.Static
+                    ||| Reflection.BindingFlags.Public
+                    ||| Reflection.BindingFlags.NonPublic
+                )
+                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Start" && methodInfo.IsGenericMethodDefinition)
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Start' was not found.")
+
+            let result =
+                methodInfo
+                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
+                    .Invoke(
+                        null,
+                        [| box this
+                           box definition
+                           box input
+                           box workflowOptions
+                           box cancellationToken |]
+                    )
+
+            if isNull result then
+                invalidOp "Workflow runtime dispatch method 'Start' returned null."
+
+            result :?> Task<WorkflowRun<'Output>>
+
+        member this.ResumeAsync<'Input, 'Output>
+            (
+                definition: WorkflowDefinition<'Input, 'Output>,
+                checkpoint: WorkflowCheckpoint<'Output>,
+                cancellationToken: CancellationToken
+            ) =
+            let dispatchType =
+                this.GetType().Assembly.GetTypes()
+                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
+
+            let methodInfo =
+                dispatchType.GetMethods(
+                    Reflection.BindingFlags.Static
+                    ||| Reflection.BindingFlags.Public
+                    ||| Reflection.BindingFlags.NonPublic
+                )
+                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Resume" && methodInfo.IsGenericMethodDefinition)
+                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Resume' was not found.")
+
+            let result =
+                methodInfo
+                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
+                    .Invoke(null, [| box this; box definition; box checkpoint; box cancellationToken |])
+
+            if isNull result then
+                invalidOp "Workflow runtime dispatch method 'Resume' returned null."
+
+            result :?> Task<WorkflowRun<'Output>>
