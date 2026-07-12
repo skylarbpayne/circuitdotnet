@@ -20,6 +20,42 @@ type internal IMafRuntimeStreamingDispatcher =
         cancellationToken: CancellationToken ->
             IAsyncEnumerable<RunEvent<'Output>>
 
+type internal IMafRuntimeInteractiveDispatcher =
+    abstract Start<'Input, 'Output> :
+        runtime: obj *
+        agent: AgentDefinition *
+        signature: Signature<'Input, 'Output> *
+        input: 'Input *
+        runOptions: RunOptions *
+        cancellationToken: CancellationToken ->
+            Task<AgentRun<'Output>>
+
+module internal MafRuntimeInteractiveDispatch =
+    let mutable Dispatcher: IMafRuntimeInteractiveDispatcher =
+        { new IMafRuntimeInteractiveDispatcher with
+            member _.Start(_runtime, _agent, _signature, _input, _runOptions, _cancellationToken) =
+                invalidOp "Interactive support has not been initialized." }
+
+    let private initialization =
+        Lazy<unit>(
+            (fun () ->
+                let registrationType =
+                    Type.GetType(
+                        "Circuit.MicrosoftAgentFramework.MafInteractiveRegistration, Circuit.MicrosoftAgentFramework",
+                        false
+                    )
+
+                if isNull registrationType then
+                    invalidOp "Interactive support has not been initialized."
+
+                Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(registrationType.TypeHandle)),
+            LazyThreadSafetyMode.ExecutionAndPublication
+        )
+
+    let Start runtime agent signature input runOptions cancellationToken =
+        initialization.Value |> ignore
+        Dispatcher.Start(runtime, agent, signature, input, runOptions, cancellationToken)
+
 module internal MafRuntimeStreamingDispatch =
     let mutable Dispatcher: IMafRuntimeStreamingDispatcher =
         { new IMafRuntimeStreamingDispatcher with
@@ -90,11 +126,13 @@ module internal MafRuntimeInternals =
             Error(MafErrors.decodeFailure runId "The provider response could not be decoded." ValueNone (ValueSome ex))
         | ex -> Error(MafErrors.providerFailure runId "The provider request failed." ValueNone (ValueSome ex))
 
-/// Implements <see cref="T:Circuit.Core.ICircuitRuntime" /> on top of Microsoft.Extensions.AI and Microsoft Agent Framework primitives.
+/// Implements <see cref="T:Circuit.Core.ICircuitRuntime" /> and <see cref="T:Circuit.Core.IInteractiveCircuitRuntime" /> on top of Microsoft.Extensions.AI and Microsoft Agent Framework primitives.
 /// <param name="chatClient">The primary chat client used for provider calls.</param>
 /// <param name="options">Runtime options that are snapshotted during construction.</param>
 /// <remarks>
 /// This runtime normalizes provider failures into <see cref="T:Circuit.Core.CircuitFailure" /> values when possible.
+/// Interactive runs use non-streaming provider rounds, do not promise token-level output-delta events, and fail after
+/// 16 approval rounds to bound provider, tool, and resource use.
 /// Tool resolvers, skill resolvers, approval policies, and script runners remain trusted in-process extensions.
 /// </remarks>
 [<Sealed>]
@@ -674,6 +712,10 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
 
         member this.DeserializeSessionAsync(agent, state, cancellationToken) =
             this.DeserializeSessionAsyncCore(agent, state, cancellationToken)
+
+    interface IInteractiveCircuitRuntime with
+        member this.StartAsync(agent, signature, input, runOptions, cancellationToken) =
+            MafRuntimeInteractiveDispatch.Start (box this) agent signature input runOptions cancellationToken
 
     interface IWorkflowRuntime with
         member this.RunAsync<'Input, 'Output>

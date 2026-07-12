@@ -323,6 +323,8 @@ type RunEvent<'T>
 /// Represents a live agent execution that may stream events and pause for approval.
 /// <remarks>
 /// This handle owns the lifetime of a paused run. Disposing an event enumerator does not dispose the run.
+/// The event stream supports one active consumer at a time. Replacing an enumerator sequentially continues with unread
+/// and future events; concurrent enumerators compete for events and are not a broadcast mechanism.
 /// Disposing the handle invokes its disposal delegate at most once; that delegate is responsible for cancelling
 /// or closing any event enumerators that were acquired before disposal. Accessing <see cref="P:Circuit.Core.AgentRun`1.Events" />
 /// or calling <see cref="M:Circuit.Core.AgentRun`1.RespondAsync(Circuit.Core.ApprovalResponse,System.Threading.CancellationToken)" />
@@ -361,8 +363,9 @@ type AgentRun<'Output>
 
     /// Gets the event stream for the live agent run.
     /// <remarks>
-    /// Disposing an event enumerator does not dispose the run handle. Accessing this property after the handle is
-    /// disposed throws <see cref="T:System.ObjectDisposedException" />.
+    /// Disposing an event enumerator does not dispose the run handle. Use one active enumerator at a time; sequential
+    /// replacement continues with unread and future events, while concurrent enumerators compete for events.
+    /// Accessing this property after the handle is disposed throws <see cref="T:System.ObjectDisposedException" />.
     /// </remarks>
     member _.Events =
         throwIfDisposed ()
