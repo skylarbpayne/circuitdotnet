@@ -56,6 +56,7 @@ module private WorkflowValidation =
 
         duplicates |> Seq.toList
 
+/// Describes the human approval a workflow requests before continuing.
 [<AllowNullLiteral; Sealed>]
 type ApprovalPrompt(title: string, message: string, metadata: IEnumerable<KeyValuePair<string, string>>) =
     let frozenMetadata = WorkflowValidation.freezeMetadata metadata
@@ -66,13 +67,20 @@ type ApprovalPrompt(title: string, message: string, metadata: IEnumerable<KeyVal
         if isNull message then
             nullArg "message"
 
+    /// Gets the short approval title.
     member _.Title = title
+
+    /// Gets the approval message shown to the operator.
     member _.Message = message
+
+    /// Gets additional prompt metadata.
     member _.Metadata = frozenMetadata
 
+    /// Creates an approval prompt without metadata.
     static member Create(title: string, message: string) =
         ApprovalPrompt(title, message, Seq.empty)
 
+/// Represents the operator's response to a workflow approval request.
 [<AllowNullLiteral; Sealed>]
 type ApprovalResponse(requestId: string, approved: bool, note: string) =
     do
@@ -81,13 +89,20 @@ type ApprovalResponse(requestId: string, approved: bool, note: string) =
         if not (isNull note) && String.IsNullOrWhiteSpace note then
             invalidArg "note" "note cannot be blank when provided."
 
+    /// Gets the approval request identifier being answered.
     member _.RequestId = requestId
+
+    /// Gets whether the request was approved.
     member _.Approved = approved
+
+    /// Gets the optional operator note.
     member _.Note = note
 
+    /// Creates an approval response without a note.
     static member Create(requestId: string, approved: bool) =
         ApprovalResponse(requestId, approved, null)
 
+/// Provides the ambient context available to workflow code steps.
 [<Sealed>]
 type WorkflowContext
     internal
@@ -98,26 +113,44 @@ type WorkflowContext
         stepId: string,
         cancellationToken: CancellationToken
     ) =
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the workflow definition identifier.
     member _.DefinitionId = definitionId
+
+    /// Gets the workflow definition version.
     member _.DefinitionVersion = definitionVersion
+
+    /// Gets the current workflow step identifier.
     member _.StepId = stepId
+
+    /// Gets the cancellation token for the current step.
     member _.CancellationToken = cancellationToken
 
+/// Supplies optional settings for workflow execution.
 [<Sealed>]
 type WorkflowRunOptions internal (sessionId: string voption) =
+    /// Gets the runtime-defined workflow session identifier to start or resume under, if any.
     member _.SessionId = sessionId
 
+    /// Gets the default workflow run options.
     static member Default = WorkflowRunOptions(ValueNone)
 
+/// Describes a workflow-shape problem discovered during validation.
 [<Sealed>]
 type WorkflowValidationIssue(nodeId: string, code: string, message: string) =
     do
         WorkflowValidation.requireNonBlank "code" code |> ignore
         WorkflowValidation.requireNonBlank "message" message |> ignore
 
+    /// Gets the node identifier associated with the issue.
     member _.NodeId = nodeId
+
+    /// Gets a stable, machine-readable issue code.
     member _.Code = code
+
+    /// Gets the human-readable issue message.
     member _.Message = message
 
 module internal WorkflowGraph =
@@ -132,10 +165,13 @@ module internal WorkflowGraph =
             member _.OutputType = typeof<'Output>
 
             member _.InvokeAsync(context, input, _cancellationToken) =
-                task {
-                    let! output = handler context (unbox<'Input> input)
-                    return box output
-                }
+                (handler context (unbox<'Input> input))
+                    .ContinueWith(
+                        Func<Task<'Output>, obj>(fun completed -> box (completed.GetAwaiter().GetResult())),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
 
     type ISelectorHandler =
         abstract InputType: Type
@@ -157,11 +193,15 @@ module internal WorkflowGraph =
             member _.OutputType = typeof<'Output>
 
             member _.InvokeAsync(items, cancellationToken) =
-                task {
-                    let typedItems = items |> List.map unbox<'Item>
-                    let! output = aggregate typedItems cancellationToken
-                    return box output
-                }
+                let typedItems = items |> List.map unbox<'Item>
+
+                (aggregate typedItems cancellationToken)
+                    .ContinueWith(
+                        Func<Task<'Output>, obj>(fun completed -> box (completed.GetAwaiter().GetResult())),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
 
     type IPromptHandler =
         abstract InputType: Type
@@ -388,10 +428,20 @@ module internal WorkflowGraph =
             let bytes = Encoding.UTF8.GetBytes payload |> sha.ComputeHash
             Convert.ToHexString(bytes).ToLowerInvariant()
 
+module private WorkflowListBuilder =
+    let ofList (items: 'T list) : ('T list -> 'T list) = fun tail -> items @ tail
+
+    let append (left: 'T list -> 'T list) (right: 'T list -> 'T list) : ('T list -> 'T list) =
+        fun tail -> left (right tail)
+
+    let materialize (builder: 'T list -> 'T list) = builder []
+
+/// Represents a composable workflow step prior to being named as a full definition.
 [<Sealed>]
 type WorkflowStep<'Input, 'Output> internal (fragment: WorkflowGraph.Fragment) =
     member internal _.Fragment = fragment
 
+/// Represents a validated workflow graph with a stable public identity.
 [<Sealed>]
 type WorkflowDefinition<'Input, 'Output>
     internal
@@ -401,20 +451,69 @@ type WorkflowDefinition<'Input, 'Output>
         nodes: WorkflowGraph.Node list,
         edges: WorkflowGraph.Edge list,
         entryId: string,
-        terminalIds: string list
+        terminalIds: string list,
+        ?nodeListBuilder: (WorkflowGraph.Node list -> WorkflowGraph.Node list),
+        ?edgeListBuilder: (WorkflowGraph.Edge list -> WorkflowGraph.Edge list)
     ) =
+    let nodeBuilder = defaultArg nodeListBuilder (WorkflowListBuilder.ofList nodes)
+    let edgeBuilder = defaultArg edgeListBuilder (WorkflowListBuilder.ofList edges)
+
+    let mutable nodeCache =
+        match nodeListBuilder with
+        | Some _ -> ValueNone
+        | None -> ValueSome nodes
+
+    let mutable edgeCache =
+        match edgeListBuilder with
+        | Some _ -> ValueNone
+        | None -> ValueSome edges
+
+    let materializeNodes () =
+        match nodeCache with
+        | ValueSome cached -> cached
+        | ValueNone ->
+            let materialized = WorkflowListBuilder.materialize nodeBuilder
+            nodeCache <- ValueSome materialized
+            materialized
+
+    let materializeEdges () =
+        match edgeCache with
+        | ValueSome cached -> cached
+        | ValueNone ->
+            let materialized = WorkflowListBuilder.materialize edgeBuilder
+            edgeCache <- ValueSome materialized
+            materialized
+
+    /// Gets the workflow identifier.
     member _.Id = id
+
+    /// Gets the workflow version.
     member _.Version = version
-    member internal _.Nodes = nodes
-    member internal _.Edges = edges
+    member internal _.Nodes = materializeNodes ()
+    member internal _.Edges = materializeEdges ()
+    member internal _.NodeBuilder = nodeBuilder
+    member internal _.EdgeBuilder = edgeBuilder
     member internal _.EntryId = entryId
     member internal _.TerminalIds = terminalIds
     member internal _.InputType = typeof<'Input>
     member internal _.OutputType = typeof<'Output>
 
     member internal this.Fingerprint =
-        WorkflowGraph.FingerprintJson.compute id version this.InputType this.OutputType nodes edges entryId terminalIds
+        WorkflowGraph.FingerprintJson.compute
+            id
+            version
+            this.InputType
+            this.OutputType
+            this.Nodes
+            this.Edges
+            entryId
+            terminalIds
 
+/// Represents an opaque resumable workflow checkpoint.
+/// <remarks>
+/// Checkpoints are only guaranteed to resume against the same logical workflow definition and fingerprint.
+/// The payload may contain runtime-owned session state and should be treated as opaque.
+/// </remarks>
 [<Sealed>]
 type WorkflowCheckpoint<'Output>
     internal
@@ -439,14 +538,20 @@ type WorkflowCheckpoint<'Output>
         root["payload"] <- JsonNode.Parse(payload.GetRawText())
         root.ToJsonString()
 
+    /// Gets the workflow definition identifier the checkpoint was created for.
     member _.DefinitionId = definitionId
+
+    /// Gets the workflow definition version the checkpoint was created for.
     member _.DefinitionVersion = definitionVersion
+
+    /// Gets the checkpoint creation time in UTC.
     member _.CreatedAt = createdAt
     member internal _.Fingerprint = fingerprint
     member internal _.SessionId = sessionId
     member internal _.CheckpointId = checkpointId
     member internal _.Payload = payload.Clone()
 
+    /// Serializes the checkpoint to an opaque JSON envelope.
     member _.Serialize() =
         use document = JsonDocument.Parse(envelopeJson)
         document.RootElement.Clone()
@@ -486,6 +591,7 @@ type WorkflowCheckpoint<'Output>
             payload.Clone()
         )
 
+/// Represents a live workflow execution that may stream events, pause for approval, and emit checkpoints.
 [<Sealed>]
 type WorkflowRun<'Output>
     internal
@@ -496,18 +602,26 @@ type WorkflowRun<'Output>
         checkpointAsync: CancellationToken -> ValueTask<WorkflowCheckpoint<'Output>>,
         disposeAsync: unit -> ValueTask
     ) =
+    /// Gets the run identifier.
     member _.RunId = runId
+
+    /// Gets the event stream for the live workflow run.
     member _.Events = events
 
+    /// Responds to the currently pending approval request.
+    /// <remarks>Calling this when no matching approval is pending causes the runtime to fail.</remarks>
     member _.RespondAsync(response, cancellationToken) =
         respondAsync (response, cancellationToken)
 
+    /// Creates a resumable checkpoint for the current workflow state.
     member _.CreateCheckpointAsync(cancellationToken) = checkpointAsync cancellationToken
 
     interface IAsyncDisposable with
         member _.DisposeAsync() = disposeAsync ()
 
+/// Executes, starts, and resumes workflow definitions.
 type IWorkflowRuntime =
+    /// Runs a workflow to completion and returns its final result.
     abstract RunAsync<'Input, 'Output> :
         definition: WorkflowDefinition<'Input, 'Output> *
         input: 'Input *
@@ -515,6 +629,7 @@ type IWorkflowRuntime =
         cancellationToken: CancellationToken ->
             Task<RunResult<'Output>>
 
+    /// Starts a workflow and returns a live handle for streaming events, approvals, and checkpoints.
     abstract StartAsync<'Input, 'Output> :
         definition: WorkflowDefinition<'Input, 'Output> *
         input: 'Input *
@@ -522,12 +637,15 @@ type IWorkflowRuntime =
         cancellationToken: CancellationToken ->
             Task<WorkflowRun<'Output>>
 
+    /// Resumes a workflow from a prior checkpoint.
+    /// <exception cref="T:System.ArgumentException">The checkpoint is incompatible with the supplied definition.</exception>
     abstract ResumeAsync<'Input, 'Output> :
         definition: WorkflowDefinition<'Input, 'Output> *
         checkpoint: WorkflowCheckpoint<'Output> *
         cancellationToken: CancellationToken ->
             Task<WorkflowRun<'Output>>
 
+/// Helpers for building and executing workflow definitions.
 module Workflow =
     let private singleNodeFragment (node: WorkflowGraph.Node) : WorkflowGraph.Fragment =
         { Nodes = [ node ]
@@ -561,6 +679,8 @@ module Workflow =
           EntryId = entryId
           TerminalIds = terminalIds }
 
+    /// Creates a workflow step backed by user code.
+    /// <remarks>The handler runs inside the current process and is trusted application code.</remarks>
     let code id handler =
         WorkflowValidation.requireNonBlank "id" id |> ignore
 
@@ -576,6 +696,7 @@ module Workflow =
 
         WorkflowStep<'Input, 'Output>(singleNodeFragment node)
 
+    /// Creates a workflow step that executes an agent/signature pair.
     let agent id (agent: AgentDefinition) (signature: Signature<'Input, 'Output>) =
         WorkflowValidation.requireNonBlank "id" id |> ignore
 
@@ -597,6 +718,7 @@ module Workflow =
 
         WorkflowStep<'Input, 'Output>(singleNodeFragment node)
 
+    /// Appends a step to the terminal outputs of an existing workflow definition.
     let thenStep (step: WorkflowStep<'A, 'B>) (definition: WorkflowDefinition<'Input, 'A>) =
         if isNull (box step) then
             nullArg "step"
@@ -604,21 +726,26 @@ module Workflow =
         if isNull (box definition) then
             nullArg "definition"
 
-        let merged =
-            appendFragments
-                { Nodes = definition.Nodes
-                  Edges = definition.Edges
-                  EntryId = definition.EntryId
-                  TerminalIds = definition.TerminalIds }
-                step.Fragment
+        let linkingEdges =
+            definition.TerminalIds
+            |> List.map (fun sourceId ->
+                ({ SourceId = sourceId
+                   TargetId = step.Fragment.EntryId }
+                : WorkflowGraph.Edge))
 
         WorkflowDefinition<'Input, 'B>(
             definition.Id,
             definition.Version,
-            merged.Nodes,
-            merged.Edges,
-            merged.EntryId,
-            merged.TerminalIds
+            [],
+            [],
+            definition.EntryId,
+            step.Fragment.TerminalIds,
+            nodeListBuilder =
+                WorkflowListBuilder.append definition.NodeBuilder (WorkflowListBuilder.ofList step.Fragment.Nodes),
+            edgeListBuilder =
+                WorkflowListBuilder.append
+                    definition.EdgeBuilder
+                    (WorkflowListBuilder.ofList (step.Fragment.Edges @ linkingEdges))
         )
 
     let internal chooseCases
@@ -713,6 +840,8 @@ module Workflow =
                 Edges = merged.Edges @ (extraEdges |> Seq.toList) }
         )
 
+    /// Creates a branching workflow step selected by a case key.
+    /// <remarks>Case matching is exact. A missing key without a default branch causes runtime failure.</remarks>
     let choose
         id
         selector
@@ -845,9 +974,12 @@ module Workflow =
                 Edges = merged.Edges @ (extraEdges |> Seq.toList) }
         )
 
+    /// Creates a fan-out/fan-in workflow step.
+    /// <remarks>The aggregate function receives branch outputs in branch order.</remarks>
     let ``parallel`` id maxConcurrency (branches: WorkflowDefinition<'A, 'B> list) aggregate =
         parallelWithCancellation id maxConcurrency branches (fun values _ -> aggregate values)
 
+    /// Creates a step that pauses for a human approval response.
     let request id prompt =
         WorkflowValidation.requireNonBlank "id" id |> ignore
 
@@ -877,6 +1009,8 @@ module Workflow =
               TerminalIds = [ portNode.Id ] }
         )
 
+    /// Creates a bounded loop around a workflow body.
+    /// <remarks><paramref name="maxIterations" /> is a required safety bound; workflows are not unbounded control-flow graphs.</remarks>
     let loop id maxIterations whileTrue (body: WorkflowDefinition<'A, 'A>) =
         WorkflowValidation.requireNonBlank "id" id |> ignore
 
@@ -928,6 +1062,7 @@ module Workflow =
 
         WorkflowStep<'A, 'A>(fragment)
 
+    /// Creates a named workflow definition from its first step.
     let define id version (first: WorkflowStep<'Input, 'Output>) =
         WorkflowValidation.requireNonBlank "id" id |> ignore
         WorkflowValidation.requireNonBlank "version" version |> ignore
@@ -944,6 +1079,7 @@ module Workflow =
             first.Fragment.TerminalIds
         )
 
+    /// Validates a workflow definition without executing it.
     let validate (definition: WorkflowDefinition<'Input, 'Output>) =
         if isNull (box definition) then
             nullArg "definition"
@@ -1029,15 +1165,20 @@ module Workflow =
 
         let outgoing = edges |> Seq.groupBy _.SourceId |> dict
         let reachable = HashSet<string>(StringComparer.Ordinal)
-
-        let rec visit nodeId =
-            if reachable.Add nodeId then
-                match outgoing.TryGetValue nodeId with
-                | true, nextEdges -> nextEdges |> Seq.iter (fun edge -> visit edge.TargetId)
-                | _ -> ()
+        let pending = Stack<string>()
 
         if not (String.IsNullOrWhiteSpace definition.EntryId) then
-            visit definition.EntryId
+            pending.Push(definition.EntryId)
+
+        while pending.Count > 0 do
+            let nodeId = pending.Pop()
+
+            if reachable.Add nodeId then
+                match outgoing.TryGetValue nodeId with
+                | true, nextEdges ->
+                    for edge in nextEdges do
+                        pending.Push(edge.TargetId)
+                | _ -> ()
 
         for node in nodes do
             if not (reachable.Contains node.Id) then
@@ -1129,6 +1270,7 @@ module Workflow =
 
         issues.ToArray() :> IReadOnlyList<WorkflowValidationIssue>
 
+    /// Runs a workflow to completion.
     let run
         (runtime: IWorkflowRuntime)
         (definition: WorkflowDefinition<'Input, 'Output>)
@@ -1138,6 +1280,7 @@ module Workflow =
         =
         runtime.RunAsync(definition, input, options, cancellationToken)
 
+    /// Starts a workflow and returns a live workflow handle.
     let start
         (runtime: IWorkflowRuntime)
         (definition: WorkflowDefinition<'Input, 'Output>)
@@ -1147,6 +1290,7 @@ module Workflow =
         =
         runtime.StartAsync(definition, input, options, cancellationToken)
 
+    /// Resumes a workflow from a serialized checkpoint.
     let resume
         (runtime: IWorkflowRuntime)
         (definition: WorkflowDefinition<'Input, 'Output>)

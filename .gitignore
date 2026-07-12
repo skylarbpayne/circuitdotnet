@@ -4,6 +4,10 @@ obj/
 out/
 artifacts/
 .docfx/
+_site/
+api/.manifest
+api/*.yml
+api/toc.yml
 
 ## Visual Studio / VS Code
 .vs/

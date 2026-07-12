@@ -62,6 +62,25 @@ type PrefixNamingPolicy(prefix: string) =
 
     override _.ConvertName(name) = prefix + name
 
+type DerivedEnumConverter() =
+    inherit JsonStringEnumConverter()
+
+type CallbackValidator<'T>(validate: 'T -> IReadOnlyList<ValidationIssue>) =
+    interface IContractValidator<'T> with
+        member _.Validate(value) = validate value
+
+[<AllowNullLiteral>]
+type CustomValidationPayload() =
+    member val DisplayName: string = null with get, set
+
+    interface IValidatableObject with
+        member _.Validate(_validationContext) =
+            seq {
+                ValidationResult(" ", [| "displayname" |])
+                ValidationResult(null, [| "missingMember" |])
+                ValidationResult("", Array.empty<string>)
+            }
+
 [<AllowNullLiteral>]
 type NamingPolicyLeaf() =
     [<property: Required>]
@@ -138,6 +157,20 @@ module ContractsTests =
         let paths = issues |> Seq.map _.Path |> Set.ofSeq
         Assert.Contains("$.json_Leaf.json_DisplayName", paths)
         Assert.Contains("$.json_Leaf.wire_name", paths)
+
+    [<Fact>]
+    let ``custom validation results use fallback messages and resolve member names without a naming policy`` () =
+        let options = CircuitJson.createOptions ()
+        options.PropertyNamingPolicy <- null
+
+        let contract = Contract<CustomValidationPayload>.Create(options, Seq.empty)
+        let issues = contract.Validate(CustomValidationPayload())
+
+        Assert.Equal(3, issues.Count)
+        let issueMap = issues |> Seq.map (fun issue -> issue.Path, issue.Message) |> dict
+        Assert.Equal("Validation failed.", issueMap["$.DisplayName"])
+        Assert.Equal("Validation failed.", issueMap["$.missingMember"])
+        Assert.Equal("Validation failed.", issueMap["$"])
 
     [<Fact>]
     let ``recursive validation reports nested collection paths without looping on object cycles`` () =
@@ -342,6 +375,49 @@ module ContractsTests =
         Assert.Same(contract1.Schema, contract2.Schema)
 
     [<Fact>]
+    let ``contracts ignore null validator outputs and reject null validator entries`` () =
+        let nullReturningValidator =
+            CallbackValidator<ResolverInput>(fun _ -> null) :> IContractValidator<ResolverInput>
+
+        let issueReturningValidator =
+            CallbackValidator<ResolverInput>(fun _ ->
+                [| { Path = "$.name"
+                     Code = "custom"
+                     Message = "Name is invalid." } |]
+                :> IReadOnlyList<ValidationIssue>)
+            :> IContractValidator<ResolverInput>
+
+        let contract =
+            Contract<ResolverInput>
+                .Create(
+                    CircuitJson.createOptions (),
+                    seq {
+                        nullReturningValidator
+                        issueReturningValidator
+                    }
+                )
+
+        let issues = contract.Validate(ResolverInput())
+
+        Assert.Single issues |> ignore
+        Assert.Equal("custom", issues[0].Code)
+        Assert.Equal("$.name", issues[0].Path)
+
+        let nullEntry =
+            Assert.Throws<ArgumentException>(fun () ->
+                Contract<ResolverInput>
+                    .Create(
+                        CircuitJson.createOptions (),
+                        seq {
+                            issueReturningValidator
+                            Unchecked.defaultof<IContractValidator<ResolverInput>>
+                        }
+                    )
+                |> ignore)
+
+        Assert.Equal("validators", nullEntry.ParamName)
+
+    [<Fact>]
     let ``contract validators expose a read-only wrapper`` () =
         let contract =
             Contract<CacheProbe<int>>.Create(CircuitJson.createOptions (), Seq.empty)
@@ -523,3 +599,89 @@ module ContractsTests =
 
         Assert.Single tools |> ignore
         Assert.Equal("tool.read", tools[0].Name.Value)
+
+    [<Fact>]
+    let ``serialization fingerprints distinguish stable and unstable option graphs`` () =
+        let stable =
+            SerializationPolicy.tryGetSemanticFingerprint (CircuitJson.createOptions ())
+
+        Assert.True(stable.IsSome)
+
+        let customNaming = CircuitJson.createOptions ()
+        customNaming.PropertyNamingPolicy <- PrefixNamingPolicy("x_")
+        Assert.Equal(ValueNone, SerializationPolicy.tryGetSemanticFingerprint customNaming)
+
+        let relaxedEncoder = CircuitJson.createOptions ()
+        relaxedEncoder.Encoder <- System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+
+        Assert.True(
+            SerializationPolicy.tryGetSemanticFingerprint relaxedEncoder
+            |> ValueOption.isSome
+        )
+
+        let customEncoder = CircuitJson.createOptions ()
+
+        customEncoder.Encoder <-
+            System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.BasicLatin)
+
+        Assert.Equal(ValueNone, SerializationPolicy.tryGetSemanticFingerprint customEncoder)
+
+        let customEnumConverter = CircuitJson.createOptions ()
+        customEnumConverter.Converters.Clear()
+        customEnumConverter.Converters.Add(JsonStringEnumConverter(PrefixNamingPolicy("enum_")))
+        Assert.Equal(ValueNone, SerializationPolicy.tryGetSemanticFingerprint customEnumConverter)
+
+    [<Fact>]
+    let ``serialization fingerprints support stable built-in policy shapes and reject derived converters`` () =
+        let nullOptions =
+            Assert.Throws<ArgumentNullException>(fun () -> SerializationPolicy.tryGetSemanticFingerprint null |> ignore)
+
+        Assert.Equal("options", nullOptions.ParamName)
+
+        let noNamingPolicy = CircuitJson.createOptions ()
+        noNamingPolicy.PropertyNamingPolicy <- null
+
+        Assert.True(
+            SerializationPolicy.tryGetSemanticFingerprint noNamingPolicy
+            |> ValueOption.isSome
+        )
+
+        let noResolver = CircuitJson.createOptions ()
+        noResolver.TypeInfoResolver <- null
+        Assert.Equal(ValueNone, SerializationPolicy.tryGetSemanticFingerprint noResolver)
+
+        let resolverChain = CircuitJson.createOptions ()
+        resolverChain.TypeInfoResolver <- DefaultJsonTypeInfoResolver()
+        resolverChain.TypeInfoResolverChain.Add(DefaultJsonTypeInfoResolver())
+
+        Assert.True(
+            SerializationPolicy.tryGetSemanticFingerprint resolverChain
+            |> ValueOption.isSome
+        )
+
+        let derivedConverter = CircuitJson.createOptions ()
+        derivedConverter.Converters.Clear()
+        derivedConverter.Converters.Add(DerivedEnumConverter())
+        Assert.Equal(ValueNone, SerializationPolicy.tryGetSemanticFingerprint derivedConverter)
+
+    [<Fact>]
+    let ``contracts validate constructor arguments and non object schema roots`` () =
+        let nullSchema =
+            Assert.Throws<ArgumentNullException>(fun () -> SchemaDocument(null) |> ignore)
+
+        Assert.Equal("node", nullSchema.ParamName)
+
+        let nullJsonOptions =
+            Assert.Throws<ArgumentNullException>(fun () -> Contract<int>.Create(null, Seq.empty) |> ignore)
+
+        Assert.Equal("jsonOptions", nullJsonOptions.ParamName)
+
+        let nullValidators =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                Contract<int>.Create(CircuitJson.createOptions (), null) |> ignore)
+
+        Assert.Equal("validators", nullValidators.ParamName)
+
+        let arrayContract = Contract<int[]>.Create(CircuitJson.createOptions (), Seq.empty)
+        let issues = arrayContract.Validate [| 1; 2 |]
+        Assert.Empty issues

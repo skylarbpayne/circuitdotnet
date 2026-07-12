@@ -3,15 +3,25 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <Include>[Circuit.MicrosoftAgentFramework]*</Include>
+    <ExcludeByAttribute>CompilerGeneratedAttribute</ExcludeByAttribute>
+    <SkipAutoProps>true</SkipAutoProps>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="MafRuntimeTests.fs" />
+    <Compile Include="AdapterCoverageTests.fs" />
     <Compile Include="WorkflowRuntimeTests.fs" />
+    <Compile Include="MoreCoverageTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
     <ProjectReference Include="../../src/Circuit.Testing/Circuit.Testing.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.InMemory" />
   </ItemGroup>
 </Project>

@@ -3,12 +3,18 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <Include>[Circuit.Core]*</Include>
+    <SkipAutoProps>true</SkipAutoProps>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="ContractsTests.fs" />
+    <Compile Include="IdentifiersAndResultsTests.fs" />
+    <Compile Include="ProgramsTests.fs" />
+    <Compile Include="ToolsTests.fs" />
     <Compile Include="SkillsTests.fs" />
     <Compile Include="WorkflowDefinitionTests.fs" />
+    <Compile Include="WorkflowsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

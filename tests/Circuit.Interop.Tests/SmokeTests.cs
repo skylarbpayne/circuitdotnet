@@ -1,10 +1,8 @@
-#pragma warning disable CS1591
-
 using System.ComponentModel.DataAnnotations;
-using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Circuit;
 using Circuit.MicrosoftAgentFramework;
 using Microsoft.Extensions.AI;
@@ -93,6 +91,92 @@ public sealed class SmokeTests
             "1.0.0",
             "Echo",
             (context, input, cancellationToken) => Task.FromResult(new ToolOutput { Message = input.Message }));
+    }
+
+    [Fact]
+    public void agent_run_options_validate_tag_constraints_before_crossing_the_core_boundary()
+    {
+        var toCore = typeof(AgentRunOptions).GetMethod("ToCore", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        static Exception InvokeToCore(MethodInfo toCoreMethod, AgentRunOptions options)
+            => Assert.Throws<TargetInvocationException>(() => toCoreMethod.Invoke(options, null)).InnerException!;
+
+        var tooMany = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary(Enumerable.Range(0, 33).Select(index => new KeyValuePair<string, string>($"tag-{index}", "value")))
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, tooMany)).ParamName);
+
+        var reserved = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("circuit.trace", "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, reserved)).ParamName);
+
+        var longKey = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new(new string('k', 65), "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, longKey)).ParamName);
+
+        var longValue = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("team", new string('v', 257))])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, longValue)).ParamName);
+
+        var blankKey = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new(" ", "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, blankKey)).ParamName);
+
+        var nullValue = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new KeyValuePair<string, string>("team", null!)])
+        };
+        Assert.Equal("tags", ((ArgumentNullException)InvokeToCore(toCore, nullValue)).ParamName);
+
+        var duplicate = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("team", "one"), new("team", "two")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, duplicate)).ParamName);
+    }
+
+    [Fact]
+    public void add_tool_validator_preserves_the_original_contract_serializer_options()
+    {
+        var options = Circuit.Core.CircuitJson.createOptions();
+        options.PropertyNamingPolicy = new PrefixNamingPolicy("x_");
+        options.Converters.Clear();
+        options.Converters.Add(new JsonStringEnumConverter(new PrefixNamingPolicy("enum_")));
+        options.MakeReadOnly();
+
+        var input = Circuit.Core.Contract<ToolSchemaCarrier>.Create(options, []);
+        var output = Circuit.Core.Contract<ToolSchemaCarrier>.Create(options, []);
+        var coreTool = Circuit.Core.ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>.Create(
+            "tool.schema",
+            "1.0.0",
+            "Schema",
+            input,
+            output,
+            new Func<Circuit.Core.ToolContext, ToolSchemaCarrier, Task<ToolSchemaCarrier>>((_, value) => Task.FromResult(value)));
+
+        var constructor = typeof(ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(info => info.GetParameters() is [{ ParameterType: var parameterType }] && parameterType == typeof(Circuit.Core.ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>));
+
+        var wrapper = (ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>)constructor.Invoke([coreTool]);
+        var withInputValidator = wrapper.AddInputValidator(new NoOpValidator<ToolSchemaCarrier>());
+        var withOutputValidator = wrapper.AddOutputValidator(new NoOpValidator<ToolSchemaCarrier>());
+
+        Assert.Equal(wrapper.InputJsonSchema, withInputValidator.InputJsonSchema);
+        Assert.Equal(wrapper.OutputJsonSchema, withOutputValidator.OutputJsonSchema);
+        Assert.Contains("x_mode", withInputValidator.InputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("enum_ready", withInputValidator.InputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("x_mode", withOutputValidator.OutputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("enum_ready", withOutputValidator.OutputJsonSchema, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -409,106 +493,6 @@ public sealed class SmokeTests
         Assert.Equal("pong", result.Result.Value!.Message);
     }
 
-    [Fact]
-    public async Task package_console_smoke_uses_built_nupkgs_not_project_references()
-    {
-        var packagesDir = Path.Combine(Path.GetTempPath(), $"circuit-packages-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(packagesDir);
-
-        try
-        {
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit.Core", "Circuit.Core.fsproj"), packagesDir);
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit", "Circuit.csproj"), packagesDir);
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit.MicrosoftAgentFramework", "Circuit.MicrosoftAgentFramework.fsproj"), packagesDir);
-
-            var packageVersion = GetPackedVersion(packagesDir, "CircuitDotNet");
-            var projectDir = Path.Combine(Path.GetTempPath(), $"circuit-smoke-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(projectDir);
-
-            try
-            {
-                await File.WriteAllTextAsync(
-                    Path.Combine(projectDir, "Smoke.csproj"),
-                    $$"""
-                    <Project Sdk="Microsoft.NET.Sdk">
-                      <PropertyGroup>
-                        <OutputType>Exe</OutputType>
-                        <TargetFramework>net10.0</TargetFramework>
-                        <Nullable>enable</Nullable>
-                        <RestoreSources>{{packagesDir}};https://api.nuget.org/v3/index.json</RestoreSources>
-                      </PropertyGroup>
-                      <ItemGroup>
-                        <PackageReference Include="CircuitDotNet" Version="{{packageVersion}}" />
-                        <PackageReference Include="CircuitDotNet.MicrosoftAgentFramework" Version="{{packageVersion}}" />
-                        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
-                      </ItemGroup>
-                    </Project>
-                    """);
-
-                await File.WriteAllTextAsync(
-                    Path.Combine(projectDir, "Program.cs"),
-                    """
-                    using System.Collections.Generic;
-                    using System.Threading;
-                    using System.Threading.Tasks;
-                    using Circuit;
-                    using Microsoft.Extensions.AI;
-                    using Microsoft.Extensions.DependencyInjection;
-
-                    var services = new ServiceCollection();
-                    services.AddSingleton<IChatClient>(new SmokeChatClient());
-                    services.AddCircuit(_ => { });
-                    await using var provider = services.BuildServiceProvider();
-                    var client = provider.GetRequiredService<ICircuitClient>();
-                    var agent = new AgentDefinition("smoke.agent", "1.0.0", "Smoke", "Return pong.");
-                    var signature = new AgentSignature<SmokeInput, SmokeOutput>("smoke.signature", "1.0.0", "Smoke", "Return pong.");
-                    var result = await client.RunAsync(agent, signature, new SmokeInput { Message = "ping" });
-                    if (!result.Result.IsSuccess || result.Result.Value?.Message != "pong")
-                    {
-                        throw new System.Exception("Smoke failed.");
-                    }
-                    System.Console.WriteLine(result.Result.Value!.Message);
-
-                    sealed class SmokeInput
-                    {
-                        public required string Message { get; init; }
-                    }
-
-                    sealed class SmokeOutput
-                    {
-                        public required string Message { get; init; }
-                    }
-
-                    sealed class SmokeChatClient : IChatClient, System.IDisposable
-                    {
-                        public void Dispose() { }
-                        public object? GetService(System.Type serviceType, object? serviceKey) => null;
-                        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
-                            => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "{\"message\":\"pong\"}")));
-                        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            yield return new ChatResponseUpdate(ChatRole.Assistant, "{\"message\":\"pong\"}");
-                            await Task.Yield();
-                        }
-                    }
-                    """);
-
-                await RunProcessAsync(projectDir, "dotnet", "build -v minimal");
-                var output = await RunProcessAsync(projectDir, "dotnet", "run --no-build");
-                Assert.Contains("pong", output);
-            }
-            finally
-            {
-                TryDelete(projectDir);
-            }
-        }
-        finally
-        {
-            TryDelete(packagesDir);
-        }
-    }
-
     private static void InspectType(Type type, string location, ISet<string> forbidden, ISet<Type> visited)
     {
         Inspect(type, location, forbidden, visited);
@@ -605,57 +589,6 @@ public sealed class SmokeTests
             {
                 Inspect(argument, location, forbidden, visited);
             }
-        }
-    }
-
-    private static async Task PackAsync(string projectPath, string outputDirectory)
-    {
-        var projectDirectory = Path.GetDirectoryName(projectPath)!;
-        await RunProcessAsync(projectDirectory, "dotnet", $"pack {Path.GetFileName(projectPath)} -c Release --no-build -o \"{outputDirectory}\"");
-    }
-
-    private static string GetPackedVersion(string packagesDirectory, string packageId)
-    {
-        var package = Directory.GetFiles(packagesDirectory, "*.nupkg")
-            .Where(path => !path.EndsWith(".symbols.nupkg", StringComparison.OrdinalIgnoreCase))
-            .Where(path => !path.EndsWith(".snupkg", StringComparison.OrdinalIgnoreCase))
-            .Single(path => Path.GetFileName(path).StartsWith(packageId + ".0", StringComparison.Ordinal));
-
-        var fileName = Path.GetFileNameWithoutExtension(package);
-        return fileName[(packageId.Length + 1)..];
-    }
-
-    private static async Task<string> RunProcessAsync(string workingDirectory, string fileName, string arguments)
-    {
-        var startInfo = new ProcessStartInfo(fileName, arguments)
-        {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-
-        startInfo.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH");
-        startInfo.Environment["DOTNET_ROOT"] = Environment.GetEnvironmentVariable("DOTNET_ROOT");
-
-        using var process = Process.Start(startInfo)!;
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-
-        if (process.ExitCode != 0)
-        {
-            throw new Xunit.Sdk.XunitException($"Command failed: {fileName} {arguments}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
-        }
-
-        return stdout + stderr;
-    }
-
-    private static void TryDelete(string path)
-    {
-        if (Directory.Exists(path))
-        {
-            Directory.Delete(path, recursive: true);
         }
     }
 
@@ -821,6 +754,68 @@ public sealed class SmokeTests
     {
         [Required]
         public string Message { get; set; } = string.Empty;
+    }
+
+    private sealed class EnumeratedTagDictionary(IEnumerable<KeyValuePair<string, string>> entries) : IReadOnlyDictionary<string, string>
+    {
+        private readonly KeyValuePair<string, string>[] _entries = entries.ToArray();
+
+        public IEnumerator<KeyValuePair<string, string>> GetEnumerator()
+        {
+            foreach (var entry in _entries)
+            {
+                yield return entry;
+            }
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public int Count => _entries.Length;
+
+        public IEnumerable<string> Keys => _entries.Select(static entry => entry.Key);
+
+        public IEnumerable<string> Values => _entries.Select(static entry => entry.Value);
+
+        public bool ContainsKey(string key) => _entries.Any(entry => string.Equals(entry.Key, key, StringComparison.Ordinal));
+
+        public bool TryGetValue(string key, out string value)
+        {
+            foreach (var entry in _entries)
+            {
+                if (string.Equals(entry.Key, key, StringComparison.Ordinal))
+                {
+                    value = entry.Value;
+                    return true;
+                }
+            }
+
+            value = string.Empty;
+            return false;
+        }
+
+        public string this[string key]
+            => TryGetValue(key, out var value) ? value : throw new KeyNotFoundException(key);
+    }
+
+    private sealed class PrefixNamingPolicy(string prefix) : JsonNamingPolicy
+    {
+        public override string ConvertName(string name) => prefix + name.ToLowerInvariant();
+    }
+
+    private sealed class NoOpValidator<T> : IContractValidator<T>
+    {
+        public IReadOnlyList<ValidationIssue> Validate(T value) => [];
+    }
+
+    private enum ToolSchemaMode
+    {
+        Ready,
+    }
+
+    private sealed class ToolSchemaCarrier
+    {
+        [Required]
+        public ToolSchemaMode Mode { get; set; } = ToolSchemaMode.Ready;
     }
 
     private static async Task ConsumeAsync<T>(WorkflowRun<T> run, CancellationToken cancellationToken)

@@ -1,5 +1,3 @@
-#pragma warning disable CS1591
-
 using System.Reflection;
 using System.Text.Json;
 using Circuit.Core;
@@ -7,8 +5,14 @@ using Microsoft.Extensions.AI;
 
 namespace Circuit;
 
+/// <summary>
+/// Runs typed Circuit agents and manages adapter-owned session state.
+/// </summary>
 public interface IAgentClient
 {
+    /// <summary>
+    /// Runs an agent to completion and returns the typed result.
+    /// </summary>
     Task<AgentRunResult<TOutput>> RunAsync<TInput, TOutput>(
         AgentDefinition agent,
         AgentSignature<TInput, TOutput> signature,
@@ -16,6 +20,9 @@ public interface IAgentClient
         AgentRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Runs an agent and streams its public events.
+    /// </summary>
     IAsyncEnumerable<AgentRunEvent<TOutput>> RunStreamingAsync<TInput, TOutput>(
         AgentDefinition agent,
         AgentSignature<TInput, TOutput> signature,
@@ -23,39 +30,63 @@ public interface IAgentClient
         AgentRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Serializes adapter-owned session state for a specific agent definition.
+    /// </summary>
     Task<JsonElement> SerializeSessionAsync(
         AgentDefinition agent,
         CircuitSession session,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Restores adapter-owned session state for a specific agent definition.
+    /// </summary>
     Task<CircuitSession> DeserializeSessionAsync(
         AgentDefinition agent,
         JsonElement state,
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Runs Circuit workflows, including streaming, approvals, and resume.
+/// </summary>
 public interface IWorkflowClient
 {
+    /// <summary>
+    /// Runs a workflow to completion and returns the typed result.
+    /// </summary>
     Task<AgentRunResult<TOutput>> RunWorkflowAsync<TInput, TOutput>(
         WorkflowDefinition<TInput, TOutput> workflow,
         TInput input,
         WorkflowRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Starts a workflow and returns a streaming handle.
+    /// </summary>
     Task<WorkflowRun<TOutput>> StartWorkflowAsync<TInput, TOutput>(
         WorkflowDefinition<TInput, TOutput> workflow,
         TInput input,
         WorkflowRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Resumes a workflow from a previously created checkpoint.
+    /// </summary>
     Task<WorkflowRun<TOutput>> ResumeWorkflowAsync<TInput, TOutput>(
         WorkflowDefinition<TInput, TOutput> workflow,
         WorkflowCheckpoint<TOutput> checkpoint,
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Combines the public agent and workflow client surfaces.
+/// </summary>
 public interface ICircuitClient : IAgentClient, IWorkflowClient;
 
+/// <summary>
+/// Builds the public Circuit client backed by the Microsoft Agent Framework adapter.
+/// </summary>
 public sealed class CircuitClientBuilder
 {
     private readonly List<IToolResolver> _toolResolvers = [];
@@ -64,12 +95,18 @@ public sealed class CircuitClientBuilder
     private readonly MicrosoftAgentFrameworkOptions _mafOptions = new();
     private IChatClient? _chatClient;
 
+    /// <summary>
+    /// Uses the supplied chat client as the primary Microsoft Agent Framework transport.
+    /// </summary>
     public CircuitClientBuilder UseMicrosoftAgentFramework(IChatClient chatClient)
     {
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         return this;
     }
 
+    /// <summary>
+    /// Configures Microsoft Agent Framework adapter options before the client is built.
+    /// </summary>
     public CircuitClientBuilder ConfigureMicrosoftAgentFramework(Action<MicrosoftAgentFrameworkOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(configure);
@@ -77,6 +114,9 @@ public sealed class CircuitClientBuilder
         return this;
     }
 
+    /// <summary>
+    /// Adds a public tool resolver.
+    /// </summary>
     public CircuitClientBuilder AddToolResolver(IToolResolver resolver)
     {
         ArgumentNullException.ThrowIfNull(resolver);
@@ -84,6 +124,9 @@ public sealed class CircuitClientBuilder
         return this;
     }
 
+    /// <summary>
+    /// Adds a public skill resolver.
+    /// </summary>
     public CircuitClientBuilder AddSkillResolver(ISkillResolver resolver)
     {
         ArgumentNullException.ThrowIfNull(resolver);
@@ -91,6 +134,9 @@ public sealed class CircuitClientBuilder
         return this;
     }
 
+    /// <summary>
+    /// Adds a public run observer.
+    /// </summary>
     public CircuitClientBuilder AddRunObserver(IRunObserver observer)
     {
         ArgumentNullException.ThrowIfNull(observer);
@@ -98,6 +144,9 @@ public sealed class CircuitClientBuilder
         return this;
     }
 
+    /// <summary>
+    /// Builds the client.
+    /// </summary>
     public ICircuitClient Build()
     {
         if (_chatClient is null)
@@ -141,7 +190,6 @@ public sealed class CircuitClientBuilder
         return (ICircuitClient?)client
             ?? throw new InvalidOperationException("Circuit.MicrosoftAgentFrameworkRuntimeFactory.CreateClient returned null.");
     }
-
 }
 
 internal static class CircuitClientFactory

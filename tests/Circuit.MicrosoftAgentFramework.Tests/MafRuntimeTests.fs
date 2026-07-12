@@ -6,6 +6,7 @@ open System
 open System.Collections.Frozen
 open System.Collections.Generic
 open System.ComponentModel.DataAnnotations
+open System.Diagnostics
 open System.IO
 open System.Reflection
 open System.Text
@@ -15,11 +16,19 @@ open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
 open System.Runtime.Loader
+open Circuit
 open Circuit.Core
 open Circuit.MicrosoftAgentFramework
 open Microsoft.Agents.AI
 open Microsoft.Extensions.AI
+open OpenTelemetry
+open OpenTelemetry.Metrics
+open OpenTelemetry.Trace
+open Circuit.Testing
 open Xunit
+
+[<assembly: CollectionBehavior(DisableTestParallelization = true)>]
+do ()
 
 [<AllowNullLiteral>]
 type TestInput() =
@@ -220,24 +229,23 @@ type FakeChatClient
         member _.GetService(_serviceType, _serviceKey) = null
 
 type RecordingObserver() =
-    let observations = ResizeArray<MafRunObservation>()
-    let events = ResizeArray<MafObservedEvent>()
+    let events = ResizeArray<RunEventEnvelope>()
 
-    member _.Observations = observations
     member _.Events = events
 
-    interface IRunObserver with
-        member _.OnRunStartedAsync(_context, _startedAt, _cancellationToken) = ValueTask()
+    member _.Observations =
+        events
+        |> Seq.filter (fun event ->
+            event.Kind = AgentRunEventKind.RunCompleted
+            || event.Kind = AgentRunEventKind.RunFailed)
+        |> Seq.toArray
 
-        member _.OnRunEventAsync(event, _cancellationToken) =
+    interface Circuit.IRunObserver with
+        member _.OnEventAsync(event, _cancellationToken) =
             events.Add event
             ValueTask()
 
-        member _.OnRunCompletedAsync(observation, _cancellationToken) =
-            observations.Add observation
-            ValueTask()
-
-module private Helpers =
+module internal Helpers =
     let private runOptionsCtor =
         typeof<RunOptions>
             .GetConstructor(
@@ -490,7 +498,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
 
         let objectResult =
@@ -545,7 +553,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
         let signature = createSignature<TestOutput> ()
         let runOptions = createRunOptions None StructuredOutputPolicy.NativeOnly
@@ -571,7 +579,7 @@ module MafRuntimeTests =
                     :> IAsyncEnumerable<ChatResponseUpdate>)
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let stream =
             runtime.RunStreamingAsync(
@@ -612,7 +620,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
 
         let result =
@@ -637,7 +645,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
         let signature = createSignature<TestOutput> ()
 
@@ -667,7 +675,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
 
         let result =
@@ -699,7 +707,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
 
         let result =
@@ -729,7 +737,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime streamingClient None [| observer :> IRunObserver |]
+        let runtime =
+            createRuntime streamingClient None [| observer :> Circuit.IRunObserver |]
 
         let events =
             runtime.RunStreamingAsync(
@@ -747,13 +756,15 @@ module MafRuntimeTests =
 
         let observerTerminalEvents =
             observer.Events
-            |> Seq.filter (fun event -> event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+            |> Seq.filter (fun event ->
+                event.Kind = AgentRunEventKind.RunCompleted
+                || event.Kind = AgentRunEventKind.RunFailed)
             |> Seq.toArray
 
         Assert.Single(observerTerminalEvents) |> ignore
-        Assert.Equal(RunEventKind.RunFailed, observerTerminalEvents[0].Kind)
+        Assert.Equal(AgentRunEventKind.RunFailed, observerTerminalEvents[0].Kind)
         Assert.Single(observer.Observations) |> ignore
-        Assert.Equal(CircuitFailureCode.Decode, observer.Observations[0].Failure.Value.Code)
+        Assert.Equal(AgentFailureCode.Decode, observer.Observations[0].Failure.Code)
         Assert.Equal(0, streamingClient.StreamingCalls)
 
     [<Fact>]
@@ -769,7 +780,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime streamingClient None [| observer :> IRunObserver |]
+        let runtime =
+            createRuntime streamingClient None [| observer :> Circuit.IRunObserver |]
 
         let events =
             runtime.RunStreamingAsync(
@@ -786,14 +798,71 @@ module MafRuntimeTests =
 
         let observerTerminalEvents =
             observer.Events
-            |> Seq.filter (fun event -> event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+            |> Seq.filter (fun event ->
+                event.Kind = AgentRunEventKind.RunCompleted
+                || event.Kind = AgentRunEventKind.RunFailed)
             |> Seq.toArray
 
         Assert.Single(observerTerminalEvents) |> ignore
-        Assert.Equal(RunEventKind.RunFailed, observerTerminalEvents[0].Kind)
+        Assert.Equal(AgentRunEventKind.RunFailed, observerTerminalEvents[0].Kind)
         Assert.Single(observer.Observations) |> ignore
-        Assert.Equal(CircuitFailureCode.Cancelled, observer.Observations[0].Failure.Value.Code)
+        Assert.Equal(AgentFailureCode.Cancelled, observer.Observations[0].Failure.Code)
         Assert.Equal(0, streamingClient.StreamingCalls)
+
+    [<Fact>]
+    let ``streaming tool resolver failures emit one generic terminal event without leaking resolver details`` () =
+        let observer = RecordingObserver()
+
+        let runtime =
+            createRuntimeWith
+                (fun options ->
+                    options.ToolResolvers <-
+                        [| { new IToolResolver with
+                               member _.ResolveAsync(_context, _cancellationToken) =
+                                   raise (
+                                       InvalidOperationException("resolver-secret /tmp/tool-secret-root/secret.txt")
+                                   ) } |])
+                (new FakeChatClient(
+                    (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                ))
+                None
+                [| observer :> Circuit.IRunObserver |]
+
+        let events =
+            runtime.RunStreamingAsync(
+                createAgent "Resolve tools safely.",
+                createSignature<TestOutput> (),
+                TestInput(Token = "resolver-secret"),
+                createRunOptions None StructuredOutputPolicy.NativeOnly,
+                CancellationToken.None
+            )
+            |> collectStreamEvents
+
+        Assert.Equal<RunEventKind[]>([| RunEventKind.RunStarted; RunEventKind.RunFailed |], events |> Array.map _.Kind)
+        Assert.True(events[1].Failure.IsSome)
+        Assert.Equal(CircuitFailureCode.Tool, events[1].Failure.Value.Code)
+        Assert.Equal("Tool resolution failed.", events[1].Failure.Value.Message)
+        Assert.DoesNotContain("resolver-secret", events[1].Failure.Value.Message)
+        Assert.DoesNotContain("/tmp/tool-secret-root", events[1].Failure.Value.Message)
+        Assert.True(events[1].Failure.Value.Exception.IsSome)
+        Assert.Contains("resolver-secret", events[1].Failure.Value.Exception.Value.Message)
+
+        let observerTerminalEvents =
+            observer.Events
+            |> Seq.filter (fun event ->
+                event.Kind = AgentRunEventKind.RunCompleted
+                || event.Kind = AgentRunEventKind.RunFailed)
+            |> Seq.toArray
+
+        Assert.Single(observerTerminalEvents) |> ignore
+        Assert.Equal(AgentRunEventKind.RunFailed, observerTerminalEvents[0].Kind)
+        Assert.Equal("Tool resolution failed.", observerTerminalEvents[0].Failure.Message)
+        Assert.DoesNotContain("resolver-secret", observerTerminalEvents[0].Failure.Message)
+        Assert.DoesNotContain("/tmp/tool-secret-root", observerTerminalEvents[0].Failure.Message)
+
+        Assert.Single(observer.Observations) |> ignore
+        Assert.Equal("Tool resolution failed.", observer.Observations[0].Failure.Message)
 
     [<Fact>]
     let ``cancellation reaches the fake client`` () =
@@ -809,7 +878,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None Array.empty<IRunObserver>
+        let runtime = createRuntime fake None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
         use cts = new CancellationTokenSource()
 
@@ -840,7 +909,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None [| observer :> IRunObserver |]
+        let runtime = createRuntime fake None [| observer :> Circuit.IRunObserver |]
 
         let result =
             runtime
@@ -858,13 +927,14 @@ module MafRuntimeTests =
         Assert.Equal("The provider request failed.", result.Result.Failure.Message)
         Assert.DoesNotContain("provider-secret", result.Result.Failure.Message)
 
-        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
-        |> ignore
+        let failedEvent =
+            Assert.Single(
+                observer.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
 
-        Assert.Equal("The provider request failed.", observer.Events[0].Failure.Value.Message)
-        Assert.DoesNotContain("provider-secret", observer.Events[0].Failure.Value.Message)
         Assert.Single(observer.Observations) |> ignore
-        Assert.Equal("The provider request failed.", observer.Observations[0].Failure.Value.Message)
+        Assert.Equal("The provider request failed.", observer.Observations[0].Failure.Message)
 
     [<Fact>]
     let ``output decode failures are sanitized before reaching public failures and observer events`` () =
@@ -878,7 +948,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime fake None [| observer :> IRunObserver |]
+        let runtime = createRuntime fake None [| observer :> Circuit.IRunObserver |]
 
         let result =
             runtime
@@ -896,13 +966,14 @@ module MafRuntimeTests =
         Assert.Equal("The provider response could not be decoded.", result.Result.Failure.Message)
         Assert.DoesNotContain("decode-secret", result.Result.Failure.Message)
 
-        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
-        |> ignore
+        let failedEvent =
+            Assert.Single(
+                observer.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
 
-        Assert.Equal("The provider response could not be decoded.", observer.Events[0].Failure.Value.Message)
-        Assert.DoesNotContain("decode-secret", observer.Events[0].Failure.Value.Message)
         Assert.Single(observer.Observations) |> ignore
-        Assert.Equal("The provider response could not be decoded.", observer.Observations[0].Failure.Value.Message)
+        Assert.Equal("The provider response could not be decoded.", observer.Observations[0].Failure.Message)
 
     [<Fact>]
     let ``skill resolver failures are sanitized before reaching public failures and observer events`` () =
@@ -923,7 +994,7 @@ module MafRuntimeTests =
                                    raise (InvalidOperationException("skill-secret /tmp/skill-secret-root/SKILL.md")) } |])
                 fake
                 None
-                [| observer |]
+                [| observer :> Circuit.IRunObserver |]
 
         let result =
             runtime
@@ -941,13 +1012,14 @@ module MafRuntimeTests =
         Assert.Equal("Skill resolution failed.", result.Result.Failure.Message)
         Assert.DoesNotContain("skill-secret", result.Result.Failure.Message)
 
-        Assert.Single(observer.Events |> Seq.filter (fun event -> event.Kind = RunEventKind.RunFailed))
-        |> ignore
+        let failedEvent =
+            Assert.Single(
+                observer.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
 
-        Assert.Equal("Skill resolution failed.", observer.Events[0].Failure.Value.Message)
-        Assert.DoesNotContain("skill-secret", observer.Events[0].Failure.Value.Message)
         Assert.Single(observer.Observations) |> ignore
-        Assert.Equal("Skill resolution failed.", observer.Observations[0].Failure.Value.Message)
+        Assert.Equal("Skill resolution failed.", observer.Observations[0].Failure.Message)
 
     [<Fact>]
     let ``native only does not make a second model call`` () =
@@ -963,7 +1035,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary (Some secondary) Array.empty<IRunObserver>
+        let runtime =
+            createRuntime primary (Some secondary) Array.empty<Circuit.IRunObserver>
 
         let result =
             runtime
@@ -1003,7 +1076,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary (Some secondary) [| observer :> IRunObserver |]
+        let runtime =
+            createRuntime primary (Some secondary) [| observer :> Circuit.IRunObserver |]
 
         let result =
             runtime
@@ -1035,7 +1109,7 @@ module MafRuntimeTests =
 
         Assert.True(
             observer.Events
-            |> Seq.exists (fun event -> event.Kind = RunEventKind.RunCompleted)
+            |> Seq.exists (fun event -> event.Kind = AgentRunEventKind.RunCompleted)
         )
 
     [<Fact>]
@@ -1058,7 +1132,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary (Some secondary) [| observer :> IRunObserver |]
+        let runtime =
+            createRuntime primary (Some secondary) [| observer :> Circuit.IRunObserver |]
 
         let result =
             runtime
@@ -1105,7 +1180,8 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary (Some secondary) [| observer :> IRunObserver |]
+        let runtime =
+            createRuntime primary (Some secondary) [| observer :> Circuit.IRunObserver |]
 
         let events =
             runtime.RunStreamingAsync(
@@ -1149,7 +1225,7 @@ module MafRuntimeTests =
                                    ) } |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let events =
             runtime.RunStreamingAsync(
@@ -1192,7 +1268,7 @@ module MafRuntimeTests =
                     :> IAsyncEnumerable<ChatResponseUpdate>)
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let events =
             runtime.RunStreamingAsync(
@@ -1297,7 +1373,7 @@ module MafRuntimeTests =
                     :> IAsyncEnumerable<ChatResponseUpdate>)
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let events =
             runtime.RunStreamingAsync(
@@ -1340,7 +1416,7 @@ module MafRuntimeTests =
                     :> IAsyncEnumerable<ChatResponseUpdate>)
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let events =
             runtime.RunStreamingAsync(
@@ -1375,13 +1451,13 @@ module MafRuntimeTests =
         use cts = new CancellationTokenSource()
 
         let observer =
-            { new IRunObserver with
-                member _.OnRunStartedAsync(_context, _startedAt, _cancellationToken) =
-                    cts.Cancel()
-                    ValueTask(Task.FromCanceled(cts.Token))
-
-                member _.OnRunEventAsync(_event, _cancellationToken) = ValueTask()
-                member _.OnRunCompletedAsync(_observation, _cancellationToken) = ValueTask() }
+            { new Circuit.IRunObserver with
+                member _.OnEventAsync(event, _cancellationToken) =
+                    if event.Kind = AgentRunEventKind.RunStarted then
+                        cts.Cancel()
+                        ValueTask(Task.FromCanceled(cts.Token))
+                    else
+                        ValueTask() }
 
         let runtime = createRuntime primary None [| observer |]
 
@@ -1422,7 +1498,7 @@ module MafRuntimeTests =
                                    ) } |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let toolResult =
             cancelledToolsRuntime
@@ -1453,7 +1529,7 @@ module MafRuntimeTests =
                                    ) } |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let skillAgent =
             AgentDefinition.Create(
@@ -1508,7 +1584,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| first; second |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let result =
             runtime
@@ -1567,7 +1643,7 @@ module MafRuntimeTests =
                            :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let runForTenant tenantId =
             task {
@@ -1654,7 +1730,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| tool |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let streamingEvents =
             (runtime :> ICircuitRuntime)
@@ -1762,7 +1838,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let sessionAgent = buildSessionAgent runtime (createAgent "Use tools when needed.")
 
@@ -1851,7 +1927,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let sessionAgent = buildSessionAgent runtime (createAgent "Use tools when needed.")
 
@@ -1962,7 +2038,9 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createMafRuntimeWith ignore primary None Array.empty<IRunObserver>
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver>
+
         let sessionAgent = buildSessionAgent runtime (createAgent "Use tools when needed.")
 
         let session =
@@ -2111,7 +2189,7 @@ module MafRuntimeTests =
                         [| StaticToolResolver([| createPolicyTool (ValueSome "allow") |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let resultWithoutHostPolicy =
             runtimeWithoutHostPolicy
@@ -2150,7 +2228,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| toolWithoutNamedPolicy |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let resultWithoutNamedPolicy =
             runtimeWithoutNamedPolicy
@@ -2191,7 +2269,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| tool |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let mappedTool =
             resolveSingleMappedTool
@@ -2250,7 +2328,7 @@ module MafRuntimeTests =
                     options.ToolResolvers <- [| StaticToolResolver([| tool |]) :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let serializationJsonOptions = CircuitJson.createOptions ()
         serializationJsonOptions.Converters.Add(ThrowingArgumentValueConverter())
@@ -2326,7 +2404,9 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary (Some secondary) Array.empty<IRunObserver>
+        let runtime =
+            createRuntime primary (Some secondary) Array.empty<Circuit.IRunObserver>
+
         use cts = new CancellationTokenSource()
 
         let pending =
@@ -2353,7 +2433,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime primary None Array.empty<IRunObserver>
+        let runtime = createRuntime primary None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
 
         let first =
@@ -2418,7 +2498,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
         use cts = new CancellationTokenSource()
         cts.Cancel()
 
@@ -2501,7 +2581,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> streamingUpdates ())
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let stream =
             runtime.RunStreamingAsync(
@@ -2570,7 +2650,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> streamingUpdates ())
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let stream =
             runtime.RunStreamingAsync(
@@ -2639,7 +2719,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> streamingUpdates ())
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
         use cts = new CancellationTokenSource()
 
         let stream =
@@ -2718,7 +2798,7 @@ module MafRuntimeTests =
                 (fun _messages _options _ct -> streamingUpdates ())
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
 
         let stream =
             runtime.RunStreamingAsync(
@@ -2808,7 +2888,7 @@ module MafRuntimeTests =
                            :> IToolResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let agent = createAgent "Follow directions."
         let signature = createSignature<TestOutput> ()
@@ -2977,7 +3057,7 @@ module MafRuntimeTests =
                             [| StaticSkillResolver([| ResolvedSkill.Create(skillReference) |]) :> ISkillResolver |])
                     primary
                     None
-                    Array.empty<IRunObserver>
+                    Array.empty<Circuit.IRunObserver>
 
             let signature = createSignature<TestOutput> ()
 
@@ -3092,7 +3172,7 @@ module MafRuntimeTests =
                            :> ISkillResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let signature = createSignature<TestOutput> ()
 
@@ -3174,7 +3254,7 @@ module MafRuntimeTests =
                     :> IAsyncEnumerable<ChatResponseUpdate>)
             )
 
-        let runtime = createRuntime streamingClient None Array.empty<IRunObserver>
+        let runtime = createRuntime streamingClient None Array.empty<Circuit.IRunObserver>
         let agent = createAgent "Follow directions."
         let signature = createSignature<TestOutput> ()
 
@@ -4026,7 +4106,7 @@ module MafRuntimeTests =
                            StaticSkillResolver([| ResolvedSkill.Create(reference2) |]) :> ISkillResolver |])
                 primary
                 None
-                Array.empty<IRunObserver>
+                Array.empty<Circuit.IRunObserver>
 
         let result =
             runtime
@@ -4047,3 +4127,513 @@ module MafRuntimeTests =
         finally
             deleteDirectory skillRoot1
             deleteDirectory skillRoot2
+
+module OpenTelemetryObserverTests =
+
+    open Helpers
+
+    type FailingRunObserver() =
+        interface Circuit.IRunObserver with
+            member _.OnEventAsync(_event, _cancellationToken) =
+                raise (InvalidOperationException("observer boom"))
+
+    [<Sealed>]
+    type TelemetryHarness() =
+        let spans = ResizeArray<Activity>()
+        let metrics = ResizeArray<Metric>()
+
+        let tracerProvider =
+            Sdk
+                .CreateTracerProviderBuilder()
+                .AddSource(TelemetryContracts.ActivitySourceName)
+                .AddInMemoryExporter(spans)
+                .Build()
+
+        let meterProvider =
+            Sdk
+                .CreateMeterProviderBuilder()
+                .AddMeter(TelemetryContracts.ActivitySourceName)
+                .AddInMemoryExporter(metrics)
+                .Build()
+
+        member _.Spans = spans |> Seq.toArray
+        member _.Metrics = metrics |> Seq.toArray
+
+        member _.Flush() =
+            tracerProvider.ForceFlush() |> ignore
+            meterProvider.ForceFlush() |> ignore
+
+        interface IDisposable with
+            member _.Dispose() =
+                meterProvider.Dispose()
+                tracerProvider.Dispose()
+
+    let private tryGetTag name (activity: Activity) =
+        activity.TagObjects
+        |> Seq.tryPick (fun pair -> if pair.Key = name then Some pair.Value else None)
+
+    let private hasMetric name (metrics: seq<Metric>) =
+        metrics |> Seq.exists (fun metric -> metric.Name = name)
+
+    let private metricPoints (metric: Metric) =
+        [| for point in metric.GetMetricPoints() -> point |]
+
+    let private metricTags (metric: Metric) =
+        metricPoints metric
+        |> Array.collect (fun (point: MetricPoint) -> [| for tag in point.Tags -> tag |])
+
+    let private assertEnvelopeMetadataIsSafe (metadata: IReadOnlyDictionary<string, string>) =
+        for value in metadata.Values do
+            if not (isNull value) then
+                Assert.DoesNotContain("workflow-startup-secret", value)
+                Assert.DoesNotContain("workflow-checkpoint-secret", value)
+                Assert.DoesNotContain("/tmp/", value)
+                Assert.DoesNotContain("   at ", value)
+
+    let private createSecretBearingInvalidWorkflowDefinition () =
+        let secretRoot = "/tmp/workflow-startup-secret/root"
+        let entryNodeId = $"{secretRoot}/entry.step"
+        let missingTerminalId = $"{secretRoot}/missing.terminal"
+
+        let entryNode: WorkflowGraph.Node =
+            { Id = entryNodeId
+              InputType = typeof<int>
+              OutputType = typeof<int>
+              Kind =
+                WorkflowGraph.Code(
+                    WorkflowGraph.CodeHandler<int, int>(fun _ value -> Task.FromResult(value))
+                    :> WorkflowGraph.ICodeHandler
+                ) }
+
+        WorkflowDefinition<int, int>(
+            DefinitionId.Create("workflow.secret-startup.otel"),
+            SemanticVersion.Parse("1.0.0"),
+            [ entryNode ],
+            [],
+            entryNodeId,
+            [ missingTerminalId ]
+        )
+
+    [<Fact>]
+    let ``open telemetry observer emits one root circuit span plus tool child and exports metrics without payloads by default``
+        ()
+        =
+        use telemetry = new TelemetryHarness()
+
+        let observer = OpenTelemetryRunObserver()
+
+        let tool =
+            createResolvedTool
+                (createTestTool "tool.read" ApprovalMode.Never ValueNone (fun _ input ->
+                    Task.FromResult(TestOutput(Text = $"tool:{input.Token}"))))
+                Seq.empty
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some functionResult ->
+                        let toolOutput = Assert.IsType<TestOutput>(functionResult.Result)
+                        Task.FromResult(jsonResponse $"{{\"text\":\"{toolOutput.Text}\"}}")
+                    | None ->
+                        let arguments = Dictionary<string, obj>()
+                        arguments["token"] <- "secret-tool-arg"
+                        Task.FromResult(functionCallResponse "tool-call-1" "tool_read_v1" arguments)),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createRuntimeWith
+                (fun options -> options.ToolResolvers <- [| StaticToolResolver([| tool |]) :> IToolResolver |])
+                primary
+                None
+                [| observer :> Circuit.IRunObserver |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Handle secret-prompt carefully.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "secret-input"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        telemetry.Flush()
+
+        Assert.True(result.Result.IsSuccess)
+
+        let spans =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.Source.Name = TelemetryContracts.ActivitySourceName)
+            |> Seq.toArray
+
+        let root =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "agent.run"))
+
+        let toolSpan =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "tool.read"))
+
+        Assert.Equal(root.TraceId, toolSpan.TraceId)
+        Assert.Equal(root.SpanId, toolSpan.ParentSpanId)
+        Assert.Equal("Tool", string (tryGetTag "circuit.operation.kind" toolSpan).Value)
+        Assert.Null(tryGetTag "circuit.prompt" root)
+        Assert.Null(tryGetTag "circuit.input" root)
+        Assert.Null(tryGetTag "circuit.output" root)
+        Assert.Null(tryGetTag "circuit.tool.arguments" toolSpan)
+        Assert.True(hasMetric "circuit.runs" telemetry.Metrics)
+        Assert.True(hasMetric "circuit.run.duration" telemetry.Metrics)
+        Assert.True(hasMetric "circuit.runs.active" telemetry.Metrics)
+        Assert.True(hasMetric "circuit.tools" telemetry.Metrics)
+        Assert.True(hasMetric "circuit.tool.duration" telemetry.Metrics)
+
+    [<Fact>]
+    let ``open telemetry observer captures redacted payloads when explicitly enabled`` () =
+        use telemetry = new TelemetryHarness()
+
+        let options = OpenTelemetryRunObserverOptions()
+        options.CapturePrompt <- true
+        options.CaptureInput <- true
+        options.CaptureOutput <- true
+        options.CaptureToolArguments <- true
+        options.Redactor <- Func<string, string>(fun value -> value.Replace("secret", "[REDACTED]"))
+
+        let observer = OpenTelemetryRunObserver(options)
+
+        let tool =
+            createResolvedTool
+                (createTestTool "tool.read" ApprovalMode.Never ValueNone (fun _ input ->
+                    Task.FromResult(TestOutput(Text = $"tool:{input.Token}"))))
+                Seq.empty
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some functionResult ->
+                        let toolOutput = Assert.IsType<TestOutput>(functionResult.Result)
+                        Task.FromResult(jsonResponse $"{{\"text\":\"secret-output:{toolOutput.Text}\"}}")
+                    | None ->
+                        let arguments = Dictionary<string, obj>()
+                        arguments["token"] <- "secret-tool-arg"
+                        Task.FromResult(functionCallResponse "tool-call-2" "tool_read_v1" arguments)),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createRuntimeWith
+                (fun options -> options.ToolResolvers <- [| StaticToolResolver([| tool |]) :> IToolResolver |])
+                primary
+                None
+                [| observer :> Circuit.IRunObserver |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Handle secret-prompt carefully.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "secret-input"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        telemetry.Flush()
+
+        Assert.True(result.Result.IsSuccess)
+
+        let spans =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.Source.Name = TelemetryContracts.ActivitySourceName)
+            |> Seq.toArray
+
+        let root =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "agent.run"))
+
+        let toolSpan =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "tool.read"))
+
+        Assert.Contains("[REDACTED]", string (tryGetTag "circuit.prompt" root).Value)
+        Assert.Contains("[REDACTED]", string (tryGetTag "circuit.input" root).Value)
+        Assert.Contains("[REDACTED]", string (tryGetTag "circuit.output" root).Value)
+        Assert.Contains("[REDACTED]", string (tryGetTag "circuit.tool.arguments" toolSpan).Value)
+
+    [<Fact>]
+    let ``tool resolver failures stay generic across run results observers and telemetry tags`` () =
+        use telemetry = new TelemetryHarness()
+
+        let otelObserver = OpenTelemetryRunObserver()
+        let recordingObserver = RecordingObserver()
+
+        let runtime =
+            createRuntimeWith
+                (fun options ->
+                    options.ToolResolvers <-
+                        [| { new IToolResolver with
+                               member _.ResolveAsync(_context, _cancellationToken) =
+                                   raise (
+                                       InvalidOperationException("resolver-secret /tmp/tool-secret-root/secret.txt")
+                                   ) } |])
+                (new FakeChatClient(
+                    (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                ))
+                None
+                [| recordingObserver :> Circuit.IRunObserver
+                   otelObserver :> Circuit.IRunObserver |]
+
+        let result =
+            runtime
+                .RunAsync(
+                    createAgent "Resolve tools safely.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "resolver-secret"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        telemetry.Flush()
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Tool, result.Result.Failure.Code)
+        Assert.Equal("Tool resolution failed.", result.Result.Failure.Message)
+        Assert.DoesNotContain("resolver-secret", result.Result.Failure.Message)
+        Assert.DoesNotContain("/tmp/tool-secret-root", result.Result.Failure.Message)
+        Assert.True(result.Result.Failure.Exception.IsSome)
+        Assert.Contains("resolver-secret", result.Result.Failure.Exception.Value.Message)
+
+        let failedEvent =
+            Assert.Single(
+                recordingObserver.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
+
+        Assert.Equal("Tool resolution failed.", failedEvent.Failure.Message)
+        Assert.DoesNotContain("resolver-secret", failedEvent.Failure.Message)
+        Assert.DoesNotContain("/tmp/tool-secret-root", failedEvent.Failure.Message)
+
+        let circuitSpans =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.Source.Name = TelemetryContracts.ActivitySourceName)
+            |> Seq.toArray
+
+        let root =
+            Assert.Single(circuitSpans |> Array.filter (fun span -> span.OperationName = "agent.run"))
+
+        Assert.Equal(ActivityStatusCode.Error, root.Status)
+        Assert.Equal("Tool", string (tryGetTag "error.type" root).Value)
+
+        let spanTagValues =
+            circuitSpans
+            |> Array.collect (fun span ->
+                span.TagObjects
+                |> Seq.choose (fun pair -> if isNull pair.Value then None else Some(string pair.Value))
+                |> Seq.toArray)
+
+        let metricTagValues =
+            telemetry.Metrics
+            |> Array.collect (fun metric ->
+                metricTags metric
+                |> Array.choose (fun tag -> if isNull tag.Value then None else Some(string tag.Value)))
+
+        for values in [| spanTagValues; metricTagValues |] do
+            Assert.DoesNotContain(values, fun value -> value.Contains("resolver-secret", StringComparison.Ordinal))
+
+            Assert.DoesNotContain(
+                values,
+                fun value -> value.Contains("/tmp/tool-secret-root", StringComparison.Ordinal)
+            )
+
+    [<Fact>]
+    let ``open telemetry observer marks failures and observer exceptions do not change successful results`` () =
+        use telemetry = new TelemetryHarness()
+
+        let otelObserver = OpenTelemetryRunObserver()
+        let failingObserver = FailingRunObserver()
+
+        let successClient =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"ok\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let successRuntime =
+            createRuntime
+                successClient
+                None
+                [| failingObserver :> Circuit.IRunObserver
+                   otelObserver :> Circuit.IRunObserver |]
+
+        let successResult =
+            successRuntime
+                .RunAsync(
+                    createAgent "Follow directions.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "ok"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        Assert.True(successResult.Result.IsSuccess)
+
+        let failureClient =
+            new FakeChatClient(
+                (fun _messages _options _ct -> raise (InvalidOperationException("provider exploded"))),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let failureRuntime =
+            createRuntime failureClient None [| otelObserver :> Circuit.IRunObserver |]
+
+        let failureResult =
+            failureRuntime
+                .RunAsync(
+                    createAgent "Follow directions.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "fail"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        telemetry.Flush()
+
+        Assert.False(failureResult.Result.IsSuccess)
+
+        let failedRoot =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.OperationName = "agent.run")
+            |> Seq.last
+
+        Assert.Equal(ActivityStatusCode.Error, failedRoot.Status)
+        Assert.Equal("Provider", string (tryGetTag "error.type" failedRoot).Value)
+
+    [<Fact>]
+    let ``open telemetry observer keeps workflow startup secrets out of spans and metrics`` () =
+        use telemetry = new TelemetryHarness()
+
+        let observer = OpenTelemetryRunObserver()
+        let recordingObserver = RecordingObserver()
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                ignore
+                primary
+                None
+                [| recordingObserver :> Circuit.IRunObserver
+                   observer :> Circuit.IRunObserver |]
+
+        let result =
+            Workflow.run
+                (runtime :> IWorkflowRuntime)
+                (createSecretBearingInvalidWorkflowDefinition ())
+                1
+                WorkflowRunOptions.Default
+                CancellationToken.None
+            |> _.Result
+
+        telemetry.Flush()
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Workflow, result.Result.Failure.Code)
+        Assert.Equal("The workflow failed to start.", result.Result.Failure.Message)
+        Assert.DoesNotContain("workflow-startup-secret", result.Result.Failure.Message)
+        Assert.DoesNotContain("/tmp/", result.Result.Failure.Message)
+        Assert.True(result.Result.Failure.Exception.IsSome)
+
+        let failedEvent =
+            Assert.Single(
+                recordingObserver.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
+
+        Assert.DoesNotContain("circuit.workflow.failure.exception", failedEvent.DiagnosticMetadata.Keys)
+        Assert.Equal(result.Result.Failure.Exception.Value.GetType().Name, failedEvent.DiagnosticMetadata["error.type"])
+        Assert.Equal("Workflow", failedEvent.DiagnosticMetadata["circuit.failure.code"])
+        Assert.Equal("Run", failedEvent.DiagnosticMetadata["circuit.operation.kind"])
+        assertEnvelopeMetadataIsSafe failedEvent.DiagnosticMetadata
+        Assert.Same(result.Result.Failure.Exception.Value, failedEvent.Failure.Exception)
+
+        let spans =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.Source.Name = TelemetryContracts.ActivitySourceName)
+            |> Seq.toArray
+
+        let root =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "workflow.run"))
+
+        Assert.Equal(ActivityStatusCode.Error, root.Status)
+        Assert.Equal("Workflow", string (tryGetTag "error.type" root).Value)
+
+        let spanTagValues =
+            spans
+            |> Array.collect (fun span ->
+                span.TagObjects
+                |> Seq.choose (fun pair -> if isNull pair.Value then None else Some(string pair.Value))
+                |> Seq.toArray)
+
+        let metricTagValues =
+            telemetry.Metrics
+            |> Array.collect (fun metric ->
+                metricTags metric
+                |> Array.choose (fun tag -> if isNull tag.Value then None else Some(string tag.Value)))
+
+        for values in [| spanTagValues; metricTagValues |] do
+            Assert.DoesNotContain(
+                values,
+                fun value -> value.Contains("workflow-startup-secret", StringComparison.Ordinal)
+            )
+
+            Assert.DoesNotContain(values, fun value -> value.Contains("/tmp/", StringComparison.Ordinal))
+            Assert.DoesNotContain(values, fun value -> value.Contains("   at ", StringComparison.Ordinal))
+
+    [<Fact>]
+    let ``open telemetry observer correlates workflow root and step spans and exports workflow metrics`` () =
+        use telemetry = new TelemetryHarness()
+
+        let observer = OpenTelemetryRunObserver()
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None [| observer :> Circuit.IRunObserver |]
+
+        let step = Workflow.code "step.one" (fun _ value -> Task.FromResult(value + 1))
+        let definition = Workflow.define "workflow.otel" "1.0.0" step
+
+        let result =
+            Workflow.run (runtime :> IWorkflowRuntime) definition 1 WorkflowRunOptions.Default CancellationToken.None
+            |> _.Result
+
+        telemetry.Flush()
+
+        Assert.True(result.Result.IsSuccess)
+
+        let spans =
+            telemetry.Spans
+            |> Seq.filter (fun span -> span.Source.Name = TelemetryContracts.ActivitySourceName)
+            |> Seq.toArray
+
+        let root =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "workflow.run"))
+
+        let stepSpan =
+            Assert.Single(spans |> Array.filter (fun span -> span.OperationName = "step.one"))
+
+        Assert.Equal(root.TraceId, stepSpan.TraceId)
+        Assert.Equal(root.SpanId, stepSpan.ParentSpanId)
+        Assert.True(hasMetric "circuit.workflow.steps" telemetry.Metrics)
+        Assert.True(hasMetric "circuit.workflow.step.duration" telemetry.Metrics)

@@ -6,10 +6,14 @@ open System.Collections.Frozen
 open System.Threading
 open System.Threading.Tasks
 
+/// Controls whether a tool call requires explicit approval before execution.
 [<RequireQualifiedAccess>]
 type ApprovalMode =
+    /// Never request approval. Use only for tools that are already safe for automatic execution.
     | Never = 0
+    /// Always request approval before the tool runs.
     | Always = 1
+    /// Defer the approval decision to a named runtime policy.
     | ByPolicy = 2
 
 module private ToolValidation =
@@ -47,6 +51,7 @@ module private ToolValidation =
              Message = $"Value must be assignable to '{expectedType.FullName}'." } |]
         :> IReadOnlyList<ValidationIssue>
 
+/// Provides the ambient inputs available to a tool invocation.
 [<Sealed>]
 type ToolContext
     internal
@@ -61,12 +66,22 @@ type ToolContext
         if isNull services then
             nullArg "services"
 
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
+
+    /// Gets the user identifier for the run, if any.
     member _.UserId = userId
+
+    /// Gets the ambient service provider.
     member _.Services = services
+
+    /// Gets the cancellation token for the current invocation.
     member _.CancellationToken = cancellationToken
 
+/// Provides the ambient inputs available while resolving tools for a run.
 [<Sealed>]
 type ToolResolutionContext
     internal (runId: RunId, tenantId: string voption, userId: string voption, services: IServiceProvider) =
@@ -74,11 +89,22 @@ type ToolResolutionContext
         if isNull services then
             nullArg "services"
 
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
+
+    /// Gets the user identifier for the run, if any.
     member _.UserId = userId
+
+    /// Gets the ambient service provider.
     member _.Services = services
 
+/// Describes a strongly typed tool contract and implementation.
+/// <remarks>
+/// Approval settings are metadata only. Runtimes may still impose stricter policy or reject unsafe tool configurations.
+/// </remarks>
 [<Sealed>]
 type ToolDefinition<'Input, 'Output>
     internal
@@ -105,15 +131,33 @@ type ToolDefinition<'Input, 'Output>
         ToolValidation.requireNonBlank "description" description |> ignore
         ToolValidation.validateApprovalPolicy approval approvalPolicy |> ignore
 
+    /// Gets the tool identifier.
     member _.Name = name
+
+    /// Gets the tool version.
     member _.Version = version
+
+    /// Gets the human-readable tool description.
     member _.Description = description
+
+    /// Gets the validated input contract.
     member _.Input = input
+
+    /// Gets the validated output contract.
     member _.Output = output
+
+    /// Gets the approval behavior requested for the tool.
     member _.Approval = approval
+
+    /// Gets the named approval policy when <see cref="P:Circuit.Core.ToolDefinition`2.Approval" /> is <see cref="F:Circuit.Core.ApprovalMode.ByPolicy" />.
     member _.ApprovalPolicy = approvalPolicy
+
+    /// Invokes the tool implementation.
+    /// <param name="context">The tool invocation context.</param>
+    /// <param name="input">The validated tool input.</param>
     member _.InvokeAsync(context: ToolContext, input: 'Input) = invokeAsync.Invoke(context, input)
 
+    /// Creates a tool definition with explicit approval metadata.
     static member Create
         (
             id: string,
@@ -136,6 +180,7 @@ type ToolDefinition<'Input, 'Output>
             invokeAsync
         )
 
+    /// Creates a tool definition that always requests approval.
     static member Create
         (
             id: string,
@@ -174,18 +219,25 @@ type internal ResolvedToolExecutor<'Input, 'Output>(definition: ToolDefinition<'
             | _ -> ToolValidation.createTypeIssue definition.Output.ValueType
 
         member _.InvokeAsync(context: ToolContext, value: obj) =
-            task {
-                match value with
-                | :? 'Input as typed ->
-                    let! output = definition.InvokeAsync(context, typed)
-                    return box output
-                | _ ->
-                    return
-                        raise (
-                            InvalidOperationException($"Tool '{definition.Name.Value}' received an invalid input type.")
-                        )
-            }
+            match value with
+            | :? 'Input as typed ->
+                definition
+                    .InvokeAsync(context, typed)
+                    .ContinueWith(
+                        Func<Task<'Output>, obj>(fun completed -> box (completed.GetAwaiter().GetResult())),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+            | _ ->
+                Task.FromException<obj>(
+                    InvalidOperationException($"Tool '{definition.Name.Value}' received an invalid input type.")
+                )
 
+/// Represents a resolved runtime-ready tool descriptor.
+/// <remarks>
+/// Resolved tools erase generic type parameters so runtimes can reason about tool catalogs dynamically.
+/// </remarks>
 [<Sealed>]
 type ResolvedTool
     internal
@@ -198,21 +250,41 @@ type ResolvedTool
         tags: IReadOnlySet<string>,
         executor: IResolvedToolExecutor
     ) =
+    /// Gets the tool identifier.
     member _.Name = name
+
+    /// Gets the tool version.
     member _.Version = version
+
+    /// Gets the human-readable tool description.
     member _.Description = description
+
+    /// Gets the approval behavior requested for the tool.
     member _.Approval = approval
+
+    /// Gets the named approval policy when one was configured.
     member _.ApprovalPolicy = approvalPolicy
+
+    /// Gets the tool tags used during matching.
     member _.Tags = tags
+
+    /// Gets the runtime input CLR type.
     member _.InputType = executor.InputType
+
+    /// Gets the runtime output CLR type.
     member _.OutputType = executor.OutputType
+
+    /// Gets the input JSON Schema.
     member _.InputSchema = executor.InputSchema
+
+    /// Gets the output JSON Schema.
     member _.OutputSchema = executor.OutputSchema
 
     member internal _.ValidateInput(value: obj) = executor.ValidateInput value
     member internal _.ValidateOutput(value: obj) = executor.ValidateOutput value
     member internal _.InvokeAsync(context: ToolContext, value: obj) = executor.InvokeAsync(context, value)
 
+    /// Creates a resolved tool from a typed definition and explicit tags.
     static member Create(definition: ToolDefinition<'Input, 'Output>, tags: IEnumerable<string>) =
         if isNull (box definition) then
             nullArg "definition"
@@ -237,13 +309,17 @@ type ResolvedTool
             ResolvedToolExecutor<'Input, 'Output>(definition)
         )
 
+    /// Creates a resolved tool without tags.
     static member Create(definition: ToolDefinition<'Input, 'Output>) =
         ResolvedTool.Create(definition, Seq.empty)
 
+/// Resolves the tool catalog available to a run.
 type IToolResolver =
+    /// Resolves tools for the supplied run context.
     abstract ResolveAsync:
         context: ToolResolutionContext * cancellationToken: CancellationToken -> ValueTask<IReadOnlyList<ResolvedTool>>
 
+/// Returns a fixed tool list for every resolution request.
 [<Sealed>]
 type StaticToolResolver(tools: IEnumerable<ResolvedTool>) =
     let snapshot =
@@ -256,6 +332,7 @@ type StaticToolResolver(tools: IEnumerable<ResolvedTool>) =
         member _.ResolveAsync(_context, _cancellationToken) =
             ValueTask<IReadOnlyList<ResolvedTool>>(snapshot :> IReadOnlyList<ResolvedTool>)
 
+/// Resolves tools through a caller-supplied delegate.
 [<Sealed>]
 type DelegateToolResolver
     (resolver: Func<ToolResolutionContext, CancellationToken, ValueTask<IReadOnlyList<ResolvedTool>>>) =
@@ -295,12 +372,31 @@ module internal ToolResolution =
         if isNull (box tool.OutputSchema) then
             invalidOp "Resolved tool output schema cannot be null."
 
+    let private appendResolvedTools
+        (tools: ResizeArray<ResolvedTool>)
+        (identities: HashSet<string>)
+        (resolvedTools: IReadOnlyList<ResolvedTool>)
+        =
+        if isNull resolvedTools then
+            invalidOp "Tool resolvers cannot return null tool lists."
+
+        for tool in resolvedTools do
+            validateResolvedTool tool
+
+            let identity = $"{tool.Name.Value}:{tool.Version.Value.Major}"
+
+            if not (identities.Add identity) then
+                invalidOp
+                    $"Duplicate tool identity '{tool.Name.Value}' with major version '{tool.Version.Value.Major}' was resolved."
+
+            tools.Add tool
+
     let resolveAllAsync
         (resolvers: IReadOnlyList<IToolResolver>)
         (context: ToolResolutionContext)
         (cancellationToken: CancellationToken)
         =
-        task {
+        try
             if isNull resolvers then
                 nullArg "resolvers"
 
@@ -308,30 +404,32 @@ module internal ToolResolution =
                 nullArg "context"
 
             if resolvers.Count = 0 then
-                return emptyTools
+                Task.FromResult(emptyTools)
             else
-                let tools = ResizeArray<ResolvedTool>()
-                let identities = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                let tasks = Array.zeroCreate<Task<IReadOnlyList<ResolvedTool>>> resolvers.Count
 
-                for resolver in resolvers do
+                for index = 0 to resolvers.Count - 1 do
+                    let resolver = resolvers[index]
+
                     if isNull (box resolver) then
                         invalidOp "Tool resolvers cannot contain null entries."
 
-                    let! resolvedTools = resolver.ResolveAsync(context, cancellationToken).AsTask()
+                    tasks[index] <- resolver.ResolveAsync(context, cancellationToken).AsTask()
 
-                    if isNull resolvedTools then
-                        invalidOp "Tool resolvers cannot return null tool lists."
+                (Task.WhenAll tasks)
+                    .ContinueWith(
+                        Func<Task<IReadOnlyList<ResolvedTool>[]>, IReadOnlyList<ResolvedTool>>(fun completed ->
+                            let resolvedBatches = completed.GetAwaiter().GetResult()
+                            let tools = ResizeArray<ResolvedTool>()
+                            let identities = HashSet<string>(StringComparer.OrdinalIgnoreCase)
 
-                    for tool in resolvedTools do
-                        validateResolvedTool tool
+                            for resolvedTools in resolvedBatches do
+                                appendResolvedTools tools identities resolvedTools
 
-                        let identity = $"{tool.Name.Value}:{tool.Version.Value.Major}"
-
-                        if not (identities.Add identity) then
-                            invalidOp
-                                $"Duplicate tool identity '{tool.Name.Value}' with major version '{tool.Version.Value.Major}' was resolved."
-
-                        tools.Add tool
-
-                return tools.ToArray() :> IReadOnlyList<ResolvedTool>
-        }
+                            tools.ToArray() :> IReadOnlyList<ResolvedTool>),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+        with ex ->
+            Task.FromException<IReadOnlyList<ResolvedTool>>(ex)

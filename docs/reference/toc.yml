@@ -1,0 +1,12 @@
+- name: CI and release gates
+  href: ci-and-release.md
+- name: Provider compatibility
+  href: provider-compatibility.md
+- name: Errors
+  href: errors.md
+- name: Versioning
+  href: versioning.md
+- name: Security model
+  href: security-model.md
+- name: Microsoft Agent Framework adapter
+  href: maf-adapter.md

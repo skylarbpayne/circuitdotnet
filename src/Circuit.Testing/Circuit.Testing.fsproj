@@ -8,10 +8,14 @@
 
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="ScriptedRuntime.fs" />
+    <Compile Include="RecordingRunObserver.fs" />
+    <Compile Include="RunAssertions.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Circuit.Core/Circuit.Core.fsproj" />
+    <ProjectReference Include="../Circuit/Circuit.csproj" />
   </ItemGroup>
 
   <ItemGroup>

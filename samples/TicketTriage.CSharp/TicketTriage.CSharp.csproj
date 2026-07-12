@@ -7,5 +7,13 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Circuit/Circuit.csproj" />
+    <ProjectReference Include="../../src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
+    <ProjectReference Include="../../src/Circuit.Testing/Circuit.Testing.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" />
   </ItemGroup>
 </Project>

@@ -85,6 +85,34 @@ module internal CircuitPrograms =
         else
             ProgramSuccess()
 
+    let private cancelledOutcome state operationId innerException =
+        ProgramFailure(cancelledFailure state.RootRunId operationId "The circuit run was cancelled." innerException)
+
+    let private invokeBinder state binder value =
+        try
+            (binder value) state
+        with ex when
+            state.CancellationToken.IsCancellationRequested
+            || (ex :? OperationCanceledException) ->
+            Task.FromResult(cancelledOutcome state ValueNone (ValueSome ex))
+
+    let private processCodeValue state operationId value =
+        if state.CancellationToken.IsCancellationRequested then
+            cancelledOutcome state operationId ValueNone
+        else
+            ProgramSuccess value
+
+    let private processCallResult state operationId (result: RunResult<'T>) =
+        addUsage state result.Usage
+        recordSession state result.Session
+
+        if state.CancellationToken.IsCancellationRequested then
+            cancelledOutcome state operationId ValueNone
+        elif result.Result.IsSuccess then
+            ProgramSuccess result.Result.Value
+        else
+            finalizeFailure state operationId result.Result.Failure
+
     let succeed value : ProgramExpr<'T> =
         fun _ -> Task.FromResult(ProgramSuccess value)
 
@@ -99,44 +127,43 @@ module internal CircuitPrograms =
             nullArg "generator"
 
         fun state ->
-            task {
-                try
-                    let program = generator ()
-                    return! program state
-                with ex when
-                    state.CancellationToken.IsCancellationRequested
-                    || (ex :? OperationCanceledException) ->
-                    return
-                        ProgramFailure(
-                            cancelledFailure state.RootRunId ValueNone "The circuit run was cancelled." (ValueSome ex)
-                        )
-            }
+            try
+                let program: ProgramExpr<'T> = generator ()
+
+                (program state)
+                    .ContinueWith(
+                        Func<Task<ProgramOutcome<'T>>, ProgramOutcome<'T>>(fun completed ->
+                            try
+                                completed.GetAwaiter().GetResult()
+                            with ex when
+                                state.CancellationToken.IsCancellationRequested
+                                || (ex :? OperationCanceledException) ->
+                                cancelledOutcome state ValueNone (ValueSome ex)),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+            with ex when
+                state.CancellationToken.IsCancellationRequested
+                || (ex :? OperationCanceledException) ->
+                Task.FromResult(cancelledOutcome state ValueNone (ValueSome ex))
 
     let bind (program: ProgramExpr<'T>) (binder: 'T -> ProgramExpr<'U>) : ProgramExpr<'U> =
         if isNull (box binder) then
             nullArg "binder"
 
         fun state ->
-            task {
-                let! outcome = program state
-
-                match outcome with
-                | ProgramFailure failure -> return ProgramFailure failure
-                | ProgramSuccess value ->
-                    try
-                        return! (binder value) state
-                    with ex when
-                        state.CancellationToken.IsCancellationRequested
-                        || (ex :? OperationCanceledException) ->
-                        return
-                            ProgramFailure(
-                                cancelledFailure
-                                    state.RootRunId
-                                    ValueNone
-                                    "The circuit run was cancelled."
-                                    (ValueSome ex)
-                            )
-            }
+            (program state)
+                .ContinueWith(
+                    Func<Task<ProgramOutcome<'T>>, Task<ProgramOutcome<'U>>>(fun completed ->
+                        match completed.GetAwaiter().GetResult() with
+                        | ProgramFailure failure -> Task.FromResult(ProgramFailure failure)
+                        | ProgramSuccess value -> invokeBinder state binder value),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default
+                )
+                .Unwrap()
 
     let combine first second = bind first (fun () -> second)
 
@@ -145,34 +172,56 @@ module internal CircuitPrograms =
             nullArg "handler"
 
         fun state ->
-            task {
-                try
-                    return! body state
-                with
-                | ex when
-                    state.CancellationToken.IsCancellationRequested
-                    || (ex :? OperationCanceledException)
-                    ->
-                    return
-                        ProgramFailure(
-                            cancelledFailure state.RootRunId ValueNone "The circuit run was cancelled." (ValueSome ex)
-                        )
-                | ex ->
-                    let next = handler ex
-                    return! next state
-            }
+            try
+                (body state)
+                    .ContinueWith(
+                        Func<Task<ProgramOutcome<'T>>, Task<ProgramOutcome<'T>>>(fun completed ->
+                            try
+                                Task.FromResult(completed.GetAwaiter().GetResult())
+                            with
+                            | ex when
+                                state.CancellationToken.IsCancellationRequested
+                                || (ex :? OperationCanceledException)
+                                ->
+                                Task.FromResult(cancelledOutcome state ValueNone (ValueSome ex))
+                            | ex ->
+                                let next = handler ex
+                                next state),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+                    .Unwrap()
+            with
+            | ex when
+                state.CancellationToken.IsCancellationRequested
+                || (ex :? OperationCanceledException)
+                ->
+                Task.FromResult(cancelledOutcome state ValueNone (ValueSome ex))
+            | ex ->
+                let next = handler ex
+                next state
 
     let tryFinally (body: ProgramExpr<'T>) (compensation: unit -> unit) : ProgramExpr<'T> =
         if isNull (box compensation) then
             nullArg "compensation"
 
         fun state ->
-            task {
-                try
-                    return! body state
-                finally
-                    compensation ()
-            }
+            try
+                (body state)
+                    .ContinueWith(
+                        Func<Task<ProgramOutcome<'T>>, ProgramOutcome<'T>>(fun completed ->
+                            try
+                                completed.GetAwaiter().GetResult()
+                            finally
+                                compensation ()),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+            with ex ->
+                compensation ()
+                Task.FromException<ProgramOutcome<'T>>(ex)
 
     let using (resource: 'T :> IDisposable) (binder: 'T -> ProgramExpr<'U>) =
         tryFinally (binder resource) (fun () ->
@@ -196,27 +245,10 @@ module internal CircuitPrograms =
                     try
                         let! value = operation state.ChildCancellationToken
 
-                        if state.CancellationToken.IsCancellationRequested then
-                            return
-                                ProgramFailure(
-                                    cancelledFailure
-                                        state.RootRunId
-                                        operationId
-                                        "The circuit run was cancelled."
-                                        ValueNone
-                                )
-                        else
-                            return ProgramSuccess value
+                        return processCodeValue state operationId value
                     with
                     | :? OperationCanceledException as ex when state.CancellationToken.IsCancellationRequested ->
-                        return
-                            ProgramFailure(
-                                cancelledFailure
-                                    state.RootRunId
-                                    operationId
-                                    "The circuit run was cancelled."
-                                    (ValueSome ex)
-                            )
+                        return cancelledOutcome state operationId (ValueSome ex)
                     | ex ->
                         return
                             ProgramFailure(
@@ -236,34 +268,19 @@ module internal CircuitPrograms =
             nullArg "signature"
 
         fun state ->
-            task {
-                let operationId = ValueSome(nextOperationId state)
+            let operationId = ValueSome(nextOperationId state)
 
-                match ensureActive state operationId with
-                | ProgramFailure failure -> return ProgramFailure failure
-                | ProgramSuccess _ ->
-                    let! result =
-                        state.Runtime.RunAsync(agent, signature, input, state.Options, state.ChildCancellationToken)
-
-                    addUsage state result.Usage
-                    recordSession state result.Session
-
-                    if state.CancellationToken.IsCancellationRequested then
-                        return
-                            ProgramFailure(
-                                cancelledFailure state.RootRunId operationId "The circuit run was cancelled." ValueNone
-                            )
-                    elif result.Result.IsSuccess then
-                        return ProgramSuccess result.Result.Value
-                    else
-                        return
-                            ProgramFailure(
-                                (finalizeFailure state operationId result.Result.Failure
-                                 |> function
-                                     | ProgramFailure failure -> failure
-                                     | _ -> invalidOp "unreachable")
-                            )
-            }
+            match ensureActive state operationId with
+            | ProgramFailure failure -> Task.FromResult(ProgramFailure failure)
+            | ProgramSuccess _ ->
+                (state.Runtime.RunAsync(agent, signature, input, state.Options, state.ChildCancellationToken))
+                    .ContinueWith(
+                        Func<Task<RunResult<'Output>>, ProgramOutcome<'Output>>(fun completed ->
+                            processCallResult state operationId (completed.GetAwaiter().GetResult())),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
 
     let parallelPrograms maxConcurrency (programs: ProgramExpr<'T> list) : ProgramExpr<'T list> =
         if maxConcurrency < 1 then

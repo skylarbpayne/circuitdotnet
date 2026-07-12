@@ -2,8 +2,10 @@ namespace Circuit.MicrosoftAgentFramework.Tests
 
 open System
 open System.Collections.Generic
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
+open Circuit
 open Circuit.Core
 open Circuit.MicrosoftAgentFramework
 open Circuit.MicrosoftAgentFramework.MafWorkflows
@@ -46,11 +48,36 @@ type private WorkflowFakeChatClient() =
 
         member _.GetService(_serviceType, _serviceKey) = null
 
+type private WorkflowRecordingObserver() =
+    let events = ResizeArray<RunEventEnvelope>()
+
+    member _.Events = events
+
+    member _.Observations =
+        events
+        |> Seq.filter (fun event ->
+            event.Kind = AgentRunEventKind.RunCompleted
+            || event.Kind = AgentRunEventKind.RunFailed)
+        |> Seq.toArray
+
+    interface Circuit.IRunObserver with
+        member _.OnEventAsync(event, _cancellationToken) =
+            events.Add event
+            ValueTask()
+
 module private WorkflowHelpers =
     let createRuntime () =
         MafRuntime(new WorkflowFakeChatClient() :> IChatClient, MafRuntimeOptions())
 
     let asWorkflowRuntime (runtime: MafRuntime) = runtime :> IWorkflowRuntime
+
+    let assertEnvelopeMetadataIsSafe (metadata: IReadOnlyDictionary<string, string>) =
+        for value in metadata.Values do
+            if not (isNull value) then
+                Assert.DoesNotContain("workflow-startup-secret", value)
+                Assert.DoesNotContain("workflow-checkpoint-secret", value)
+                Assert.DoesNotContain("/tmp/", value)
+                Assert.DoesNotContain("   at ", value)
 
     let createExternalApprovalRequest requestId title =
         let portInfo =
@@ -113,8 +140,326 @@ module private WorkflowHelpers =
             return events |> Seq.toArray
         }
 
+    [<Literal>]
+    let StartupSecretRoot = "/tmp/workflow-startup-secret/root"
+
+    [<Literal>]
+    let CheckpointSecretRoot = "/tmp/workflow-checkpoint-secret/root"
+
+    let createSecretBearingInvalidDefinition () =
+        let entryNodeId = $"{StartupSecretRoot}/entry.step"
+        let missingTerminalId = $"{StartupSecretRoot}/missing.terminal"
+
+        let entryNode: WorkflowGraph.Node =
+            { Id = entryNodeId
+              InputType = typeof<int>
+              OutputType = typeof<int>
+              Kind =
+                WorkflowGraph.Code(
+                    WorkflowGraph.CodeHandler<int, int>(fun _ value -> Task.FromResult(value))
+                    :> WorkflowGraph.ICodeHandler
+                ) }
+
+        WorkflowDefinition<int, int>(
+            DefinitionId.Create("workflow.secret-startup"),
+            SemanticVersion.Parse("1.0.0"),
+            [ entryNode ],
+            [],
+            entryNodeId,
+            [ missingTerminalId ]
+        )
+
+    let createSingleLineSecretBearingInvalidDefinition () =
+        let entryNodeId = "workflow.resume.secret-entry"
+        let missingTerminalId = "workflow.resume.secret-terminal"
+
+        let entryNode: WorkflowGraph.Node =
+            { Id = entryNodeId
+              InputType = typeof<int>
+              OutputType = typeof<int>
+              Kind =
+                WorkflowGraph.Code(
+                    WorkflowGraph.CodeHandler<int, int>(fun _ value -> Task.FromResult(value))
+                    :> WorkflowGraph.ICodeHandler
+                ) }
+
+        WorkflowDefinition<int, int>(
+            DefinitionId.Create("workflow.secret.resume"),
+            SemanticVersion.Parse("1.0.0"),
+            [ entryNode ],
+            [],
+            entryNodeId,
+            [ missingTerminalId ]
+        )
+
+    let createSecretBearingCheckpoint<'Output> (definition: WorkflowDefinition<int, 'Output>) =
+        use payloadDocument = JsonDocument.Parse("{}")
+
+        WorkflowCheckpoint<'Output>(
+            definition.Id,
+            definition.Version,
+            $"{CheckpointSecretRoot}/fingerprint",
+            "session-secret",
+            "checkpoint-secret",
+            DateTimeOffset.UtcNow,
+            payloadDocument.RootElement.Clone()
+        )
+
 module WorkflowRuntimeTests =
     open WorkflowHelpers
+
+    [<Fact>]
+    let ``workflow agent tool resolver failures stay generic in workflow results and observer events`` () =
+        let observer = WorkflowRecordingObserver()
+        let options = MafRuntimeOptions()
+        options.Observers <- [| observer :> Circuit.IRunObserver |]
+
+        options.ToolResolvers <-
+            [| { new IToolResolver with
+                   member _.ResolveAsync(_context, _cancellationToken) =
+                       raise (InvalidOperationException("resolver-secret /tmp/tool-secret-root/secret.txt")) } |]
+
+        let runtime =
+            MafRuntime(new WorkflowFakeChatClient() :> IChatClient, options)
+            |> asWorkflowRuntime
+
+        let agent =
+            AgentDefinition.Create(
+                "workflow.agent",
+                "1.0.0",
+                "Workflow Agent",
+                "Resolve tools safely.",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                Seq.empty
+            )
+
+        let signature =
+            Signature<TestInput, TestOutput>
+                .Create(
+                    "workflow.signature",
+                    "1.0.0",
+                    "Workflow signature",
+                    "Return structured JSON.",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let definition =
+            Workflow.define "workflow.agent.tool-resolution" "1.0.0" (Workflow.agent "agent.step" agent signature)
+
+        let result =
+            Workflow.run
+                runtime
+                definition
+                (TestInput(Token = "resolver-secret"))
+                WorkflowRunOptions.Default
+                CancellationToken.None
+            |> _.Result
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Tool, result.Result.Failure.Code)
+        Assert.Equal("Tool resolution failed.", result.Result.Failure.Message)
+        Assert.DoesNotContain("resolver-secret", result.Result.Failure.Message)
+        Assert.DoesNotContain("/tmp/tool-secret-root", result.Result.Failure.Message)
+        Assert.True(result.Result.Failure.Exception.IsSome)
+        Assert.Contains("resolver-secret", result.Result.Failure.Exception.Value.Message)
+
+        let failedEvents =
+            observer.Events
+            |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            |> Seq.toArray
+
+        Assert.Equal(2, failedEvents.Length)
+
+        for failedEvent in failedEvents do
+            Assert.Equal("Tool resolution failed.", failedEvent.Failure.Message)
+            Assert.DoesNotContain("resolver-secret", failedEvent.Failure.Message)
+            Assert.DoesNotContain("/tmp/tool-secret-root", failedEvent.Failure.Message)
+
+        Assert.Equal(2, observer.Observations.Length)
+
+        for observation in observer.Observations do
+            Assert.Equal("Tool resolution failed.", observation.Failure.Message)
+
+    [<Fact>]
+    let ``workflow start returns a failed run instead of throwing when startup validation contains secrets`` () =
+        let runtime = createRuntime () |> asWorkflowRuntime
+        let definition = createSecretBearingInvalidDefinition ()
+
+        let run =
+            Workflow.start runtime definition 7 WorkflowRunOptions.Default CancellationToken.None
+            |> _.Result
+
+        let events = collectEvents run |> _.Result
+
+        Assert.Equal<RunEventKind[]>([| RunEventKind.RunStarted; RunEventKind.RunFailed |], events |> Array.map _.Kind)
+
+        let failure =
+            Assert.Single(events |> Array.filter (fun event -> event.Kind = RunEventKind.RunFailed)).Failure.Value
+
+        Assert.Equal(CircuitFailureCode.Workflow, failure.Code)
+        Assert.Equal("The workflow failed to start.", failure.Message)
+        Assert.DoesNotContain("workflow-startup-secret", failure.Message)
+        Assert.DoesNotContain("/tmp/", failure.Message)
+        Assert.True(failure.Exception.IsSome)
+
+    [<Fact>]
+    let ``workflow startup failures stay sanitized in run results and observer diagnostics`` () =
+        let observer = WorkflowRecordingObserver()
+        let options = MafRuntimeOptions()
+        options.Observers <- [| observer :> Circuit.IRunObserver |]
+
+        let runtime =
+            MafRuntime(new WorkflowFakeChatClient() :> IChatClient, options)
+            |> asWorkflowRuntime
+
+        let definition = createSecretBearingInvalidDefinition ()
+
+        let result =
+            Workflow.run runtime definition 9 WorkflowRunOptions.Default CancellationToken.None
+            |> _.Result
+
+        Assert.False(result.Result.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Workflow, result.Result.Failure.Code)
+        Assert.Equal("The workflow failed to start.", result.Result.Failure.Message)
+        Assert.DoesNotContain("workflow-startup-secret", result.Result.Failure.Message)
+        Assert.DoesNotContain("/tmp/", result.Result.Failure.Message)
+        Assert.True(result.Result.Failure.Exception.IsSome)
+
+        let observation = Assert.Single(observer.Observations)
+        Assert.Equal(AgentRunEventKind.RunFailed, observation.Kind)
+        Assert.Equal("The workflow failed to start.", observation.Failure.Message)
+        Assert.DoesNotContain("workflow-startup-secret", observation.Failure.Message)
+        Assert.DoesNotContain("circuit.workflow.failure.exception", observation.DiagnosticMetadata.Keys)
+        Assert.Equal(result.Result.Failure.Exception.Value.GetType().Name, observation.DiagnosticMetadata["error.type"])
+        Assert.Equal("Workflow", observation.DiagnosticMetadata["circuit.failure.code"])
+        Assert.Equal("Run", observation.DiagnosticMetadata["circuit.operation.kind"])
+        assertEnvelopeMetadataIsSafe observation.DiagnosticMetadata
+        Assert.Same(result.Result.Failure.Exception.Value, observation.Failure.Exception)
+
+        for event in observer.Events do
+            assertEnvelopeMetadataIsSafe event.DiagnosticMetadata
+
+    [<Fact>]
+    let ``workflow resume returns a checkpoint mismatch run instead of throwing when checkpoint secrets do not match``
+        ()
+        =
+        let observer = WorkflowRecordingObserver()
+        let options = MafRuntimeOptions()
+        options.Observers <- [| observer :> Circuit.IRunObserver |]
+
+        let runtime =
+            MafRuntime(new WorkflowFakeChatClient() :> IChatClient, options)
+            |> asWorkflowRuntime
+
+        let definition =
+            Workflow.define
+                "workflow.resume.secret"
+                "1.0.0"
+                (Workflow.code "resume.step" (fun _ value -> Task.FromResult(value + 1)))
+
+        let checkpoint = createSecretBearingCheckpoint definition
+
+        let run =
+            Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
+
+        let events = collectEvents run |> _.Result
+
+        Assert.Equal<RunEventKind[]>([| RunEventKind.RunStarted; RunEventKind.RunFailed |], events |> Array.map _.Kind)
+
+        let failure =
+            Assert.Single(events |> Array.filter (fun event -> event.Kind = RunEventKind.RunFailed)).Failure.Value
+
+        Assert.Equal(CircuitFailureCode.CheckpointMismatch, failure.Code)
+
+        Assert.Equal(
+            "The supplied workflow checkpoint does not match this workflow definition fingerprint.",
+            failure.Message
+        )
+
+        Assert.DoesNotContain("workflow-checkpoint-secret", failure.Message)
+        Assert.DoesNotContain("/tmp/", failure.Message)
+
+    [<Fact>]
+    let ``workflow resume returns a generic workflow failure when validation throws a single-line secret`` () =
+        let observer = WorkflowRecordingObserver()
+        let options = MafRuntimeOptions()
+        options.Observers <- [| observer :> Circuit.IRunObserver |]
+
+        let runtime =
+            MafRuntime(new WorkflowFakeChatClient() :> IChatClient, options)
+            |> asWorkflowRuntime
+
+        let definition = createSingleLineSecretBearingInvalidDefinition ()
+
+        let checkpoint =
+            use payloadDocument = JsonDocument.Parse("{}")
+
+            WorkflowCheckpoint<int>(
+                definition.Id,
+                definition.Version,
+                definition.Fingerprint,
+                "resume-session-secret",
+                "resume-checkpoint-secret",
+                DateTimeOffset.UtcNow,
+                payloadDocument.RootElement.Clone()
+            )
+
+        let run =
+            Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
+
+        let events = collectEvents run |> _.Result
+
+        Assert.Equal<RunEventKind[]>([| RunEventKind.RunStarted; RunEventKind.RunFailed |], events |> Array.map _.Kind)
+
+        let failure =
+            Assert.Single(events |> Array.filter (fun event -> event.Kind = RunEventKind.RunFailed)).Failure.Value
+
+        Assert.Equal(CircuitFailureCode.Workflow, failure.Code)
+        Assert.Equal("The workflow failed to resume.", failure.Message)
+        Assert.DoesNotContain("workflow.resume.secret", failure.Message)
+        Assert.Contains("workflow.resume.secret", failure.Exception.Value.Message)
+        Assert.Equal("InvalidOperationException", failure.Exception.Value.GetType().Name)
+
+        let observation = Assert.Single(observer.Observations)
+        Assert.Equal(AgentRunEventKind.RunFailed, observation.Kind)
+        Assert.Equal("The workflow failed to resume.", observation.Failure.Message)
+        Assert.DoesNotContain("workflow.resume.secret", observation.Failure.Message)
+        Assert.DoesNotContain("circuit.workflow.failure.exception", observation.DiagnosticMetadata.Keys)
+        Assert.Equal("InvalidOperationException", observation.DiagnosticMetadata["error.type"])
+        Assert.Equal("Workflow", observation.DiagnosticMetadata["circuit.failure.code"])
+        Assert.Equal("Run", observation.DiagnosticMetadata["circuit.operation.kind"])
+        assertEnvelopeMetadataIsSafe observation.DiagnosticMetadata
+
+        for event in observer.Events do
+            assertEnvelopeMetadataIsSafe event.DiagnosticMetadata
+
+    [<Fact>]
+    let ``workflow start maps startup cancellation to a cancelled failure`` () =
+        let runtime = createRuntime () |> asWorkflowRuntime
+
+        let definition =
+            Workflow.define
+                "workflow.cancel.prestart"
+                "1.0.0"
+                (Workflow.code "cancel.step" (fun _ value -> Task.FromResult(value)))
+
+        use cts = new CancellationTokenSource()
+        cts.Cancel()
+
+        let run =
+            Workflow.start runtime definition 3 WorkflowRunOptions.Default cts.Token
+            |> _.Result
+
+        let events = collectEvents run |> _.Result
+
+        let failure =
+            Assert.Single(events |> Array.filter (fun event -> event.Kind = RunEventKind.RunFailed)).Failure.Value
+
+        Assert.Equal(CircuitFailureCode.Cancelled, failure.Code)
 
     [<Fact>]
     let ``sequence transforms values and emits ordered step events`` () =
@@ -1123,14 +1468,36 @@ module WorkflowRuntimeTests =
 
         Assert.True(completed.Value.Value)
 
+        let assertCheckpointMismatch definition expectedMessage =
+            let resumedMismatch =
+                Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
+
+            let mismatchEvents = collectEvents resumedMismatch |> _.Result
+
+            Assert.Equal<RunEventKind[]>(
+                [| RunEventKind.RunStarted; RunEventKind.RunFailed |],
+                mismatchEvents |> Array.map _.Kind
+            )
+
+            let mismatchFailure =
+                Assert
+                    .Single(
+                        mismatchEvents
+                        |> Array.filter (fun event -> event.Kind = RunEventKind.RunFailed)
+                    )
+                    .Failure.Value
+
+            Assert.Equal(CircuitFailureCode.CheckpointMismatch, mismatchFailure.Code)
+            Assert.Equal(expectedMessage, mismatchFailure.Message)
+
+
         let changedVersion =
             Workflow.define "workflow.checkpoint" "2.0.0" requestStep
             |> Workflow.thenStep finalStep
 
-        Assert.ThrowsAny<Exception>(fun () ->
-            (Workflow.resume runtime changedVersion checkpoint CancellationToken.None).GetAwaiter().GetResult()
-            |> ignore)
-        |> ignore
+        assertCheckpointMismatch
+            changedVersion
+            "The supplied workflow checkpoint does not match this workflow definition version."
 
         let changedTopology =
             Workflow.define
@@ -1140,10 +1507,9 @@ module WorkflowRuntimeTests =
                     ApprovalPrompt.Create($"approve:{value}", "Need approval")))
             |> Workflow.thenStep finalStep
 
-        Assert.ThrowsAny<Exception>(fun () ->
-            (Workflow.resume runtime changedTopology checkpoint CancellationToken.None).GetAwaiter().GetResult()
-            |> ignore)
-        |> ignore
+        assertCheckpointMismatch
+            changedTopology
+            "The supplied workflow checkpoint does not match this workflow definition fingerprint."
 
     [<Fact>]
     let ``checkpoint round-trips delimiter-heavy branch keys and node ids`` () =
@@ -1284,14 +1650,11 @@ module WorkflowRuntimeTests =
         let resumed =
             Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
 
-        let resumedApprovals = collectTwoApprovals resumed
-        Assert.Equal(2, resumedApprovals.Length)
-
-        let resumedApprovalTools = resumedApprovals |> Array.map _.ToolName |> Set.ofArray
+        let queuedApprovalToolName = "branch:2"
 
         let isQueuedWaveApproval (event: RunEvent<int list>) =
             event.Kind = RunEventKind.ApprovalRequested
-            && not (resumedApprovalTools.Contains(event.Approval.Value.ToolName))
+            && StringComparer.Ordinal.Equals(event.Approval.Value.ToolName, queuedApprovalToolName)
 
         let queuedApprovalBeforeRelease =
             use probeCts = new CancellationTokenSource(TimeSpan.FromMilliseconds 300.0)

@@ -1,0 +1,139 @@
+name: Provider contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Which provider matrix to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - openai
+          - azure-openai
+      per_provider_max_cost_usd:
+        description: Hard USD cap per provider job
+        required: true
+        default: "3.00"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  provider-contract:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - openai
+          - azure-openai
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      OPENAI_INPUT_COST_USD_PER_1K: ${{ vars.OPENAI_INPUT_COST_USD_PER_1K }}
+      OPENAI_OUTPUT_COST_USD_PER_1K: ${{ vars.OPENAI_OUTPUT_COST_USD_PER_1K }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+      AZURE_OPENAI_MODEL: ${{ vars.AZURE_OPENAI_MODEL }}
+      AZURE_OPENAI_INPUT_COST_USD_PER_1K: ${{ vars.AZURE_OPENAI_INPUT_COST_USD_PER_1K }}
+      AZURE_OPENAI_OUTPUT_COST_USD_PER_1K: ${{ vars.AZURE_OPENAI_OUTPUT_COST_USD_PER_1K }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.301
+
+      - name: Filter requested providers
+        id: provider-filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.providers }}"
+          case "$requested" in
+            all)
+              echo "selected=true" >> "$GITHUB_OUTPUT"
+              ;;
+            openai|azure-openai)
+              if [[ "$requested" == "${{ matrix.provider }}" ]]; then
+                echo "selected=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "selected=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "Unknown provider selector: $requested" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check provider credentials and cost metadata
+        if: steps.provider-filter.outputs.selected == 'true'
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.provider }}" in
+            openai)
+              if [[ -z "${OPENAI_API_KEY}" || -z "${OPENAI_MODEL}" || -z "${OPENAI_INPUT_COST_USD_PER_1K}" || -z "${OPENAI_OUTPUT_COST_USD_PER_1K}" ]]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "Skipping OpenAI contract: credentials or price metadata are not configured."
+              fi
+              ;;
+            azure-openai)
+              if [[ -z "${AZURE_OPENAI_API_KEY}" || -z "${AZURE_OPENAI_ENDPOINT}" || -z "${AZURE_OPENAI_DEPLOYMENT}" || -z "${AZURE_OPENAI_INPUT_COST_USD_PER_1K}" || -z "${AZURE_OPENAI_OUTPUT_COST_USD_PER_1K}" ]]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "Skipping Azure OpenAI contract: credentials or price metadata are not configured."
+              fi
+              ;;
+          esac
+
+      - name: Restore provider contract harness
+        if: steps.provider-filter.outputs.selected == 'true' && steps.gate.outputs.skip != 'true'
+        run: >-
+          dotnet restore tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj
+          -p:EnableProviderPackages=true
+
+      - name: Build provider contract harness
+        if: steps.provider-filter.outputs.selected == 'true' && steps.gate.outputs.skip != 'true'
+        run: >-
+          dotnet build tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj
+          -c Release
+          --no-restore
+          -p:EnableProviderPackages=true
+
+      - name: Run provider contract matrix
+        if: steps.provider-filter.outputs.selected == 'true' && steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          utc_date="$(date -u +%F)"
+          dotnet run \
+            --project tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj \
+            -c Release \
+            --no-build \
+            -p:EnableProviderPackages=true \
+            -- \
+            --provider "${{ matrix.provider }}" \
+            --artifact-root "$GITHUB_WORKSPACE/artifacts/provider-contract" \
+            --utc-date "$utc_date" \
+            --max-per-provider-cost-usd "${{ inputs.per_provider_max_cost_usd }}"
+
+      - name: Upload provider contract artifacts
+        if: always() && steps.provider-filter.outputs.selected == 'true' && steps.gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provider-contract-${{ matrix.provider }}
+          path: artifacts/provider-contract/${{ matrix.provider }}
+          if-no-files-found: error

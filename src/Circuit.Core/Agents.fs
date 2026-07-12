@@ -40,6 +40,10 @@ module private AgentValidation =
 
         entry
 
+/// Defines a versioned agent and the static metadata required to execute it.
+/// <remarks>
+/// Tool tags are matching hints for tool resolvers, not access-control boundaries. Model hints are advisory and may be ignored by runtimes.
+/// </remarks>
 [<Sealed>]
 type AgentDefinition
     internal
@@ -53,15 +57,40 @@ type AgentDefinition
         skills: IReadOnlyList<SkillReference>,
         metadata: IReadOnlyDictionary<string, string>
     ) =
+    /// Gets the agent identifier.
     member _.Id = id
+
+    /// Gets the agent version.
     member _.Version = version
+
+    /// Gets the human-readable agent name.
     member _.Name = name
+
+    /// Gets the base instructions for the agent.
     member _.Instructions = instructions
+
+    /// Gets the preferred provider model identifier, if one was supplied.
     member _.ModelHint = modelHint
+
+    /// Gets the tool tags used during tool resolution.
     member _.ToolTags = toolTags
+
+    /// Gets the skill references attached to the agent.
     member _.Skills = skills
+
+    /// Gets arbitrary caller-defined metadata.
     member _.Metadata = metadata
 
+    /// Creates a validated agent definition.
+    /// <param name="id">The agent identifier.</param>
+    /// <param name="version">The semantic version in <c>major.minor.patch</c> form.</param>
+    /// <param name="name">The human-readable agent name.</param>
+    /// <param name="instructions">The base instructions for the agent.</param>
+    /// <param name="modelHint">An optional preferred model identifier.</param>
+    /// <param name="toolTags">Tool tags used to narrow matching tools.</param>
+    /// <param name="skills">Skill references attached to the agent.</param>
+    /// <param name="metadata">Additional caller-defined metadata.</param>
+    /// <returns>The created agent definition.</returns>
     static member Create
         (
             id: string,
