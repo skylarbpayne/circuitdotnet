@@ -1,47 +1,95 @@
-# 17. Add telemetry safely
+# 17. Observe runs without recording prompts
 
 ## What you will build
 
-Observe structural signals while content remains redacted. This project is a compiling chapter skeleton; its complete lesson will replace the placeholder in the next tutorial-writing pass.
+You will send the support ticket to OpenAI and export Circuit traces and metrics to the console. The observer records lifecycle structure while its four payload-capture switches stay off.
 
 ## The idea
 
-Each chapter changes one main idea while remaining an independent project.
+Observability answers questions such as “Which definition failed?”, “How long did runs take?”, and “How many operations were cancelled?” It should not silently turn tickets, prompts, replies, tool arguments, or credentials into telemetry.
+
+```text
+MafRuntime events -> OpenTelemetryRunObserver -> CircuitDotNet ActivitySource/Meter
+                                                    |
+                                                    v
+                                             console exporters
+```
+
+Trace records include run and operation correlation IDs. Metric dimensions are deliberately bounded to definition ID/version, operation kind, status, and related structural fields; they do not use ticket text or run IDs as metric labels.
 
 ## Create or open the project
 
-From the repository root, open `tutorials/fsharp/17-telemetry`. Live chapters will require explicit provider environment variables; chapter 16 remains offline.
+Use the same reader-owned OpenAI configuration as earlier live chapters. In Bash, prompt without echoing the key into terminal or shell history:
+
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
+```
+
+In PowerShell 7, use `$env:OPENAI_API_KEY = Read-Host "OpenAI API key" -MaskInput`, then set `$env:OPENAI_MODEL` to a model you can use. Environment variables are still readable by the current process and some diagnostic tools; a production host should inject secrets through its managed secret store.
+
+Provider calls can incur charges. Keep the exercise to one request and never commit credentials.
 
 ## Complete source
 
 [!code-fsharp](../../tutorials/fsharp/17-telemetry/Program.fs)
 
+The tracer and meter providers subscribe only to Circuit's `CircuitDotNet` sources. `OpenTelemetryRunObserver` receives MAF lifecycle events through `MafRuntimeOptions.Observers`.
+
+All capture switches are explicitly `false`. The application prints only the resulting category and reply length, rather than the ticket, agent prompt, generated reply, or API key. Disposing the providers at program exit flushes the console exporters.
+
 ## Run it
 
+From the repository root:
+
 ```bash
-dotnet run --project tutorials/fsharp/17-telemetry
+dotnet run --project tutorials/fsharp/17-telemetry | tee /tmp/circuit-telemetry.txt
 ```
 
-Representative placeholder output (the completed live chapter's provider-generated values will be variable):
+Representative, abbreviated output:
 
 ```text
-Chapter 17 will build on the support-ticket agent.
+Run succeeded. Category: Account access; suggested reply length: 142
+Activity.TraceId: ...
+Activity.DisplayName: circuit.run
+    circuit.definition.id: support.reply
+    circuit.status: success
+Metric Name: circuit.runs
+Value: 1
 ```
+
+Exact model text, IDs, timings, token counts, and exporter formatting are provider-variable. With the checked-in ticket unchanged, this command should print no matches:
+
+```bash
+if grep -E 'Password reset|requested a password|sk-' /tmp/circuit-telemetry.txt; then
+  echo "unexpected payload-shaped text" >&2
+  exit 1
+else
+  echo "no checked payload marker found"
+fi
+```
+
+This is a useful regression check, not proof that arbitrary data has been redacted. The protection here is keeping payload capture disabled.
 
 ## What changed
 
-This skeleton reserves chapter 17's approved project and documentation boundary. The completed lesson will explain its single delta from chapter 16.
+Chapter 16 replaced the provider with an offline script. Chapter 17 returns to one live run and changes only the runtime configuration: a structural OpenTelemetry observer plus trace and metric exporters are attached.
 
 ## Check your understanding
 
-1. Why should this chapter remain independently runnable?
-2. Which one boundary will this chapter introduce?
-3. Which values will be deterministic, and which will be provider-variable?
+1. Why are definition ID and status suitable metric labels while ticket text and run ID are not?
+2. Which four observer options prevent prompt, input, output, and tool-argument capture?
+3. Why is grepping one run's output weaker than leaving capture disabled by design?
 
 ## Try it yourself
 
-Build this project from the repository root and confirm that it does not depend on another tutorial project.
+Run one request and find `circuit.definition.id` and `circuit.status` in the console export. Do not enable payload capture. Confirm the checked ticket markers are absent, then delete `/tmp/circuit-telemetry.txt` because diagnostic files can still be sensitive.
 
 ## Recap and next step
 
-The project, page, and complete-source include now have stable names. The next writing pass will replace this placeholder with the approved support-ticket lesson without changing that structure.
+- Subscribe exporters to Circuit's `ActivitySource` and `Meter` name, `CircuitDotNet`.
+- Keep payload capture off unless you have an explicit policy, redaction strategy, and protected sink.
+- Use structural traces for correlation and bounded metric labels for aggregation.
+
+Chapter 18 keeps this typed application boundary and selects either OpenAI or Azure OpenAI through the provider-neutral `IChatClient` seam.
