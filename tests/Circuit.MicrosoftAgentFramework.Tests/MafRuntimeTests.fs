@@ -4525,7 +4525,12 @@ module OpenTelemetryObserverTests =
             )
 
         let runtime =
-            createMafRuntimeWith ignore primary None [| recordingObserver :> Circuit.IRunObserver; observer :> Circuit.IRunObserver |]
+            createMafRuntimeWith
+                ignore
+                primary
+                None
+                [| recordingObserver :> Circuit.IRunObserver
+                   observer :> Circuit.IRunObserver |]
 
         let result =
             Workflow.run
@@ -4546,7 +4551,10 @@ module OpenTelemetryObserverTests =
         Assert.True(result.Result.Failure.Exception.IsSome)
 
         let failedEvent =
-            Assert.Single(recordingObserver.Events |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed))
+            Assert.Single(
+                recordingObserver.Events
+                |> Seq.filter (fun event -> event.Kind = AgentRunEventKind.RunFailed)
+            )
 
         Assert.DoesNotContain("circuit.workflow.failure.exception", failedEvent.DiagnosticMetadata.Keys)
         Assert.Equal(result.Result.Failure.Exception.Value.GetType().Name, failedEvent.DiagnosticMetadata["error.type"])
