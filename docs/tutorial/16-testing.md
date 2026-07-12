@@ -55,7 +55,7 @@ This output is deterministic and makes no provider request.
 
 ## What changed
 
-Chapter 15 exercised a durable live workflow across processes. This chapter changes only the runtime: `ScriptedRuntime` replaces `MafRuntime`, while the same support agent, signature, typed contracts, and Circuit calls remain testable.
+Chapter 15 finished the live workflow path. Chapter 16 deliberately changes the project shape to an xUnit test and narrows back to the support agent seam: `ScriptedRuntime` replaces `MafRuntime`, while the same agent, signature, typed contracts, and Circuit calls remain testable without a provider.
 
 ## Check your understanding
 

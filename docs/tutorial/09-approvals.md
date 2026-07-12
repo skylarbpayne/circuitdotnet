@@ -21,8 +21,9 @@ Circuit models a pause; it does not identify, authenticate, or authorize the ope
 From the repository root, install the SDK selected by `global.json` and set explicit reader-owned configuration:
 
 ```bash
-export OPENAI_API_KEY="your key from your secret store"
-export OPENAI_MODEL="a model available to your account"
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
 ```
 
 Each branch can make multiple provider calls and incur charges. The 45-second timeout owns cancellation; abandoning the live handle disposes its provider state.
@@ -31,7 +32,7 @@ Each branch can make multiple provider calls and incur charges. The 45-second ti
 
 [!code-fsharp](../../tutorials/fsharp/09-approvals/Program.fs)
 
-The escalation contract is typed and uses `ApprovalMode.Always`. The program reports only tool name and opaque request ID, sends one `ApprovalResponse`, and disposes both enumerator and run.
+The escalation contract is typed and uses `ApprovalMode.Always`. The program reports only tool name and opaque request ID, responds to every request, and disposes both enumerator and run. The model controls whether it asks for the tool and can ask again; this host permits only the first request when `--approve` is selected and rejects any additional request. Circuit also bounds interactive rounds and approval requests.
 
 ## Run it
 
@@ -47,7 +48,7 @@ Reject:
 dotnet run --project tutorials/fsharp/09-approvals -- --reject
 ```
 
-Representative approved output (request ID and provider-generated response are variable):
+Representative approved output (the request count, request ID, and provider-generated response are variable):
 
 ```text
 Approval requested for tool 'ticket.escalate' (request 7f...).
@@ -70,7 +71,7 @@ Chapter 8 allowed a read-only lookup automatically. Chapter 9 places a resumable
 
 ## Try it yourself
 
-Run both commands and compare the decision line and terminal reply. Confirm that each invocation reports exactly one approval and one terminal event.
+Run one command and confirm that it reports at least one approval and exactly one terminal event. If a model asks more than once, confirm later requests are rejected by the host policy.
 
 ## Recap and next step
 

@@ -9,21 +9,24 @@ open Circuit.Core
 open Circuit.FSharp
 open Circuit.MicrosoftAgentFramework
 open Microsoft.Extensions.AI
+open OpenTelemetry
+open OpenTelemetry.Metrics
+open OpenTelemetry.Trace
 
 [<AllowNullLiteral>]
 type TicketInput() =
-    [<property: Required; StringLength(120)>]
+    [<property: Required; StringLength(120, MinimumLength = 3)>]
     member val Subject = "" with get, set
 
-    [<property: Required; StringLength(2000)>]
+    [<property: Required; StringLength(2000, MinimumLength = 10)>]
     member val Message = "" with get, set
 
 [<AllowNullLiteral>]
 type TicketOutput() =
-    [<property: Required; StringLength(40)>]
+    [<property: Required; StringLength(40, MinimumLength = 3)>]
     member val Category = "" with get, set
 
-    [<property: Required; StringLength(500)>]
+    [<property: Required; StringLength(500, MinimumLength = 10)>]
     member val SuggestedReply = "" with get, set
 
 type Provider =
@@ -88,8 +91,12 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
 
         if runResult.Result.IsSuccess then
             let output = runResult.Result.Value
-            printfn "Category: %s" output.Category
-            printfn "Suggested reply: %s" output.SuggestedReply
+
+            printfn
+                "Run succeeded. Category: %s; suggested reply length: %d"
+                output.Category
+                output.SuggestedReply.Length
+
             return 0
         else
             let failure = runResult.Result.Failure
@@ -111,7 +118,24 @@ let main _ =
                 2
             | Ok chatClient ->
                 use chatClient = chatClient
-                let runtime = MafRuntime(chatClient, MafRuntimeOptions()) :> ICircuitRuntime
+
+                use tracerProvider =
+                    Sdk.CreateTracerProviderBuilder().AddSource("CircuitDotNet").AddConsoleExporter().Build()
+
+                use meterProvider =
+                    Sdk.CreateMeterProviderBuilder().AddMeter("CircuitDotNet").AddConsoleExporter().Build()
+
+                let observerOptions = OpenTelemetryRunObserverOptions()
+                observerOptions.CapturePrompt <- false
+                observerOptions.CaptureInput <- false
+                observerOptions.CaptureOutput <- false
+                observerOptions.CaptureToolArguments <- false
+
+                let runtimeOptions = MafRuntimeOptions()
+
+                runtimeOptions.Observers <- [| OpenTelemetryRunObserver(observerOptions) :> Circuit.IRunObserver |]
+
+                let runtime = MafRuntime(chatClient, runtimeOptions) :> ICircuitRuntime
                 use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30.0))
                 runAsync runtime timeout.Token |> fun work -> work.GetAwaiter().GetResult()
         with

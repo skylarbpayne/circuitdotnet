@@ -22,8 +22,9 @@ Skill instructions can influence model behavior but do not enforce business poli
 From the repository root, install the SDK selected by `global.json`, then set reader-owned provider configuration:
 
 ```bash
-export OPENAI_API_KEY="your key from your secret store"
-export OPENAI_MODEL="a model available to your account"
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
 ```
 
 The chapter makes a paid OpenAI request. It has no credential or model default and no fake fallback when provider execution fails.

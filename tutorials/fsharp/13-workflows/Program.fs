@@ -12,15 +12,15 @@ open OpenAI.Chat
 
 [<AllowNullLiteral>]
 type TicketInput() =
-    [<property: Required; StringLength(120)>]
+    [<property: Required; StringLength(120, MinimumLength = 3)>]
     member val Subject = "" with get, set
 
-    [<property: Required; StringLength(2000)>]
+    [<property: Required; StringLength(2000, MinimumLength = 10)>]
     member val Message = "" with get, set
 
 [<AllowNullLiteral>]
 type Classification() =
-    [<property: Required; StringLength(40)>]
+    [<property: Required; StringLength(40, MinimumLength = 3)>]
     member val Category = "" with get, set
 
     [<property: Range(1, 5)>]
@@ -28,7 +28,7 @@ type Classification() =
 
 [<AllowNullLiteral>]
 type DraftInput() =
-    [<property: Required; StringLength(40)>]
+    [<property: Required; StringLength(40, MinimumLength = 3)>]
     member val Category = "" with get, set
 
     [<property: Range(1, 5)>]
@@ -36,7 +36,7 @@ type DraftInput() =
 
 [<AllowNullLiteral>]
 type DraftOutput() =
-    [<property: Required; StringLength(500)>]
+    [<property: Required; StringLength(500, MinimumLength = 10)>]
     member val SuggestedReply = "" with get, set
 
 let runAsync (runtime: IWorkflowRuntime) cancellationToken =

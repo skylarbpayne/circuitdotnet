@@ -21,8 +21,9 @@ Tools execute trusted code in the host process. Circuit does not sandbox that co
 From the repository root, install the SDK selected by `global.json` and configure reader-owned OpenAI values:
 
 ```bash
-export OPENAI_API_KEY="your key from your secret store"
-export OPENAI_MODEL="a model available to your account"
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
 ```
 
 The live request may invoke the tool and incurs provider cost. The program has no embedded credential, model default, or fake provider fallback.

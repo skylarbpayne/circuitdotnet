@@ -19,8 +19,9 @@ Sequences must increase monotonically, and a well-formed stream has exactly one 
 Clone or open this repository, then work from its root. Install the .NET SDK selected by `global.json` and set reader-owned credentials (runs call OpenAI and incur provider charges):
 
 ```bash
-export OPENAI_API_KEY="your key from your secret store"
-export OPENAI_MODEL="a model available to your account"
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
 ```
 
 The program embeds no default model and exits before client construction when either variable is absent.

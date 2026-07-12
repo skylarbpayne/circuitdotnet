@@ -19,8 +19,9 @@ The host may serialize it only through `ICircuitRuntime.SerializeSessionAsync` a
 From a repository clone, use the .NET SDK selected by `global.json` and set both variables in your shell or secret manager:
 
 ```bash
-export OPENAI_API_KEY="your key from your secret store"
-export OPENAI_MODEL="a model available to your account"
+read -rsp "OpenAI API key: " OPENAI_API_KEY; echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
 ```
 
 This chapter makes two paid provider requests, so account limits and charges apply. There is no built-in model default or offline fallback.

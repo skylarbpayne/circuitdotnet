@@ -10,18 +10,18 @@ open Xunit
 
 [<AllowNullLiteral>]
 type TicketInput() =
-    [<property: Required; StringLength(120)>]
+    [<property: Required; StringLength(120, MinimumLength = 3)>]
     member val Subject = "" with get, set
 
-    [<property: Required; StringLength(2000)>]
+    [<property: Required; StringLength(2000, MinimumLength = 10)>]
     member val Message = "" with get, set
 
 [<AllowNullLiteral>]
 type TicketOutput() =
-    [<property: Required; StringLength(40)>]
+    [<property: Required; StringLength(40, MinimumLength = 3)>]
     member val Category = "" with get, set
 
-    [<property: Required; StringLength(500)>]
+    [<property: Required; StringLength(500, MinimumLength = 10)>]
     member val SuggestedReply = "" with get, set
 
 let private agent =
@@ -108,6 +108,9 @@ let ``scripted ticket runs are typed ordered and offline`` () =
 
         Assert.Equal(3, runtime.Calls.Count)
         Assert.Equal(0, runtime.RemainingResponses)
+        Assert.Equal(ScriptedCallKind.Run, runtime.Calls[0].Kind)
+        Assert.Equal(ScriptedCallKind.Streaming, runtime.Calls[1].Kind)
+        Assert.Equal(ScriptedCallKind.Run, runtime.Calls[2].Kind)
 
         runtime.Calls
         |> Seq.iter (fun call ->

@@ -44,6 +44,7 @@ All capture switches are explicitly `false`. The application prints only the res
 From the repository root:
 
 ```bash
+set -o pipefail
 dotnet run --project tutorials/fsharp/17-telemetry | tee /tmp/circuit-telemetry.txt
 ```
 
@@ -74,7 +75,7 @@ This is a useful regression check, not proof that arbitrary data has been redact
 
 ## What changed
 
-Chapter 16 replaced the provider with an offline script. Chapter 17 returns to one live run and changes only the runtime configuration: a structural OpenTelemetry observer plus trace and metric exporters are attached.
+Chapter 16 was an offline xUnit test project. Chapter 17 intentionally returns to a live executable and adds one operational concern: a structural OpenTelemetry observer plus trace and metric exporters are attached to the familiar support-agent run.
 
 ## Check your understanding
 

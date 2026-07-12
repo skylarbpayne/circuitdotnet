@@ -12,18 +12,18 @@ open OpenAI.Chat
 
 [<AllowNullLiteral>]
 type TicketInput() =
-    [<property: Required; StringLength(120)>]
+    [<property: Required; StringLength(120, MinimumLength = 3)>]
     member val Subject = "" with get, set
 
-    [<property: Required; StringLength(2000)>]
+    [<property: Required; StringLength(2000, MinimumLength = 10)>]
     member val Message = "" with get, set
 
 [<AllowNullLiteral>]
 type TicketOutput() =
-    [<property: Required; StringLength(40)>]
+    [<property: Required; StringLength(40, MinimumLength = 3)>]
     member val Category = "" with get, set
 
-    [<property: Required; StringLength(500)>]
+    [<property: Required; StringLength(500, MinimumLength = 10)>]
     member val SuggestedReply = "" with get, set
 
 [<AllowNullLiteral>]
@@ -31,7 +31,7 @@ type EscalationInput() =
     [<property: Required; RegularExpression("^[A-Z]{3}-[0-9]{4}$")>]
     member val AccountId = "" with get, set
 
-    [<property: Required; StringLength(120)>]
+    [<property: Required; StringLength(120, MinimumLength = 3)>]
     member val Reason = "" with get, set
 
 [<AllowNullLiteral>]
@@ -96,18 +96,19 @@ let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
                         let request = event.Approval.Value
                         // ArgumentsJson may contain customer data. Inspect only opaque metadata here.
                         printfn "Approval requested for tool '%s' (request %s)." request.ToolName request.RequestId
-                        printfn "Host decision: %s" (if approved then "approve" else "reject")
+                        let allowThisRequest = approved && approvalCount = 1
 
-                        let response =
-                            ApprovalResponse(
-                                request.RequestId,
-                                approved,
-                                (if approved then
-                                     "authorized by tutorial operator"
-                                 else
-                                     "rejected by tutorial operator")
-                            )
+                        printfn "Host decision: %s" (if allowThisRequest then "approve" else "reject")
 
+                        let reason =
+                            if approvalCount > 1 then
+                                "additional escalation requests are not authorized"
+                            elif allowThisRequest then
+                                "authorized by tutorial operator"
+                            else
+                                "rejected by tutorial operator"
+
+                        let response = ApprovalResponse(request.RequestId, allowThisRequest, reason)
                         do! run.RespondAsync(response, cancellationToken).AsTask()
                     | RunEventKind.RunCompleted ->
                         terminalCount <- terminalCount + 1
@@ -124,8 +125,8 @@ let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
             do enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
             do (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
-        if approvalCount <> 1 || terminalCount <> 1 then
-            eprintfn "Expected one approval request and one terminal event."
+        if approvalCount < 1 || terminalCount <> 1 then
+            eprintfn "Expected at least one approval request and exactly one terminal event."
             return 1
         else
             return resultCode

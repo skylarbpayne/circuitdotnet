@@ -49,7 +49,7 @@ Both providers may charge for requests. Run only against accounts and deployment
 
 `parseProvider` accepts only the two documented names. `requiredEnvironment` checks configuration before constructing a client. Each branch adapts its provider SDK client to `IChatClient`; after that branch, `runAsync` is literally shared.
 
-Azure OpenAI uses the required deployment name as its model route. OpenAI requires an explicit model ID. The application never guesses either value and disposes the selected `IChatClient` after the bounded run.
+Azure OpenAI uses the required deployment name as its model route. OpenAI requires an explicit model ID. The application never guesses either value and disposes the selected `IChatClient` after the bounded run. The structural observer and console exporters from Chapter 17 remain unchanged, with all four payload-capture switches still `false`.
 
 ## Run it
 
@@ -62,11 +62,13 @@ dotnet run --project tutorials/fsharp/18-switch-providers
 Representative output:
 
 ```text
-Category: Account access
-Suggested reply: Check the spam folder, verify the account address, and request one new reset email.
+Run succeeded. Category: Account access; suggested reply length: 142
+Activity.DisplayName: circuit.run
+    circuit.definition.id: support.reply
+    circuit.status: success
 ```
 
-The category and wording are provider-variable. A missing selection exits with code 2; missing provider-specific configuration names the required variables without printing their values. Provider, decode, validation, and cancellation problems follow the same Circuit failure boundary used in earlier chapters.
+The category, reply length, IDs, timings, and token counts are provider-variable. Ticket, prompt, reply, and key payloads remain excluded from Circuit telemetry. A missing selection exits with code 2; missing provider-specific configuration names the required variables without printing their values. Provider, decode, validation, and cancellation problems follow the same Circuit failure boundary used in earlier chapters.
 
 Neither registration has live compatibility evidence checked into this tutorial. Consult the [provider compatibility matrix](../reference/provider-compatibility.md) before making a support claim.
 
