@@ -1,6 +1,8 @@
 namespace Circuit.FSharp
 
+open System
 open System.Text.Json
+open System.Threading.Tasks
 open Circuit.Core
 
 module private Defaults =
@@ -68,6 +70,76 @@ module AgentDefinition =
 
     let withSkills skills (definition: Circuit.Core.AgentDefinition) =
         recreate definition definition.ModelHint definition.ToolTags skills
+
+module ToolDefinition =
+    let private recreate
+        (definition: Circuit.Core.ToolDefinition<'Input, 'Output>)
+        input
+        output
+        approval
+        approvalPolicy
+        =
+        Circuit.Core.ToolDefinition<'Input, 'Output>
+            .Create(
+                definition.Name.Value,
+                definition.Version.ToString(),
+                definition.Description,
+                input,
+                output,
+                approval,
+                approvalPolicy,
+                Func<ToolContext, 'Input, Task<'Output>>(fun context value -> definition.InvokeAsync(context, value))
+            )
+
+    let create<'Input, 'Output> id version description invoke =
+        Circuit.Core.ToolDefinition<'Input, 'Output>
+            .Create(
+                id,
+                version,
+                description,
+                Contract<'Input>.Create(Defaults.jsonOptions, Seq.empty),
+                Contract<'Output>.Create(Defaults.jsonOptions, Seq.empty),
+                Func<ToolContext, 'Input, Task<'Output>>(invoke)
+            )
+
+    let withInputValidator
+        (validator: IContractValidator<'Input>)
+        (definition: Circuit.Core.ToolDefinition<'Input, 'Output>)
+        =
+        recreate
+            definition
+            (Contract<'Input>.Create(Defaults.jsonOptions, Seq.append definition.Input.Validators [ validator ]))
+            definition.Output
+            definition.Approval
+            definition.ApprovalPolicy
+
+    let withOutputValidator
+        (validator: IContractValidator<'Output>)
+        (definition: Circuit.Core.ToolDefinition<'Input, 'Output>)
+        =
+        recreate
+            definition
+            definition.Input
+            (Contract<'Output>.Create(Defaults.jsonOptions, Seq.append definition.Output.Validators [ validator ]))
+            definition.Approval
+            definition.ApprovalPolicy
+
+    let withApproval approval (definition: Circuit.Core.ToolDefinition<'Input, 'Output>) =
+        let approvalPolicy =
+            if approval = ApprovalMode.ByPolicy then
+                definition.ApprovalPolicy
+            else
+                ValueNone
+
+        recreate definition definition.Input definition.Output approval approvalPolicy
+
+    let withApprovalPolicy approvalPolicy (definition: Circuit.Core.ToolDefinition<'Input, 'Output>) =
+        let approval =
+            match approvalPolicy with
+            | ValueSome _ -> ApprovalMode.ByPolicy
+            | ValueNone -> definition.Approval
+
+        recreate definition definition.Input definition.Output approval approvalPolicy
 
 module Agent =
     let run (runtime: ICircuitRuntime) agent signature input options cancellationToken =

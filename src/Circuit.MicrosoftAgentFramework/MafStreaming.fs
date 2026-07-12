@@ -70,24 +70,25 @@ module internal MafStreaming =
 
         value
 
-    let private approvalRequestJsonOptions = CircuitJson.createOptions ()
-
     let private tryGetOperationId (toolCall: ToolCallContent) =
         if isNull toolCall || String.IsNullOrWhiteSpace toolCall.CallId then
             ValueNone
         else
             ValueSome toolCall.CallId
 
-    let private trySerializeApprovalArguments (arguments: IDictionary<string, obj>) =
+    let private trySerializeApprovalArguments
+        (jsonOptions: JsonSerializerOptions)
+        (arguments: IDictionary<string, obj>)
+        =
         if isNull arguments then
             ValueNone
         else
             try
-                ValueSome(JsonSerializer.Serialize(arguments, approvalRequestJsonOptions))
+                ValueSome(JsonSerializer.Serialize(arguments, jsonOptions))
             with _ ->
                 ValueNone
 
-    let private createApprovalRequest (approval: ToolApprovalRequestContent) =
+    let private createApprovalRequest (jsonOptions: JsonSerializerOptions) (approval: ToolApprovalRequestContent) =
         match approval.ToolCall with
         | :? FunctionCallContent as functionCall ->
             let toolName =
@@ -96,7 +97,11 @@ module internal MafStreaming =
                 else
                     functionCall.Name
 
-            ApprovalRequest(approval.RequestId, toolName, trySerializeApprovalArguments functionCall.Arguments)
+            ApprovalRequest(
+                approval.RequestId,
+                toolName,
+                trySerializeApprovalArguments jsonOptions functionCall.Arguments
+            )
         | _ -> ApprovalRequest(approval.RequestId, "unknown-tool-call", ValueNone)
 
     let private tryUpdateUsage
@@ -200,6 +205,7 @@ module internal MafStreaming =
             signature: Signature<'Input, 'Output>,
             input: 'Input,
             runOptions: RunOptions,
+            jsonOptions: JsonSerializerOptions,
             cancellationToken: CancellationToken
         ) =
         interface IAsyncEnumerable<RunEvent<'Output>> with
@@ -350,11 +356,18 @@ module internal MafStreaming =
                                         match capabilityResult with
                                         | Error failure -> do! fail failure
                                         | Ok(tools, skills) ->
+                                            let sessionBinding =
+                                                MafSessionContracts.createSessionBinding
+                                                    runContext
+                                                    signature
+                                                    tools
+                                                    skills
+
                                             let runtimeAgent =
                                                 MafAgentFactory.createAgent
                                                     runtime.ChatClient
                                                     runtime.RuntimeOptions
-                                                    runOptions
+                                                    runContext
                                                     agent
                                                     signature
                                                     tools
@@ -366,6 +379,7 @@ module internal MafStreaming =
                                                     runId
                                                     runtimeAgent
                                                     agent
+                                                    sessionBinding
                                                     runOptions
                                                     providerToken
 
@@ -374,241 +388,304 @@ module internal MafStreaming =
                                             | Ok(providerSession, wrappedSession) ->
                                                 resultSession <- wrappedSession
                                                 let responseFormat, wrapped = createWrappedResponseFormat signature
-                                                let inputEnvelope = runtime.CreateInputEnvelope(signature, input)
-                                                let builder = StringBuilder()
-                                                let agentRunOptions = AgentRunOptions()
 
-                                                if
-                                                    runOptions.StructuredOutputPolicy = StructuredOutputPolicy.NativeOnly
-                                                then
-                                                    agentRunOptions.ResponseFormat <- responseFormat
-
-                                                try
-                                                    let stream =
-                                                        runtimeAgent.RunStreamingAsync(
-                                                            inputEnvelope,
-                                                            providerSession,
-                                                            agentRunOptions,
-                                                            providerToken
-                                                        )
-
-                                                    let streamEnumerator = stream.GetAsyncEnumerator(providerToken)
-
-                                                    try
-                                                        let mutable hasNext = true
-
-                                                        while hasNext do
-                                                            providerToken.ThrowIfCancellationRequested()
-                                                            let! movedNext = streamEnumerator.MoveNextAsync().AsTask()
-                                                            hasNext <- movedNext
-
-                                                            if hasNext then
-                                                                let update = streamEnumerator.Current
-                                                                tryUpdateUsage (&usageDetails) (&usage) update
-
-                                                                if not (String.IsNullOrEmpty update.Text) then
-                                                                    builder.Append(update.Text) |> ignore
-
-                                                                    do!
-                                                                        emit
-                                                                            RunEventKind.OutputDelta
-                                                                            ValueNone
-                                                                            (ValueSome update.Text)
-                                                                            ValueNone
-                                                                            ValueNone
-                                                                            ValueNone
-
-                                                                for content in update.Contents do
-                                                                    match content with
-                                                                    | :? FunctionCallContent as functionCall ->
-                                                                        let operationId =
-                                                                            if
-                                                                                String.IsNullOrWhiteSpace(
-                                                                                    functionCall.CallId
-                                                                                )
-                                                                            then
-                                                                                ValueNone
-                                                                            else
-                                                                                ValueSome functionCall.CallId
-
-                                                                        do!
-                                                                            emit
-                                                                                RunEventKind.ToolStarted
-                                                                                operationId
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                    | :? FunctionResultContent as functionResult ->
-                                                                        let operationId =
-                                                                            if
-                                                                                String.IsNullOrWhiteSpace(
-                                                                                    functionResult.CallId
-                                                                                )
-                                                                            then
-                                                                                ValueNone
-                                                                            else
-                                                                                ValueSome functionResult.CallId
-
-                                                                        do!
-                                                                            emit
-                                                                                RunEventKind.ToolCompleted
-                                                                                operationId
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                    | :? ToolApprovalRequestContent as approval ->
-                                                                        do!
-                                                                            emit
-                                                                                RunEventKind.ApprovalRequested
-                                                                                (tryGetOperationId approval.ToolCall)
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                ValueNone
-                                                                                (ValueSome(
-                                                                                    createApprovalRequest approval
-                                                                                ))
-                                                                    | _ -> ()
-                                                    finally
-                                                        streamEnumerator
-                                                            .DisposeAsync()
-                                                            .AsTask()
-                                                            .GetAwaiter()
-                                                            .GetResult()
-
-                                                    providerToken.ThrowIfCancellationRequested()
-                                                    let mutable finalText = builder.ToString()
+                                                match
+                                                    runtime.TryCreateInputEnvelope runId signature input providerToken
+                                                with
+                                                | Error failure -> do! fail failure
+                                                | Ok inputEnvelope ->
+                                                    let builder = StringBuilder()
+                                                    let agentRunOptions = AgentRunOptions()
 
                                                     if
-                                                        runOptions.StructuredOutputPolicy = StructuredOutputPolicy.AllowSecondaryModelRepair
+                                                        runOptions.StructuredOutputPolicy = StructuredOutputPolicy.NativeOnly
                                                     then
-                                                        match
-                                                            runtime.RuntimeOptions.SecondaryStructuredOutputClient
-                                                        with
-                                                        | ValueNone ->
-                                                            do!
-                                                                fail (
-                                                                    MafErrors.structuredOutputUnsupportedFailure
-                                                                        runId
-                                                                        "Structured output repair requires a configured secondary structured output chat client."
-                                                                        ValueNone
-                                                                        ValueNone
-                                                                )
-                                                        | ValueSome secondaryClient ->
-                                                            let! repairedText, repairedUsage =
-                                                                repairAsync
-                                                                    secondaryClient
-                                                                    responseFormat
-                                                                    finalText
-                                                                    providerToken
+                                                        agentRunOptions.ResponseFormat <- responseFormat
 
-                                                            repaired <- true
+                                                    let! streamResult =
+                                                        task {
+                                                            try
+                                                                let stream =
+                                                                    runtimeAgent.RunStreamingAsync(
+                                                                        inputEnvelope,
+                                                                        providerSession,
+                                                                        agentRunOptions,
+                                                                        providerToken
+                                                                    )
 
-                                                            usageDetails <-
-                                                                MafErrors.combineUsageDetails usageDetails repairedUsage
+                                                                let streamEnumerator =
+                                                                    stream.GetAsyncEnumerator(providerToken)
 
-                                                            usage <- MafErrors.createUsage usageDetails
-                                                            finalText <- repairedText
+                                                                try
+                                                                    let mutable hasNext = true
 
-                                                            let entries =
-                                                                Dictionary<string, string>(StringComparer.Ordinal)
+                                                                    while hasNext do
+                                                                        providerToken.ThrowIfCancellationRequested()
 
-                                                            entries["circuit.repaired"] <- "true"
+                                                                        let! movedNext =
+                                                                            streamEnumerator.MoveNextAsync().AsTask()
 
-                                                            if
-                                                                runOptions.SensitiveDataMode = SensitiveDataMode.Standard
-                                                            then
-                                                                entries["circuit.repair.originalResponse"] <-
-                                                                    builder.ToString()
+                                                                        hasNext <- movedNext
 
-                                                            diagnosticMetadata <-
-                                                                entries :> IReadOnlyDictionary<string, string>
+                                                                        if hasNext then
+                                                                            let update = streamEnumerator.Current
 
-                                                    let decodedResult =
-                                                        try
-                                                            Ok(deserializeOutput signature wrapped finalText)
-                                                        with
-                                                        | ex when MafErrors.isCancellationRequested providerToken ex ->
-                                                            Error(
-                                                                MafErrors.cancelledFailure
-                                                                    runId
-                                                                    "The run was cancelled."
-                                                                    (ValueSome ex)
-                                                            )
-                                                        | ex when MafErrors.isStructuredOutputUnsupported ex ->
-                                                            Error(
-                                                                MafErrors.structuredOutputUnsupportedFailure
-                                                                    runId
-                                                                    ex.Message
-                                                                    ValueNone
-                                                                    (ValueSome ex)
-                                                            )
-                                                        | ex when MafErrors.isDecodeFailure ex ->
-                                                            Error(
-                                                                MafErrors.decodeFailure
-                                                                    runId
-                                                                    ex.Message
-                                                                    ValueNone
-                                                                    (ValueSome ex)
-                                                            )
-                                                        | ex ->
-                                                            Error(
-                                                                MafErrors.providerFailure
-                                                                    runId
-                                                                    ex.Message
-                                                                    ValueNone
-                                                                    (ValueSome ex)
-                                                            )
+                                                                            tryUpdateUsage
+                                                                                (&usageDetails)
+                                                                                (&usage)
+                                                                                update
 
-                                                    match decodedResult with
+                                                                            if
+                                                                                not (String.IsNullOrEmpty update.Text)
+                                                                            then
+                                                                                builder.Append(update.Text) |> ignore
+
+                                                                                do!
+                                                                                    emit
+                                                                                        RunEventKind.OutputDelta
+                                                                                        ValueNone
+                                                                                        (ValueSome update.Text)
+                                                                                        ValueNone
+                                                                                        ValueNone
+                                                                                        ValueNone
+
+                                                                            for content in update.Contents do
+                                                                                match content with
+                                                                                | :? FunctionCallContent as functionCall ->
+                                                                                    let operationId =
+                                                                                        if
+                                                                                            String.IsNullOrWhiteSpace(
+                                                                                                functionCall.CallId
+                                                                                            )
+                                                                                        then
+                                                                                            ValueNone
+                                                                                        else
+                                                                                            ValueSome
+                                                                                                functionCall.CallId
+
+                                                                                    do!
+                                                                                        emit
+                                                                                            RunEventKind.ToolStarted
+                                                                                            operationId
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                | :? FunctionResultContent as functionResult ->
+                                                                                    let operationId =
+                                                                                        if
+                                                                                            String.IsNullOrWhiteSpace(
+                                                                                                functionResult.CallId
+                                                                                            )
+                                                                                        then
+                                                                                            ValueNone
+                                                                                        else
+                                                                                            ValueSome
+                                                                                                functionResult.CallId
+
+                                                                                    do!
+                                                                                        emit
+                                                                                            RunEventKind.ToolCompleted
+                                                                                            operationId
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                | :? ToolApprovalRequestContent as approval ->
+                                                                                    do!
+                                                                                        emit
+                                                                                            RunEventKind.ApprovalRequested
+                                                                                            (tryGetOperationId
+                                                                                                approval.ToolCall)
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            ValueNone
+                                                                                            (ValueSome(
+                                                                                                createApprovalRequest
+                                                                                                    jsonOptions
+                                                                                                    approval
+                                                                                            ))
+                                                                                | _ -> ()
+                                                                finally
+                                                                    streamEnumerator
+                                                                        .DisposeAsync()
+                                                                        .AsTask()
+                                                                        .GetAwaiter()
+                                                                        .GetResult()
+
+                                                                providerToken.ThrowIfCancellationRequested()
+                                                                let mutable finalText = builder.ToString()
+
+                                                                let! finalTextResult =
+                                                                    if
+                                                                        runOptions.StructuredOutputPolicy = StructuredOutputPolicy.AllowSecondaryModelRepair
+                                                                    then
+                                                                        match
+                                                                            runtime.RuntimeOptions.SecondaryStructuredOutputClient
+                                                                        with
+                                                                        | ValueNone ->
+                                                                            Task.FromResult(
+                                                                                Error(
+                                                                                    MafErrors.structuredOutputUnsupportedFailure
+                                                                                        runId
+                                                                                        "Structured output repair requires a configured secondary structured output chat client."
+                                                                                        ValueNone
+                                                                                        ValueNone
+                                                                                )
+                                                                            )
+                                                                        | ValueSome secondaryClient ->
+                                                                            task {
+                                                                                let! repairedText, repairedUsage =
+                                                                                    repairAsync
+                                                                                        secondaryClient
+                                                                                        responseFormat
+                                                                                        finalText
+                                                                                        providerToken
+
+                                                                                repaired <- true
+
+                                                                                usageDetails <-
+                                                                                    MafErrors.combineUsageDetails
+                                                                                        usageDetails
+                                                                                        repairedUsage
+
+                                                                                usage <-
+                                                                                    MafErrors.createUsage usageDetails
+
+                                                                                let entries =
+                                                                                    Dictionary<string, string>(
+                                                                                        StringComparer.Ordinal
+                                                                                    )
+
+                                                                                entries["circuit.repaired"] <- "true"
+
+                                                                                if
+                                                                                    runOptions.SensitiveDataMode = SensitiveDataMode.Standard
+                                                                                then
+                                                                                    entries["circuit.repair.originalResponse"] <-
+                                                                                        builder.ToString()
+
+                                                                                diagnosticMetadata <-
+                                                                                    entries
+                                                                                    :> IReadOnlyDictionary<
+                                                                                        string,
+                                                                                        string
+                                                                                     >
+
+                                                                                return Ok repairedText
+                                                                            }
+                                                                    else
+                                                                        Task.FromResult(Ok finalText)
+
+                                                                return
+                                                                    match finalTextResult with
+                                                                    | Error failure -> Error failure
+                                                                    | Ok repairedText ->
+                                                                        finalText <- repairedText
+
+                                                                        let decodedResult =
+                                                                            try
+                                                                                Ok(
+                                                                                    deserializeOutput
+                                                                                        signature
+                                                                                        wrapped
+                                                                                        finalText
+                                                                                )
+                                                                            with
+                                                                            | ex when
+                                                                                MafErrors.isCancellationRequested
+                                                                                    providerToken
+                                                                                    ex
+                                                                                ->
+                                                                                Error(
+                                                                                    MafErrors.cancelledFailure
+                                                                                        runId
+                                                                                        "The run was cancelled."
+                                                                                        (ValueSome ex)
+                                                                                )
+                                                                            | ex when
+                                                                                MafErrors.isStructuredOutputUnsupported
+                                                                                    ex
+                                                                                ->
+                                                                                Error(
+                                                                                    MafErrors.structuredOutputUnsupportedFailure
+                                                                                        runId
+                                                                                        ex.Message
+                                                                                        ValueNone
+                                                                                        (ValueSome ex)
+                                                                                )
+                                                                            | ex when MafErrors.isDecodeFailure ex ->
+                                                                                Error(
+                                                                                    MafErrors.decodeFailure
+                                                                                        runId
+                                                                                        ex.Message
+                                                                                        ValueNone
+                                                                                        (ValueSome ex)
+                                                                                )
+                                                                            | ex ->
+                                                                                Error(
+                                                                                    MafErrors.providerFailure
+                                                                                        runId
+                                                                                        ex.Message
+                                                                                        ValueNone
+                                                                                        (ValueSome ex)
+                                                                                )
+
+                                                                        match decodedResult with
+                                                                        | Error failure -> Error failure
+                                                                        | Ok output ->
+                                                                            let outputIssues =
+                                                                                signature.Output.Validate output
+
+                                                                            if outputIssues.Count > 0 then
+                                                                                Error(
+                                                                                    MafErrors.validationFailure
+                                                                                        runId
+                                                                                        (MafErrors.formatValidationIssues
+                                                                                            outputIssues)
+                                                                                )
+                                                                            else
+                                                                                Ok output
+                                                            with
+                                                            | ex when MafErrors.isCancellationRequested providerToken ex ->
+                                                                return
+                                                                    Error(
+                                                                        MafErrors.cancelledFailure
+                                                                            runId
+                                                                            "The run was cancelled."
+                                                                            (ValueSome ex)
+                                                                    )
+                                                            | ex when MafErrors.isStructuredOutputUnsupported ex ->
+                                                                return
+                                                                    Error(
+                                                                        MafErrors.structuredOutputUnsupportedFailure
+                                                                            runId
+                                                                            ex.Message
+                                                                            ValueNone
+                                                                            (ValueSome ex)
+                                                                    )
+                                                            | ex ->
+                                                                return
+                                                                    Error(
+                                                                        MafErrors.providerFailure
+                                                                            runId
+                                                                            ex.Message
+                                                                            ValueNone
+                                                                            (ValueSome ex)
+                                                                    )
+                                                        }
+
+                                                    match streamResult with
                                                     | Error failure -> do! fail failure
                                                     | Ok output ->
-                                                        let outputIssues = signature.Output.Validate output
-
-                                                        if outputIssues.Count > 0 then
-                                                            do!
-                                                                fail (
-                                                                    MafErrors.validationFailure
-                                                                        runId
-                                                                        (MafErrors.formatValidationIssues outputIssues)
-                                                                )
-                                                        else
-                                                            do!
-                                                                emit
-                                                                    RunEventKind.RunCompleted
-                                                                    ValueNone
-                                                                    ValueNone
-                                                                    (ValueSome output)
-                                                                    ValueNone
-                                                                    ValueNone
-                                                with
-                                                | ex when MafErrors.isCancellationRequested providerToken ex ->
-                                                    do!
-                                                        fail (
-                                                            MafErrors.cancelledFailure
-                                                                runId
-                                                                "The run was cancelled."
-                                                                (ValueSome ex)
-                                                        )
-                                                | ex when MafErrors.isStructuredOutputUnsupported ex ->
-                                                    do!
-                                                        fail (
-                                                            MafErrors.structuredOutputUnsupportedFailure
-                                                                runId
-                                                                ex.Message
+                                                        do!
+                                                            emit
+                                                                RunEventKind.RunCompleted
                                                                 ValueNone
-                                                                (ValueSome ex)
-                                                        )
-                                                | ex ->
-                                                    do!
-                                                        fail (
-                                                            MafErrors.providerFailure
-                                                                runId
-                                                                ex.Message
                                                                 ValueNone
-                                                                (ValueSome ex)
-                                                        )
+                                                                (ValueSome output)
+                                                                ValueNone
+                                                                ValueNone
                         finally
                             let observation =
                                 MafRunObservation(
@@ -645,9 +722,10 @@ module internal MafStreaming =
         (signature: Signature<'Input, 'Output>)
         (input: 'Input)
         (runOptions: RunOptions)
+        (jsonOptions: JsonSerializerOptions)
         ([<EnumeratorCancellation>] cancellationToken: CancellationToken)
         : IAsyncEnumerable<RunEvent<'Output>> =
-        StreamingRunEnumerable(runtime, agent, signature, input, runOptions, cancellationToken)
+        StreamingRunEnumerable(runtime, agent, signature, input, runOptions, jsonOptions, cancellationToken)
         :> IAsyncEnumerable<RunEvent<'Output>>
 
 [<AbstractClass; Sealed>]
@@ -655,11 +733,12 @@ type internal MafStreamingRegistration =
     static do
         MafRuntimeStreamingDispatch.Dispatcher <-
             { new IMafRuntimeStreamingDispatcher with
-                member _.RunStreaming(runtime, agent, signature, input, runOptions, cancellationToken) =
+                member _.RunStreaming(runtime, agent, signature, input, runOptions, jsonOptions, cancellationToken) =
                     MafStreaming.runStreaming
                         (runtime :?> MafRuntime)
                         agent
                         signature
                         input
                         runOptions
+                        jsonOptions
                         cancellationToken }

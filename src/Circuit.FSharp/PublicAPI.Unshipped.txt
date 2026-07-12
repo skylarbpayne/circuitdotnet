@@ -9,3 +9,9 @@ T:Circuit.FSharp.Signature
 M:Circuit.FSharp.Signature.create(System.String,System.String,System.String,System.String)~Circuit.Core.Signature{``0,``1}
 M:Circuit.FSharp.Signature.withInputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``0,``1})~Circuit.Core.Signature{``0,``1}
 M:Circuit.FSharp.Signature.withOutputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``1,``0})~Circuit.Core.Signature{``1,``0}
+T:Circuit.FSharp.ToolDefinition
+M:Circuit.FSharp.ToolDefinition.create(System.String,System.String,System.String,Microsoft.FSharp.Core.FSharpFunc{Circuit.Core.ToolContext,Microsoft.FSharp.Core.FSharpFunc{``0,System.Threading.Tasks.Task{``1}}})~Circuit.Core.ToolDefinition{``0,``1}
+M:Circuit.FSharp.ToolDefinition.withApproval(Circuit.Core.ApprovalMode,Circuit.Core.ToolDefinition{``0,``1})~Circuit.Core.ToolDefinition{``0,``1}
+M:Circuit.FSharp.ToolDefinition.withApprovalPolicy(Microsoft.FSharp.Core.FSharpValueOption{System.String},Circuit.Core.ToolDefinition{``0,``1})~Circuit.Core.ToolDefinition{``0,``1}
+M:Circuit.FSharp.ToolDefinition.withInputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.ToolDefinition{``0,``1})~Circuit.Core.ToolDefinition{``0,``1}
+M:Circuit.FSharp.ToolDefinition.withOutputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.ToolDefinition{``1,``0})~Circuit.Core.ToolDefinition{``1,``0}

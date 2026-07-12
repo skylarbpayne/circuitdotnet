@@ -10,20 +10,29 @@ open Microsoft.Agents.AI
 open Microsoft.Extensions.AI
 
 [<Sealed>]
-type ResolvedTool internal (name: string, tool: AIFunction, tags: IReadOnlySet<string>, requiresApproval: bool) =
-    member _.Name = name
+type internal ResolvedMafTool(tool: Circuit.Core.ResolvedTool, modelName: string, mafFunction: AIFunction) =
     member _.Tool = tool
-    member _.Tags = tags
-    member _.RequiresApproval = requiresApproval
+    member _.ModelName = modelName
+    member _.MafFunction = mafFunction
+    member _.Tags = tool.Tags
+
+    member _.RequiresApproval =
+        tool.Approval = ApprovalMode.Always || tool.Approval = ApprovalMode.ByPolicy
 
 [<Sealed>]
 type ResolvedSkill internal (reference: SkillReference, provider: AIContextProvider) =
     member _.Reference = reference
     member _.Provider = provider
 
-type IToolResolver =
-    abstract ResolveToolsAsync:
-        context: RunContext * cancellationToken: CancellationToken -> ValueTask<IReadOnlyList<ResolvedTool>>
+[<Sealed>]
+type ToolApprovalContext
+    internal (runContext: RunContext, tool: Circuit.Core.ResolvedTool, arguments: IReadOnlyDictionary<string, obj>) =
+    member _.RunContext = runContext
+    member _.Tool = tool
+    member _.Arguments = arguments
+
+type IToolApprovalPolicy =
+    abstract IsApprovedAsync: policyName: string * context: ToolApprovalContext -> ValueTask<bool>
 
 type ISkillResolver =
     abstract ResolveSkillsAsync:
@@ -135,7 +144,8 @@ type MafRuntimeOptions() =
         options.MakeReadOnly()
         options
 
-    let emptyToolResolvers = Array.empty<IToolResolver> :> IReadOnlyList<IToolResolver>
+    let emptyToolResolvers =
+        Array.empty<Circuit.Core.IToolResolver> :> IReadOnlyList<Circuit.Core.IToolResolver>
 
     let emptySkillResolvers =
         Array.empty<ISkillResolver> :> IReadOnlyList<ISkillResolver>
@@ -145,6 +155,7 @@ type MafRuntimeOptions() =
     member val DefaultModelId: string voption = ValueNone with get, set
     member val JsonSerializerOptions: JsonSerializerOptions = serializerOptions with get, set
     member val SecondaryStructuredOutputClient: IChatClient voption = ValueNone with get, set
-    member val ToolResolvers: IReadOnlyList<IToolResolver> = emptyToolResolvers with get, set
+    member val ToolResolvers: IReadOnlyList<Circuit.Core.IToolResolver> = emptyToolResolvers with get, set
+    member val ToolApprovalPolicy: IToolApprovalPolicy voption = ValueNone with get, set
     member val SkillResolvers: IReadOnlyList<ISkillResolver> = emptySkillResolvers with get, set
     member val Observers: IReadOnlyList<IRunObserver> = emptyObservers with get, set

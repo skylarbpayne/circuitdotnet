@@ -1,4 +1,6 @@
 namespace Circuit.MicrosoftAgentFramework
 
-module internal Package =
-    let placeholder = ()
+open System.Runtime.CompilerServices
+
+[<assembly: InternalsVisibleTo("Circuit.MicrosoftAgentFramework.Tests")>]
+do ()

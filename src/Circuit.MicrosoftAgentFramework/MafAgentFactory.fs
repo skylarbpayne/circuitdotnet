@@ -5,6 +5,7 @@ namespace Circuit.MicrosoftAgentFramework
 open System
 open System.Collections.Generic
 open System.Runtime.CompilerServices
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Circuit.Core
@@ -175,21 +176,364 @@ module internal MafStructuredOutput =
             clone.ResponseFormat <- null
             clone
 
+type internal SanitizedToolException(message: string, innerException: exn) =
+    inherit InvalidOperationException(message, innerException)
+
+    new(message: string) = SanitizedToolException(message, null)
+
+[<AllowNullLiteral; Sealed>]
+type private PendingApprovalSnapshot() =
+    member val RequestId: string = null with get, set
+    member val CallId: string = null with get, set
+    member val ToolName: string = null with get, set
+    member val ArgumentsJson: string = null with get, set
+
+module private MafApprovalResponses =
+    [<Literal>]
+    let StateBagKey = "circuit.pending-tool-approval-requests"
+
+    let private trySerializeArguments (arguments: IDictionary<string, obj>) (jsonOptions: JsonSerializerOptions) =
+        if isNull arguments then
+            ValueNone
+        else
+            try
+                ValueSome(JsonSerializer.Serialize(arguments, jsonOptions))
+            with _ ->
+                ValueNone
+
+    let private tryCreateSnapshot (approvalRequest: ToolApprovalRequestContent) (jsonOptions: JsonSerializerOptions) =
+        match approvalRequest.ToolCall with
+        | :? FunctionCallContent as functionCall ->
+            match trySerializeArguments functionCall.Arguments jsonOptions with
+            | ValueSome argumentsJson ->
+                ValueSome(
+                    PendingApprovalSnapshot(
+                        RequestId = approvalRequest.RequestId,
+                        CallId = functionCall.CallId,
+                        ToolName = functionCall.Name,
+                        ArgumentsJson = argumentsJson
+                    )
+                )
+            | ValueNone when isNull functionCall.Arguments ->
+                ValueSome(
+                    PendingApprovalSnapshot(
+                        RequestId = approvalRequest.RequestId,
+                        CallId = functionCall.CallId,
+                        ToolName = functionCall.Name,
+                        ArgumentsJson = null
+                    )
+                )
+            | ValueNone -> ValueNone
+        | _ -> ValueNone
+
+    let private tryDeserializeArguments (snapshot: PendingApprovalSnapshot) (jsonOptions: JsonSerializerOptions) =
+        if isNull snapshot || isNull snapshot.ArgumentsJson then
+            ValueSome null
+        else
+            try
+                let arguments =
+                    JsonSerializer.Deserialize<Dictionary<string, obj>>(snapshot.ArgumentsJson, jsonOptions)
+
+                ValueSome(arguments :> IDictionary<string, obj>)
+            with _ ->
+                ValueNone
+
+    let private tryCreateStoredToolCall (snapshot: PendingApprovalSnapshot) (jsonOptions: JsonSerializerOptions) =
+        match tryDeserializeArguments snapshot jsonOptions with
+        | ValueSome arguments -> ValueSome(FunctionCallContent(snapshot.CallId, snapshot.ToolName, arguments))
+        | ValueNone -> ValueNone
+
+    let private matchesStoredSnapshot
+        (snapshot: PendingApprovalSnapshot)
+        (response: ToolApprovalResponseContent)
+        (jsonOptions: JsonSerializerOptions)
+        =
+        match response.ToolCall with
+        | :? FunctionCallContent as functionCall ->
+            let expectedArguments =
+                if isNull snapshot then ValueNone
+                elif isNull snapshot.ArgumentsJson then ValueSome null
+                else ValueSome snapshot.ArgumentsJson
+
+            let actualArguments =
+                trySerializeArguments functionCall.Arguments jsonOptions |> ValueOption.toObj
+
+            let expectedArguments = expectedArguments |> ValueOption.toObj
+
+            StringComparer.Ordinal.Equals(response.RequestId, snapshot.RequestId)
+            && StringComparer.Ordinal.Equals(functionCall.CallId, snapshot.CallId)
+            && StringComparer.Ordinal.Equals(functionCall.Name, snapshot.ToolName)
+            && StringComparer.Ordinal.Equals(actualArguments, expectedArguments)
+        | _ -> false
+
+    type private PendingApprovalStore(session: AgentSession) as this =
+        let gate = obj ()
+
+        let pendingApprovals =
+            Dictionary<string, PendingApprovalSnapshot>(StringComparer.Ordinal)
+
+        let mutable loaded = false
+
+        member private _.Persist(jsonOptions: JsonSerializerOptions) =
+            session.StateBag.SetValue(
+                StateBagKey,
+                pendingApprovals.Values |> Seq.sortBy _.RequestId |> Seq.toArray,
+                jsonOptions
+            )
+
+        member private _.EnsureLoaded(jsonOptions: JsonSerializerOptions) =
+            if not loaded then
+                let mutable needsCleanup = false
+                let mutable stored = Array.empty<PendingApprovalSnapshot>
+
+                if session.StateBag.TryGetValue(StateBagKey, &stored, jsonOptions) then
+                    for snapshot in stored do
+                        if isNull snapshot || String.IsNullOrWhiteSpace snapshot.RequestId then
+                            needsCleanup <- true
+                        else
+                            if pendingApprovals.ContainsKey snapshot.RequestId then
+                                needsCleanup <- true
+
+                            pendingApprovals[snapshot.RequestId] <- snapshot
+
+                loaded <- true
+
+                if needsCleanup then
+                    this.Persist(jsonOptions)
+
+        member this.Filter(messages: IEnumerable<ChatMessage>, jsonOptions: JsonSerializerOptions) =
+            lock gate (fun () ->
+                this.EnsureLoaded(jsonOptions)
+
+                let filteredMessages = ResizeArray<ChatMessage>()
+                let mutable changed = false
+                let mutable droppedInvalidResponses = false
+
+                for message in messages do
+                    if isNull message.Contents then
+                        filteredMessages.Add message
+                    else
+                        let filteredContents = ResizeArray<AIContent>()
+                        let mutable messageChanged = false
+
+                        for content in message.Contents do
+                            match content with
+                            | :? ToolApprovalResponseContent as approvalResponse ->
+                                match pendingApprovals.TryGetValue approvalResponse.RequestId with
+                                | true, snapshot when matchesStoredSnapshot snapshot approvalResponse jsonOptions ->
+                                    match tryCreateStoredToolCall snapshot jsonOptions with
+                                    | ValueSome storedToolCall ->
+                                        filteredContents.Add(
+                                            ToolApprovalResponseContent(
+                                                snapshot.RequestId,
+                                                approvalResponse.Approved,
+                                                storedToolCall
+                                            )
+                                            :> AIContent
+                                        )
+
+                                        pendingApprovals.Remove snapshot.RequestId |> ignore
+                                        changed <- true
+                                        messageChanged <- true
+                                    | ValueNone ->
+                                        pendingApprovals.Remove snapshot.RequestId |> ignore
+                                        changed <- true
+                                        messageChanged <- true
+                                        droppedInvalidResponses <- true
+                                | _ ->
+                                    changed <- true
+                                    messageChanged <- true
+                                    droppedInvalidResponses <- true
+                            | _ -> filteredContents.Add content
+
+                        if filteredContents.Count > 0 then
+                            if messageChanged || filteredContents.Count <> message.Contents.Count then
+                                let clone = message.Clone()
+                                clone.Contents <- filteredContents :> IList<AIContent>
+                                filteredMessages.Add clone
+                            else
+                                filteredMessages.Add message
+
+                if changed then
+                    this.Persist(jsonOptions)
+
+                (filteredMessages :> IReadOnlyList<ChatMessage>), droppedInvalidResponses)
+
+        member this.Capture(response: AgentResponse, jsonOptions: JsonSerializerOptions) =
+            lock gate (fun () ->
+                this.EnsureLoaded(jsonOptions)
+
+                let mutable changed = false
+
+                for message in response.Messages do
+                    if not (isNull message.Contents) then
+                        for content in message.Contents do
+                            match content with
+                            | :? ToolApprovalRequestContent as approvalRequest ->
+                                match tryCreateSnapshot approvalRequest jsonOptions with
+                                | ValueSome snapshot ->
+                                    pendingApprovals[snapshot.RequestId] <- snapshot
+                                    changed <- true
+                                | ValueNone -> ()
+                            | _ -> ()
+
+                if changed then
+                    this.Persist(jsonOptions))
+
+    let private stores = ConditionalWeakTable<AgentSession, PendingApprovalStore>()
+
+    let private createStore =
+        ConditionalWeakTable<AgentSession, PendingApprovalStore>.CreateValueCallback(fun session ->
+            PendingApprovalStore(session))
+
+    let private getStore (session: AgentSession) = stores.GetValue(session, createStore)
+
+    let filterInboundApprovalResponses
+        (messages: IEnumerable<ChatMessage>)
+        (session: AgentSession)
+        (jsonOptions: JsonSerializerOptions)
+        =
+        if isNull session then
+            (messages |> Seq.toArray :> IReadOnlyList<ChatMessage>), false
+        else
+            (getStore session).Filter(messages, jsonOptions)
+
+    let captureOutboundApprovalRequests
+        (response: AgentResponse)
+        (session: AgentSession)
+        (jsonOptions: JsonSerializerOptions)
+        =
+        if not (isNull session) && not (isNull response) && not (isNull response.Messages) then
+            (getStore session).Capture(response, jsonOptions)
+
+type internal CircuitResolvedToolFunction
+    (
+        tool: Circuit.Core.ResolvedTool,
+        modelName: string,
+        serializerOptions: JsonSerializerOptions,
+        runContext: RunContext
+    ) =
+    inherit AIFunction()
+
+    let jsonOptions = JsonSerializerOptions(serializerOptions)
+
+    let emptyAdditionalProperties =
+        Dictionary<string, obj>(StringComparer.Ordinal) :> IReadOnlyDictionary<string, obj>
+
+    do jsonOptions.MakeReadOnly()
+
+    member private _.CreateToolContext(cancellationToken: CancellationToken) =
+        ToolContext(
+            runContext.RunId,
+            runContext.Options.TenantId,
+            runContext.Options.UserId,
+            runContext.Options.Services,
+            cancellationToken
+        )
+
+    member private _.DeserializeInput(arguments: AIFunctionArguments, cancellationToken: CancellationToken) =
+        try
+            let payload = JsonSerializer.Serialize(arguments, jsonOptions)
+            JsonSerializer.Deserialize(payload, tool.InputType, jsonOptions)
+        with
+        | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+            raise (OperationCanceledException(cancellationToken))
+        | :? OperationCanceledException -> reraise ()
+        | ex -> raise (SanitizedToolException("Tool input could not be parsed.", ex))
+
+    member private _.FormatValidationIssues(issues: IReadOnlyList<ValidationIssue>) =
+        if isNull issues || issues.Count = 0 then
+            "Validation failed."
+        else
+            issues
+            |> Seq.map (fun issue -> $"{issue.Path}: {issue.Message}")
+            |> String.concat "; "
+            |> fun details -> $"Validation failed: {details}"
+
+    override _.Name = modelName
+    override _.Description = tool.Description
+    override _.AdditionalProperties = emptyAdditionalProperties
+    override _.JsonSchema = tool.InputSchema.RootElement
+    override _.ReturnJsonSchema = Nullable tool.OutputSchema.RootElement
+    override _.UnderlyingMethod = null
+    override _.JsonSerializerOptions = jsonOptions
+
+    override this.InvokeCoreAsync(arguments: AIFunctionArguments, cancellationToken: CancellationToken) =
+        task {
+            cancellationToken.ThrowIfCancellationRequested()
+
+            let input = this.DeserializeInput(arguments, cancellationToken)
+            let inputIssues = tool.ValidateInput input
+
+            if inputIssues.Count > 0 then
+                raise (SanitizedToolException(this.FormatValidationIssues(inputIssues)))
+
+            cancellationToken.ThrowIfCancellationRequested()
+
+            let! output =
+                task {
+                    try
+                        return! tool.InvokeAsync(this.CreateToolContext(cancellationToken), input)
+                    with
+                    | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+                        return raise (OperationCanceledException(cancellationToken))
+                    | ex -> return raise (SanitizedToolException("Tool execution failed.", ex))
+                }
+
+            let outputIssues = tool.ValidateOutput output
+
+            if outputIssues.Count > 0 then
+                raise (SanitizedToolException(this.FormatValidationIssues(outputIssues)))
+
+            return output
+        }
+        |> ValueTask<obj>
+
 module internal MafAgentFactory =
     let private toReadOnlyList<'T> (items: 'T seq) =
         items |> Seq.toArray :> IReadOnlyList<'T>
 
-    let private wrapApprovalIfRequired (tool: ResolvedTool) =
+    let private toModelFacingToolName (tool: Circuit.Core.ResolvedTool) =
+        let baseName = tool.Name.Value.Replace('.', '_').Replace('-', '_')
+
+        $"{baseName}_v{tool.Version.Value.Major}"
+
+    let private wrapApprovalIfRequired (tool: ResolvedMafTool) =
         if tool.RequiresApproval then
-            ApprovalRequiredAIFunction(tool.Tool) :> AITool
+            ApprovalRequiredAIFunction(tool.MafFunction) :> AITool
         else
-            tool.Tool :> AITool
+            tool.MafFunction :> AITool
 
     let private combineInstructions (agent: AgentDefinition) (signature: Signature<'Input, 'Output>) =
         if String.IsNullOrWhiteSpace signature.Instructions then
             agent.Instructions
         else
             agent.Instructions + "\n\n" + signature.Instructions
+
+    let private createToolFunction
+        (runtimeOptions: MafRuntimeOptions)
+        (runContext: RunContext)
+        (tool: Circuit.Core.ResolvedTool)
+        =
+        let modelName = toModelFacingToolName tool
+
+        let mafFunction =
+            CircuitResolvedToolFunction(tool, modelName, runtimeOptions.JsonSerializerOptions, runContext)
+
+        ResolvedMafTool(tool, modelName, mafFunction)
+
+    let private createToolResolutionContext (context: RunContext) =
+        ToolResolutionContext(context.RunId, context.Options.TenantId, context.Options.UserId, context.Options.Services)
+
+    let private ensureDistinctModelNames (tools: ResolvedMafTool[]) =
+        let modelNames = Dictionary<string, string>(StringComparer.Ordinal)
+
+        for tool in tools do
+            match modelNames.TryGetValue tool.ModelName with
+            | true, existingIdentity ->
+                invalidOp
+                    $"Multiple tools map to the same model-facing identity '{tool.ModelName}': {existingIdentity}, {tool.Tool.Name.Value}@{tool.Tool.Version}."
+            | false, _ -> modelNames[tool.ModelName] <- $"{tool.Tool.Name.Value}@{tool.Tool.Version}"
 
     let resolveToolsAsync
         (runtimeOptions: MafRuntimeOptions)
@@ -198,30 +542,39 @@ module internal MafAgentFactory =
         (cancellationToken: CancellationToken)
         =
         task {
-            let! resolvedSets =
-                runtimeOptions.ToolResolvers
-                |> Seq.map (fun (resolver: IToolResolver) ->
-                    resolver.ResolveToolsAsync(context, cancellationToken).AsTask())
-                |> Task.WhenAll
+            let! resolvedTools =
+                ToolResolution.resolveAllAsync
+                    runtimeOptions.ToolResolvers
+                    (createToolResolutionContext context)
+                    cancellationToken
 
-            let allTools = resolvedSets |> Seq.collect id |> Seq.toArray
+            let selectedTools =
+                if agent.ToolTags.Count = 0 then
+                    resolvedTools |> Seq.toArray
+                else
+                    let selectedByName =
+                        Dictionary<string, Circuit.Core.ResolvedTool>(StringComparer.Ordinal)
 
-            if agent.ToolTags.Count = 0 then
-                return allTools |> Array.distinctBy (fun tool -> tool.Name) |> toReadOnlyList
-            else
-                let selectedByName = Dictionary<string, ResolvedTool>(StringComparer.Ordinal)
+                    for requestedTag in agent.ToolTags |> Seq.sort do
+                        let matches =
+                            resolvedTools
+                            |> Seq.filter (fun tool -> tool.Tags.Contains requestedTag)
+                            |> Seq.toArray
 
-                for requestedTag in agent.ToolTags |> Seq.sort do
-                    let matches = allTools |> Array.filter (fun tool -> tool.Tags.Contains requestedTag)
+                        match matches.Length with
+                        | 0 -> invalidOp $"No tool was resolved for requested tag '{requestedTag}'."
+                        | 1 -> selectedByName[matches[0].Name.Value] <- matches[0]
+                        | _ ->
+                            let names = matches |> Array.map (fun tool -> tool.Name.Value) |> String.concat ", "
+                            invalidOp $"Multiple tools were resolved for requested tag '{requestedTag}': {names}."
 
-                    match matches.Length with
-                    | 0 -> invalidOp $"No tool was resolved for requested tag '{requestedTag}'."
-                    | 1 -> selectedByName[matches[0].Name] <- matches[0]
-                    | _ ->
-                        let names = matches |> Array.map (fun tool -> tool.Name) |> String.concat ", "
-                        invalidOp $"Multiple tools were resolved for requested tag '{requestedTag}': {names}."
+                    selectedByName.Values |> Seq.toArray
 
-                return selectedByName.Values |> Seq.toArray |> toReadOnlyList
+            let mappedTools =
+                selectedTools |> Array.map (createToolFunction runtimeOptions context)
+
+            ensureDistinctModelNames mappedTools
+            return mappedTools :> IReadOnlyList<ResolvedMafTool>
         }
 
     let resolveSkillsAsync
@@ -268,14 +621,67 @@ module internal MafAgentFactory =
         options.ChatClientSystemMessage <- MafStructuredOutput.RepairSystemMessage
         options
 
+    let private createToolApprovalOptions
+        (runtimeOptions: MafRuntimeOptions)
+        (runContext: RunContext)
+        (tools: IReadOnlyList<ResolvedMafTool>)
+        =
+        let policyTools =
+            tools
+            |> Seq.choose (fun tool ->
+                match tool.Tool.Approval, tool.Tool.ApprovalPolicy with
+                | ApprovalMode.ByPolicy, ValueSome policyName -> Some(tool.ModelName, policyName, tool.Tool)
+                | _ -> None)
+            |> Seq.toArray
+
+        if not (tools |> Seq.exists (fun tool -> tool.RequiresApproval)) then
+            ValueNone
+        else
+            let toolApprovalOptions = ToolApprovalAgentOptions()
+            toolApprovalOptions.JsonSerializerOptions <- runtimeOptions.JsonSerializerOptions
+
+            match runtimeOptions.ToolApprovalPolicy, policyTools.Length with
+            | ValueSome approvalPolicy, _ when policyTools.Length > 0 ->
+                let policyToolsByModelName =
+                    Dictionary<string, struct (string * Circuit.Core.ResolvedTool)>(StringComparer.Ordinal)
+
+                for modelName, policyName, tool in policyTools do
+                    policyToolsByModelName[modelName] <- struct (policyName, tool)
+
+                toolApprovalOptions.AutoApprovalRules <-
+                    [| Func<FunctionCallContent, ValueTask<bool>>(fun functionCall ->
+                           task {
+                               match policyToolsByModelName.TryGetValue functionCall.Name with
+                               | true, struct (policyName, tool) ->
+                                   let argumentsDictionary = Dictionary<string, obj>(StringComparer.Ordinal)
+
+                                   if not (isNull functionCall.Arguments) then
+                                       for KeyValue(key, value) in functionCall.Arguments do
+                                           argumentsDictionary[key] <- value
+
+                                   let arguments = argumentsDictionary :> IReadOnlyDictionary<string, obj>
+
+                                   try
+                                       let context = ToolApprovalContext(runContext, tool, arguments)
+                                       let! approved = approvalPolicy.IsApprovedAsync(policyName, context).AsTask()
+                                       return approved
+                                   with _ ->
+                                       return false
+                               | false, _ -> return false
+                           }
+                           |> ValueTask<bool>) |]
+            | _ -> ()
+
+            ValueSome toolApprovalOptions
+
     let private createBaseAgent
         (chatClient: IChatClient)
         (runtimeOptions: MafRuntimeOptions)
-        (runOptions: RunOptions)
+        (runContext: RunContext)
         (agent: AgentDefinition)
         (description: string)
         (instructions: string)
-        (tools: IReadOnlyList<ResolvedTool>)
+        (tools: IReadOnlyList<ResolvedMafTool>)
         (skills: IReadOnlyList<ResolvedSkill>)
         (enableSecondaryRepair: bool)
         =
@@ -303,9 +709,13 @@ module internal MafAgentFactory =
             tools |> Seq.exists (fun tool -> tool.RequiresApproval)
 
         let innerAgent: AIAgent =
-            ChatClientExtensions.AsAIAgent(chatClient, agentOptions, null, runOptions.Services) :> AIAgent
+            ChatClientExtensions.AsAIAgent(chatClient, agentOptions, null, runContext.Options.Services) :> AIAgent
 
         let builder = innerAgent.AsBuilder()
+
+        match createToolApprovalOptions runtimeOptions runContext tools with
+        | ValueSome toolApprovalOptions -> builder.UseToolApproval(toolApprovalOptions) |> ignore
+        | ValueNone -> ()
 
         if enableSecondaryRepair then
             match runtimeOptions.SecondaryStructuredOutputClient with
@@ -326,23 +736,49 @@ module internal MafAgentFactory =
                 |> ignore
             | ValueNone -> invalidOp "Structured output repair requires a secondary structured output chat client."
 
+        if tools |> Seq.exists (fun tool -> tool.RequiresApproval) then
+            builder.Use(
+                (fun messages session options nextAgent cancellationToken ->
+                    task {
+                        let filteredMessages, droppedInvalidResponses =
+                            MafApprovalResponses.filterInboundApprovalResponses
+                                messages
+                                session
+                                runtimeOptions.JsonSerializerOptions
+
+                        if droppedInvalidResponses && filteredMessages.Count = 0 then
+                            return AgentResponse(Array.empty<ChatMessage> :> IList<ChatMessage>)
+                        else
+                            let! response = nextAgent.RunAsync(filteredMessages, session, options, cancellationToken)
+
+                            MafApprovalResponses.captureOutboundApprovalRequests
+                                response
+                                session
+                                runtimeOptions.JsonSerializerOptions
+
+                            return response
+                    }),
+                null
+            )
+            |> ignore
+
         builder.UseOpenTelemetry() |> ignore
-        builder.Build(runOptions.Services)
+        builder.Build(runContext.Options.Services)
 
     let createAgent<'Input, 'Output>
         (chatClient: IChatClient)
         (runtimeOptions: MafRuntimeOptions)
-        (runOptions: RunOptions)
+        (runContext: RunContext)
         (agent: AgentDefinition)
         (signature: Signature<'Input, 'Output>)
-        (tools: IReadOnlyList<ResolvedTool>)
+        (tools: IReadOnlyList<ResolvedMafTool>)
         (skills: IReadOnlyList<ResolvedSkill>)
         (enableSecondaryRepair: bool)
         =
         createBaseAgent
             chatClient
             runtimeOptions
-            runOptions
+            runContext
             agent
             signature.Description
             (combineInstructions agent signature)
@@ -353,9 +789,9 @@ module internal MafAgentFactory =
     let createSessionAgent
         (chatClient: IChatClient)
         (runtimeOptions: MafRuntimeOptions)
-        (runOptions: RunOptions)
+        (runContext: RunContext)
         (agent: AgentDefinition)
-        (tools: IReadOnlyList<ResolvedTool>)
+        (tools: IReadOnlyList<ResolvedMafTool>)
         (skills: IReadOnlyList<ResolvedSkill>)
         =
-        createBaseAgent chatClient runtimeOptions runOptions agent agent.Name agent.Instructions tools skills false
+        createBaseAgent chatClient runtimeOptions runContext agent agent.Name agent.Instructions tools skills false
