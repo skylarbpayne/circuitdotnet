@@ -18,6 +18,21 @@
     <ProjectReference Include="../../src/Circuit/Circuit.csproj" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <PackageDirectoryRunSettingsPath>$(BaseIntermediateOutputPath)Circuit.Package.Tests.runsettings</PackageDirectoryRunSettingsPath>
+  </PropertyGroup>
+
+  <Target Name="PreparePackageDirectoryRunSettings" BeforeTargets="VSTest" Condition="'$(PackageDirectory)' != ''">
+    <MakeDir Directories="$(BaseIntermediateOutputPath)" />
+    <WriteLinesToFile
+      File="$(PackageDirectoryRunSettingsPath)"
+      Overwrite="true"
+      Lines="&lt;RunSettings&gt;&#x0A;  &lt;RunConfiguration&gt;&#x0A;    &lt;EnvironmentVariables&gt;&#x0A;      &lt;PackageDirectory&gt;$(PackageDirectory)&lt;/PackageDirectory&gt;&#x0A;    &lt;/EnvironmentVariables&gt;&#x0A;  &lt;/RunConfiguration&gt;&#x0A;&lt;/RunSettings&gt;" />
+    <PropertyGroup>
+      <RunSettingsFilePath>$(PackageDirectoryRunSettingsPath)</RunSettingsFilePath>
+    </PropertyGroup>
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />

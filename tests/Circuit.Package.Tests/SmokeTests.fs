@@ -50,12 +50,25 @@ module PackageSmokeTests =
         Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."))
 
     let private packageDirectory =
-        match Environment.GetEnvironmentVariable("PackageDirectory") with
-        | null
-        | "" ->
-            failwith
-                "PackageDirectory was not supplied. Run package smoke tests with the PackageDirectory environment variable set to the packed artifacts folder."
-        | value -> Path.GetFullPath value
+        let explicitPackageDirectory =
+            Environment.GetEnvironmentVariable("PackageDirectory")
+
+        let resolvedPackageDirectory =
+            match explicitPackageDirectory with
+            | null
+            | "" -> Path.GetFullPath(Path.Combine(projectRoot, "artifacts", "packages"))
+            | value -> Path.GetFullPath value
+
+        if not (Directory.Exists resolvedPackageDirectory) then
+            let guidance =
+                if String.IsNullOrWhiteSpace explicitPackageDirectory then
+                    "Run dotnet pack first or pass -p:PackageDirectory=<packed artifacts folder>."
+                else
+                    "Check the PackageDirectory value passed to the test run."
+
+            failwith $"Package directory '{resolvedPackageDirectory}' does not exist. {guidance}"
+
+        resolvedPackageDirectory
 
     let private nuspecNamespace =
         XNamespace.Get("http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd")
