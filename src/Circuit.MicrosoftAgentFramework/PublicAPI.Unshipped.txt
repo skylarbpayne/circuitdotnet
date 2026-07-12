@@ -4,8 +4,6 @@ T:Circuit.MicrosoftAgentFramework.IRunObserver
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunCompletedAsync(Circuit.MicrosoftAgentFramework.MafRunObservation,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunEventAsync(Circuit.MicrosoftAgentFramework.MafObservedEvent,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunStartedAsync(Circuit.Core.RunContext,System.DateTimeOffset,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
-T:Circuit.MicrosoftAgentFramework.ISkillResolver
-M:Circuit.MicrosoftAgentFramework.ISkillResolver.ResolveSkillsAsync(Circuit.Core.RunContext,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Collections.Generic.IReadOnlyList{Circuit.MicrosoftAgentFramework.ResolvedSkill}}
 T:Circuit.MicrosoftAgentFramework.IToolApprovalPolicy
 M:Circuit.MicrosoftAgentFramework.IToolApprovalPolicy.IsApprovedAsync(System.String,Circuit.MicrosoftAgentFramework.ToolApprovalContext)~System.Threading.Tasks.ValueTask{System.Boolean}
 T:Circuit.MicrosoftAgentFramework.MafObservedEvent
@@ -33,12 +31,10 @@ P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.DefaultModelId~Microsoft.FSh
 P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.JsonSerializerOptions~System.Text.Json.JsonSerializerOptions
 P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.Observers~System.Collections.Generic.IReadOnlyList{Circuit.MicrosoftAgentFramework.IRunObserver}
 P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.SecondaryStructuredOutputClient~Microsoft.FSharp.Core.FSharpValueOption{Microsoft.Extensions.AI.IChatClient}
-P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.SkillResolvers~System.Collections.Generic.IReadOnlyList{Circuit.MicrosoftAgentFramework.ISkillResolver}
+P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.SkillResolvers~System.Collections.Generic.IReadOnlyList{Circuit.Core.ISkillResolver}
+P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.SkillScriptRunner~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.ISkillScriptRunner}
 P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.ToolApprovalPolicy~Microsoft.FSharp.Core.FSharpValueOption{Circuit.MicrosoftAgentFramework.IToolApprovalPolicy}
 P:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.ToolResolvers~System.Collections.Generic.IReadOnlyList{Circuit.Core.IToolResolver}
-T:Circuit.MicrosoftAgentFramework.ResolvedSkill
-P:Circuit.MicrosoftAgentFramework.ResolvedSkill.Provider~Microsoft.Agents.AI.AIContextProvider
-P:Circuit.MicrosoftAgentFramework.ResolvedSkill.Reference~Circuit.Core.SkillReference
 T:Circuit.MicrosoftAgentFramework.ToolApprovalContext
 P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.Arguments~System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object}
 P:Circuit.MicrosoftAgentFramework.ToolApprovalContext.RunContext~Circuit.Core.RunContext

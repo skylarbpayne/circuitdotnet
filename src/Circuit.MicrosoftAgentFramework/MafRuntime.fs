@@ -136,7 +136,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                     with
                     | ex when MafErrors.isCancellationRequested cancellationToken ex ->
                         return Error(MafErrors.cancelledFailure runId "The run was cancelled." (ValueSome ex))
-                    | ex -> return Error(MafErrors.skillFailure runId ex.Message (ValueSome ex))
+                    | ex -> return Error(MafErrors.skillFailure runId "Skill resolution failed." (ValueSome ex))
             with
             | ex when MafErrors.isCancellationRequested cancellationToken ex ->
                 return Error(MafErrors.cancelledFailure runId "The run was cancelled." (ValueSome ex))
@@ -224,7 +224,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
         (runId: RunId)
         (agent: AgentDefinition)
         (cancellationToken: CancellationToken)
-        : Task<Result<AIAgent, CircuitFailure>> =
+        : Task<Result<MafAgentFactory.MafCompiledAgent, CircuitFailure>> =
         task {
             let context = RunContext(runId, agent, agent.Id, agent.Version, RunOptions.Default)
             let! capabilityResult = this.ResolveCapabilitiesAsync runId context agent cancellationToken
@@ -232,10 +232,13 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
             match capabilityResult with
             | Error failure -> return Error failure
             | Ok(tools, skills) ->
-                let sessionAgent =
-                    MafAgentFactory.createSessionAgent chatClient options context agent tools skills
+                try
+                    let sessionAgent =
+                        MafAgentFactory.createSessionAgent chatClient options context agent tools skills
 
-                return Ok sessionAgent
+                    return Ok sessionAgent
+                with ex ->
+                    return Error(MafErrors.skillFailure runId "Skill initialization failed." (ValueSome ex))
         }
 
     member internal this.RunAsyncCore<'Input, 'Output>
@@ -329,160 +332,177 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                                     let sessionBinding =
                                         MafSessionContracts.createSessionBinding runContext signature tools skills
 
-                                    let runtimeAgent =
-                                        MafAgentFactory.createAgent
-                                            chatClient
-                                            options
-                                            runContext
-                                            agent
-                                            signature
-                                            tools
-                                            skills
-                                            enableSecondaryRepair
+                                    let runtimeAgentResult =
+                                        try
+                                            Ok(
+                                                MafAgentFactory.createAgent
+                                                    chatClient
+                                                    options
+                                                    runContext
+                                                    agent
+                                                    signature
+                                                    tools
+                                                    skills
+                                                    enableSecondaryRepair
+                                            )
+                                        with ex ->
+                                            Error(
+                                                MafErrors.skillFailure
+                                                    runId
+                                                    "Skill initialization failed."
+                                                    (ValueSome ex)
+                                            )
 
-                                    let! sessionResult =
-                                        this.PrepareSessionAsync
-                                            runId
-                                            runtimeAgent
-                                            agent
-                                            sessionBinding
-                                            runOptions
-                                            cancellationToken
-
-                                    match sessionResult with
+                                    match runtimeAgentResult with
                                     | Error failure -> return! fail failure
-                                    | Ok(providerSession, wrappedSession) ->
-                                        resultSession <- wrappedSession
+                                    | Ok runtimeAgent ->
+                                        use runtimeAgent = runtimeAgent
 
-                                        match this.TryCreateInputEnvelope runId signature input cancellationToken with
+                                        let! sessionResult =
+                                            this.PrepareSessionAsync
+                                                runId
+                                                runtimeAgent.Agent
+                                                agent
+                                                sessionBinding
+                                                runOptions
+                                                cancellationToken
+
+                                        match sessionResult with
                                         | Error failure -> return! fail failure
-                                        | Ok inputEnvelope ->
-                                            let! responseResult =
-                                                task {
-                                                    try
-                                                        let! response =
-                                                            runtimeAgent.RunAsync<'Output>(
-                                                                inputEnvelope,
-                                                                providerSession,
-                                                                signature.JsonSerializerOptions,
-                                                                null,
-                                                                cancellationToken
-                                                            )
+                                        | Ok(providerSession, wrappedSession) ->
+                                            resultSession <- wrappedSession
 
-                                                        return Ok response
-                                                    with
-                                                    | ex when MafErrors.isCancellationRequested cancellationToken ex ->
-                                                        return
+                                            match
+                                                this.TryCreateInputEnvelope runId signature input cancellationToken
+                                            with
+                                            | Error failure -> return! fail failure
+                                            | Ok inputEnvelope ->
+                                                let! responseResult =
+                                                    task {
+                                                        try
+                                                            let! response =
+                                                                runtimeAgent.Agent.RunAsync<'Output>(
+                                                                    inputEnvelope,
+                                                                    providerSession,
+                                                                    signature.JsonSerializerOptions,
+                                                                    null,
+                                                                    cancellationToken
+                                                                )
+
+                                                            return Ok response
+                                                        with
+                                                        | ex when MafErrors.isCancellationRequested cancellationToken ex ->
+                                                            return
+                                                                Error(
+                                                                    MafErrors.cancelledFailure
+                                                                        runId
+                                                                        "The run was cancelled."
+                                                                        (ValueSome ex)
+                                                                )
+                                                        | ex when MafErrors.isStructuredOutputUnsupported ex ->
+                                                            return
+                                                                Error(
+                                                                    MafErrors.structuredOutputUnsupportedFailure
+                                                                        runId
+                                                                        "Structured output is not supported for this run."
+                                                                        ValueNone
+                                                                        (ValueSome ex)
+                                                                )
+                                                        | ex ->
+                                                            return
+                                                                Error(
+                                                                    MafErrors.providerFailure
+                                                                        runId
+                                                                        "The provider request failed."
+                                                                        ValueNone
+                                                                        (ValueSome ex)
+                                                                )
+                                                    }
+
+                                                match responseResult with
+                                                | Error failure -> return! fail failure
+                                                | Ok response ->
+                                                    let responseUsage =
+                                                        match MafStructuredOutput.tryGetOriginalUsage response with
+                                                        | ValueSome originalUsage ->
+                                                            MafErrors.combineUsageDetails originalUsage response.Usage
+                                                        | ValueNone -> response.Usage
+
+                                                    usage <- MafErrors.createUsage responseUsage
+                                                    repaired <- MafStructuredOutput.wasRepaired response
+
+                                                    diagnosticMetadata <-
+                                                        this.CreateDiagnosticMetadata(runOptions, response)
+
+                                                    let decodedResult =
+                                                        try
+                                                            Ok response.Result
+                                                        with
+                                                        | ex when MafErrors.isCancellationRequested cancellationToken ex ->
                                                             Error(
                                                                 MafErrors.cancelledFailure
                                                                     runId
                                                                     "The run was cancelled."
                                                                     (ValueSome ex)
                                                             )
-                                                    | ex when MafErrors.isStructuredOutputUnsupported ex ->
-                                                        return
+                                                        | ex when MafErrors.isStructuredOutputUnsupported ex ->
                                                             Error(
                                                                 MafErrors.structuredOutputUnsupportedFailure
                                                                     runId
-                                                                    ex.Message
+                                                                    "Structured output is not supported for this run."
                                                                     ValueNone
                                                                     (ValueSome ex)
                                                             )
-                                                    | ex ->
-                                                        return
+                                                        | ex when MafErrors.isDecodeFailure ex ->
+                                                            Error(
+                                                                MafErrors.decodeFailure
+                                                                    runId
+                                                                    "The provider response could not be decoded."
+                                                                    ValueNone
+                                                                    (ValueSome ex)
+                                                            )
+                                                        | ex ->
                                                             Error(
                                                                 MafErrors.providerFailure
                                                                     runId
-                                                                    ex.Message
+                                                                    "The provider request failed."
                                                                     ValueNone
                                                                     (ValueSome ex)
                                                             )
-                                                }
 
-                                            match responseResult with
-                                            | Error failure -> return! fail failure
-                                            | Ok response ->
-                                                let responseUsage =
-                                                    match MafStructuredOutput.tryGetOriginalUsage response with
-                                                    | ValueSome originalUsage ->
-                                                        MafErrors.combineUsageDetails originalUsage response.Usage
-                                                    | ValueNone -> response.Usage
+                                                    match decodedResult with
+                                                    | Error failure -> return! fail failure
+                                                    | Ok output ->
+                                                        let outputIssues = signature.Output.Validate output
 
-                                                usage <- MafErrors.createUsage responseUsage
-                                                repaired <- MafStructuredOutput.wasRepaired response
-
-                                                diagnosticMetadata <-
-                                                    this.CreateDiagnosticMetadata(runOptions, response)
-
-                                                let decodedResult =
-                                                    try
-                                                        Ok response.Result
-                                                    with
-                                                    | ex when MafErrors.isCancellationRequested cancellationToken ex ->
-                                                        Error(
-                                                            MafErrors.cancelledFailure
-                                                                runId
-                                                                "The run was cancelled."
-                                                                (ValueSome ex)
-                                                        )
-                                                    | ex when MafErrors.isStructuredOutputUnsupported ex ->
-                                                        Error(
-                                                            MafErrors.structuredOutputUnsupportedFailure
-                                                                runId
-                                                                ex.Message
-                                                                ValueNone
-                                                                (ValueSome ex)
-                                                        )
-                                                    | ex when MafErrors.isDecodeFailure ex ->
-                                                        Error(
-                                                            MafErrors.decodeFailure
-                                                                runId
-                                                                ex.Message
-                                                                ValueNone
-                                                                (ValueSome ex)
-                                                        )
-                                                    | ex ->
-                                                        Error(
-                                                            MafErrors.providerFailure
-                                                                runId
-                                                                ex.Message
-                                                                ValueNone
-                                                                (ValueSome ex)
-                                                        )
-
-                                                match decodedResult with
-                                                | Error failure -> return! fail failure
-                                                | Ok output ->
-                                                    let outputIssues = signature.Output.Validate output
-
-                                                    if outputIssues.Count > 0 then
-                                                        return!
-                                                            fail (
-                                                                MafErrors.validationFailure
+                                                        if outputIssues.Count > 0 then
+                                                            return!
+                                                                fail (
+                                                                    MafErrors.validationFailure
+                                                                        runId
+                                                                        (MafErrors.formatValidationIssues outputIssues)
+                                                                )
+                                                        else
+                                                            do!
+                                                                MafObserver.notifyEventAsync
+                                                                    options.Observers
                                                                     runId
-                                                                    (MafErrors.formatValidationIssues outputIssues)
-                                                            )
-                                                    else
-                                                        do!
-                                                            MafObserver.notifyEventAsync
-                                                                options.Observers
-                                                                runId
-                                                                RunEventKind.RunCompleted
-                                                                ValueNone
-                                                                ValueNone
-                                                                ValueNone
-                                                                ValueNone
-                                                                cancellationToken
+                                                                    RunEventKind.RunCompleted
+                                                                    ValueNone
+                                                                    ValueNone
+                                                                    ValueNone
+                                                                    ValueNone
+                                                                    cancellationToken
 
-                                                        return
-                                                            RunResult(
-                                                                runId,
-                                                                CircuitResult<'Output>.Success output,
-                                                                usage,
-                                                                resultSession,
-                                                                startedAt,
-                                                                DateTimeOffset.UtcNow
-                                                            )
+                                                            return
+                                                                RunResult(
+                                                                    runId,
+                                                                    CircuitResult<'Output>.Success output,
+                                                                    usage,
+                                                                    resultSession,
+                                                                    startedAt,
+                                                                    DateTimeOffset.UtcNow
+                                                                )
             finally
                 let observation =
                     MafRunObservation(
@@ -535,8 +555,10 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                                 )
                             )
                     | Ok sessionAgent ->
+                        use sessionAgent = sessionAgent
+
                         let! providerState =
-                            sessionAgent
+                            sessionAgent.Agent
                                 .SerializeSessionAsync(
                                     providerSession,
                                     options.JsonSerializerOptions,
@@ -577,8 +599,10 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                             )
                         )
                 | Ok sessionAgent ->
+                    use sessionAgent = sessionAgent
+
                     let! providerSession =
-                        sessionAgent
+                        sessionAgent.Agent
                             .DeserializeSessionAsync(providerState, options.JsonSerializerOptions, cancellationToken)
                             .AsTask()
 

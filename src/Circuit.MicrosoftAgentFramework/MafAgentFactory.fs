@@ -584,13 +584,16 @@ module internal MafAgentFactory =
         (cancellationToken: CancellationToken)
         =
         task {
-            let! resolvedSets =
-                runtimeOptions.SkillResolvers
-                |> Seq.map (fun (resolver: ISkillResolver) ->
-                    resolver.ResolveSkillsAsync(context, cancellationToken).AsTask())
-                |> Task.WhenAll
+            let skillContext =
+                SkillResolutionContext(
+                    context.RunId,
+                    context.Options.TenantId,
+                    context.Options.UserId,
+                    context.Options.Services
+                )
 
-            let allSkills = resolvedSets |> Seq.collect id |> Seq.toArray
+            let! allSkills =
+                SkillResolution.resolveAllAsync runtimeOptions.SkillResolvers skillContext cancellationToken
 
             if agent.Skills.Count = 0 then
                 return Array.empty<ResolvedSkill> |> toReadOnlyList
@@ -600,15 +603,16 @@ module internal MafAgentFactory =
                 for requestedSkill in agent.Skills do
                     let matches =
                         allSkills
-                        |> Array.filter (fun skill ->
+                        |> Seq.filter (fun skill ->
                             skill.Reference.Id = requestedSkill.Id
                             && skill.Reference.Version = requestedSkill.Version)
+                        |> Seq.toArray
 
                     match matches.Length with
                     | 0 ->
                         invalidOp
                             $"No skill was resolved for requested skill '{requestedSkill.Id.Value}@{requestedSkill.Version}'."
-                    | 1 -> selected.Add matches[0]
+                    | 1 -> selected.Add(MafSkillAdapter.prepareResolvedSkill matches[0])
                     | _ ->
                         invalidOp
                             $"Multiple skills were resolved for requested skill '{requestedSkill.Id.Value}@{requestedSkill.Version}'."
@@ -674,6 +678,18 @@ module internal MafAgentFactory =
 
             ValueSome toolApprovalOptions
 
+    type internal MafCompiledAgent(agent: AIAgent, skillAttachment: MafSkillProviderAttachment voption) =
+        member _.Agent = agent
+        member _.SkillAttachment = skillAttachment
+
+        interface IDisposable with
+            member _.Dispose() =
+                match box agent with
+                | :? IDisposable as disposable -> disposable.Dispose()
+                | _ -> ()
+
+                MafSkillAdapter.dispose skillAttachment
+
     let private createBaseAgent
         (chatClient: IChatClient)
         (runtimeOptions: MafRuntimeOptions)
@@ -685,85 +701,113 @@ module internal MafAgentFactory =
         (skills: IReadOnlyList<ResolvedSkill>)
         (enableSecondaryRepair: bool)
         =
-        let chatOptions = ChatOptions()
-        chatOptions.Instructions <- instructions
+        let skillAttachment =
+            MafSkillAdapter.createAttachment runtimeOptions runContext skills
 
-        match agent.ModelHint, runtimeOptions.DefaultModelId with
-        | ValueSome modelId, _ -> chatOptions.ModelId <- modelId
-        | ValueNone, ValueSome modelId -> chatOptions.ModelId <- modelId
-        | ValueNone, ValueNone -> ()
+        try
+            let hasApprovalFlow =
+                (tools |> Seq.exists (fun tool -> tool.RequiresApproval))
+                || skillAttachment.IsSome
 
-        if tools.Count > 0 then
-            chatOptions.Tools <- ResizeArray<AITool>(tools |> Seq.map wrapApprovalIfRequired) :> IList<AITool>
+            let skillProviders = MafSkillAdapter.getProviders skillAttachment
 
-        let agentOptions = ChatClientAgentOptions()
-        agentOptions.Id <- agent.Id.Value
-        agentOptions.Name <- agent.Name
-        agentOptions.Description <- description
-        agentOptions.ChatOptions <- chatOptions
+            let effectiveChatClient =
+                if skillProviders.Count = 0 then
+                    chatClient
+                else
+                    let chatClientBuilder = ChatClientBuilder(chatClient)
+                    chatClientBuilder.UseAIContextProviders(skillProviders |> Seq.toArray) |> ignore
+                    chatClientBuilder.Build(runContext.Options.Services)
 
-        agentOptions.AIContextProviders <-
-            ResizeArray<AIContextProvider>(skills |> Seq.map (fun skill -> skill.Provider))
+            let effectiveInstructions =
+                if skillAttachment.IsSome then
+                    $"{instructions}\n\n{{skills}}"
+                else
+                    instructions
 
-        agentOptions.EnableNonApprovalRequiredFunctionBypassing <-
-            tools |> Seq.exists (fun tool -> tool.RequiresApproval)
+            let chatOptions = ChatOptions()
+            chatOptions.Instructions <- effectiveInstructions
 
-        let innerAgent: AIAgent =
-            ChatClientExtensions.AsAIAgent(chatClient, agentOptions, null, runContext.Options.Services) :> AIAgent
+            match agent.ModelHint, runtimeOptions.DefaultModelId with
+            | ValueSome modelId, _ -> chatOptions.ModelId <- modelId
+            | ValueNone, ValueSome modelId -> chatOptions.ModelId <- modelId
+            | ValueNone, ValueNone -> ()
 
-        let builder = innerAgent.AsBuilder()
+            if tools.Count > 0 then
+                chatOptions.Tools <- ResizeArray<AITool>(tools |> Seq.map wrapApprovalIfRequired) :> IList<AITool>
 
-        match createToolApprovalOptions runtimeOptions runContext tools with
-        | ValueSome toolApprovalOptions -> builder.UseToolApproval(toolApprovalOptions) |> ignore
-        | ValueNone -> ()
+            let agentOptions = ChatClientAgentOptions()
+            agentOptions.Id <- agent.Id.Value
+            agentOptions.Name <- agent.Name
+            agentOptions.Description <- description
+            agentOptions.ChatOptions <- chatOptions
+            agentOptions.EnableNonApprovalRequiredFunctionBypassing <- hasApprovalFlow
 
-        if enableSecondaryRepair then
-            match runtimeOptions.SecondaryStructuredOutputClient with
-            | ValueSome secondaryClient ->
-                builder.UseStructuredOutput(secondaryClient, Func<_>(createStructuredOutputRepairOptions))
-                |> ignore
+            let innerAgent: AIAgent =
+                ChatClientExtensions.AsAIAgent(effectiveChatClient, agentOptions, null, runContext.Options.Services)
+                :> AIAgent
 
+            let builder = innerAgent.AsBuilder()
+
+            match createToolApprovalOptions runtimeOptions runContext tools, skillAttachment with
+            | ValueSome toolApprovalOptions, _ -> builder.UseToolApproval(toolApprovalOptions) |> ignore
+            | ValueNone, ValueSome _ ->
+                let toolApprovalOptions = ToolApprovalAgentOptions()
+                toolApprovalOptions.JsonSerializerOptions <- runtimeOptions.JsonSerializerOptions
+                builder.UseToolApproval(toolApprovalOptions) |> ignore
+            | ValueNone, ValueNone -> ()
+
+            if enableSecondaryRepair then
+                match runtimeOptions.SecondaryStructuredOutputClient with
+                | ValueSome secondaryClient ->
+                    builder.UseStructuredOutput(secondaryClient, Func<_>(createStructuredOutputRepairOptions))
+                    |> ignore
+
+                    builder.Use(
+                        (fun messages session options nextAgent cancellationToken ->
+                            nextAgent.RunAsync(
+                                messages,
+                                session,
+                                MafStructuredOutput.removeResponseFormat options,
+                                cancellationToken
+                            )),
+                        null
+                    )
+                    |> ignore
+                | ValueNone -> invalidOp "Structured output repair requires a secondary structured output chat client."
+
+            if hasApprovalFlow then
                 builder.Use(
                     (fun messages session options nextAgent cancellationToken ->
-                        nextAgent.RunAsync(
-                            messages,
-                            session,
-                            MafStructuredOutput.removeResponseFormat options,
-                            cancellationToken
-                        )),
+                        task {
+                            let filteredMessages, droppedInvalidResponses =
+                                MafApprovalResponses.filterInboundApprovalResponses
+                                    messages
+                                    session
+                                    runtimeOptions.JsonSerializerOptions
+
+                            if droppedInvalidResponses && filteredMessages.Count = 0 then
+                                return AgentResponse(Array.empty<ChatMessage> :> IList<ChatMessage>)
+                            else
+                                let! response =
+                                    nextAgent.RunAsync(filteredMessages, session, options, cancellationToken)
+
+                                MafApprovalResponses.captureOutboundApprovalRequests
+                                    response
+                                    session
+                                    runtimeOptions.JsonSerializerOptions
+
+                                return response
+                        }),
                     null
                 )
                 |> ignore
-            | ValueNone -> invalidOp "Structured output repair requires a secondary structured output chat client."
 
-        if tools |> Seq.exists (fun tool -> tool.RequiresApproval) then
-            builder.Use(
-                (fun messages session options nextAgent cancellationToken ->
-                    task {
-                        let filteredMessages, droppedInvalidResponses =
-                            MafApprovalResponses.filterInboundApprovalResponses
-                                messages
-                                session
-                                runtimeOptions.JsonSerializerOptions
-
-                        if droppedInvalidResponses && filteredMessages.Count = 0 then
-                            return AgentResponse(Array.empty<ChatMessage> :> IList<ChatMessage>)
-                        else
-                            let! response = nextAgent.RunAsync(filteredMessages, session, options, cancellationToken)
-
-                            MafApprovalResponses.captureOutboundApprovalRequests
-                                response
-                                session
-                                runtimeOptions.JsonSerializerOptions
-
-                            return response
-                    }),
-                null
-            )
-            |> ignore
-
-        builder.UseOpenTelemetry() |> ignore
-        builder.Build(runContext.Options.Services)
+            builder.UseOpenTelemetry() |> ignore
+            new MafCompiledAgent(builder.Build(runContext.Options.Services), skillAttachment)
+        with _ ->
+            MafSkillAdapter.dispose skillAttachment
+            reraise ()
 
     let createAgent<'Input, 'Output>
         (chatClient: IChatClient)

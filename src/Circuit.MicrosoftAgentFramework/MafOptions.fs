@@ -20,11 +20,6 @@ type internal ResolvedMafTool(tool: Circuit.Core.ResolvedTool, modelName: string
         tool.Approval = ApprovalMode.Always || tool.Approval = ApprovalMode.ByPolicy
 
 [<Sealed>]
-type ResolvedSkill internal (reference: SkillReference, provider: AIContextProvider) =
-    member _.Reference = reference
-    member _.Provider = provider
-
-[<Sealed>]
 type ToolApprovalContext
     internal (runContext: RunContext, tool: Circuit.Core.ResolvedTool, arguments: IReadOnlyDictionary<string, obj>) =
     member _.RunContext = runContext
@@ -33,10 +28,6 @@ type ToolApprovalContext
 
 type IToolApprovalPolicy =
     abstract IsApprovedAsync: policyName: string * context: ToolApprovalContext -> ValueTask<bool>
-
-type ISkillResolver =
-    abstract ResolveSkillsAsync:
-        context: RunContext * cancellationToken: CancellationToken -> ValueTask<IReadOnlyList<ResolvedSkill>>
 
 [<Sealed>]
 type MafObservedEvent
@@ -148,7 +139,7 @@ type MafRuntimeOptions() =
         Array.empty<Circuit.Core.IToolResolver> :> IReadOnlyList<Circuit.Core.IToolResolver>
 
     let emptySkillResolvers =
-        Array.empty<ISkillResolver> :> IReadOnlyList<ISkillResolver>
+        Array.empty<Circuit.Core.ISkillResolver> :> IReadOnlyList<Circuit.Core.ISkillResolver>
 
     let emptyObservers = Array.empty<IRunObserver> :> IReadOnlyList<IRunObserver>
 
@@ -157,5 +148,6 @@ type MafRuntimeOptions() =
     member val SecondaryStructuredOutputClient: IChatClient voption = ValueNone with get, set
     member val ToolResolvers: IReadOnlyList<Circuit.Core.IToolResolver> = emptyToolResolvers with get, set
     member val ToolApprovalPolicy: IToolApprovalPolicy voption = ValueNone with get, set
-    member val SkillResolvers: IReadOnlyList<ISkillResolver> = emptySkillResolvers with get, set
+    member val SkillResolvers: IReadOnlyList<Circuit.Core.ISkillResolver> = emptySkillResolvers with get, set
+    member val SkillScriptRunner: Circuit.Core.ISkillScriptRunner voption = ValueNone with get, set
     member val Observers: IReadOnlyList<IRunObserver> = emptyObservers with get, set
