@@ -1,4 +1,5 @@
 M:Circuit.FSharp.Agent.run(Circuit.Core.ICircuitRuntime,Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.RunResult{``1}}
+M:Circuit.FSharp.Agent.start(Circuit.Core.IInteractiveCircuitRuntime,Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.AgentRun{``1}}
 M:Circuit.FSharp.AgentDefinition.create(System.String,System.String,System.String,System.String)~Circuit.Core.AgentDefinition
 M:Circuit.FSharp.AgentDefinition.withModelHint(System.String,Circuit.Core.AgentDefinition)~Circuit.Core.AgentDefinition
 M:Circuit.FSharp.AgentDefinition.withSkills(System.Collections.Generic.IEnumerable{Circuit.Core.SkillReference},Circuit.Core.AgentDefinition)~Circuit.Core.AgentDefinition

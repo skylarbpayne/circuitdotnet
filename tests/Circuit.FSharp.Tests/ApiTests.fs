@@ -26,6 +26,58 @@ type ConstantValidator<'T>(path: string, message: string) =
                  Code = "custom"
                  Message = message } |]
 
+type EmptyAsyncEnumerable<'T>() =
+    interface IAsyncEnumerable<'T> with
+        member _.GetAsyncEnumerator(_cancellationToken) =
+            { new IAsyncEnumerator<'T> with
+                member _.Current = Unchecked.defaultof<'T>
+                member _.MoveNextAsync() = ValueTask<bool>(false)
+                member _.DisposeAsync() = ValueTask() }
+
+type InteractiveRecordingRuntime() =
+    let events =
+        EmptyAsyncEnumerable<RunEvent<Output>>() :> IAsyncEnumerable<RunEvent<Output>>
+
+    let runId = RunId.Parse("0123456789abcdef0123456789abcdef")
+
+    let mutable observed: (AgentDefinition * string * obj * RunOptions * CancellationToken) option =
+        None
+
+    let mutable response: (ApprovalResponse * CancellationToken) option = None
+    let mutable disposed = false
+
+    member _.Events = events
+    member _.RunId = runId
+    member _.Observed = observed
+    member _.Response = response
+    member _.Disposed = disposed
+
+    interface IInteractiveCircuitRuntime with
+        member _.StartAsync<'TInput, 'TOutput>
+            (
+                agent: AgentDefinition,
+                signature: Signature<'TInput, 'TOutput>,
+                input: 'TInput,
+                options: RunOptions,
+                cancellationToken: CancellationToken
+            ) =
+            Assert.Equal(typeof<Input>, typeof<'TInput>)
+            Assert.Equal(typeof<Output>, typeof<'TOutput>)
+            observed <- Some(agent, signature.Id.Value, box input, options, cancellationToken)
+
+            Task.FromResult(
+                AgentRun<'TOutput>(
+                    runId,
+                    unbox<IAsyncEnumerable<RunEvent<'TOutput>>> (box events),
+                    (fun (value, ct) ->
+                        response <- Some(value, ct)
+                        ValueTask()),
+                    (fun () ->
+                        disposed <- true
+                        ValueTask())
+                )
+            )
+
 type RecordingRuntime(expectedValue: Output) =
     let mutable observedAgent: AgentDefinition option = None
     let mutable observedSignatureId = ""
@@ -117,3 +169,41 @@ module ApiTests =
 
         Assert.True(result.Result.IsSuccess)
         Assert.Equal("ok", result.Result.Value.Text)
+
+    [<Fact>]
+    let ``agent start delegates generic inputs and forwards the live handle`` () =
+        let implementation = InteractiveRecordingRuntime()
+        let runtime = implementation :> IInteractiveCircuitRuntime
+
+        let agent =
+            AgentDefinition.create "agent.interactive" "1.0.0" "Interactive" "Pause when needed"
+
+        let signature =
+            Signature.create<Input, Output> "signature.interactive" "1.0.0" "Description" "Instructions"
+
+        let input = Input(Name = "Ada")
+        let options = Circuit.Core.RunOptions.Default
+        use cancellationSource = new CancellationTokenSource()
+
+        let run =
+            Agent.start runtime agent signature input options cancellationSource.Token
+            |> _.Result
+
+        let observedAgent, observedSignatureId, observedInput, observedOptions, observedToken =
+            implementation.Observed.Value
+
+        Assert.Same(agent, observedAgent)
+        Assert.Equal(signature.Id.Value, observedSignatureId)
+        Assert.Same(input, observedInput)
+        Assert.Same(options, observedOptions)
+        Assert.Equal(cancellationSource.Token, observedToken)
+        Assert.Equal(implementation.RunId, run.RunId)
+        Assert.Same(implementation.Events, run.Events)
+
+        let response = ApprovalResponse.Create("approval-1", true)
+        let responseToken = CancellationToken(true)
+        run.RespondAsync(response, responseToken).AsTask().GetAwaiter().GetResult()
+        Assert.Equal(Some(response, responseToken), implementation.Response)
+
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+        Assert.True(implementation.Disposed)

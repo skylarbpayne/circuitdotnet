@@ -29,6 +29,8 @@ F:Circuit.Core.SkillSourceKind.Inline = 1
 F:Circuit.Core.StructuredOutputPolicy.AllowSecondaryModelRepair = 1
 F:Circuit.Core.StructuredOutputPolicy.NativeOnly = 0
 M:Circuit.Core.AgentDefinition.Create(System.String,System.String,System.String,System.String,Microsoft.FSharp.Core.FSharpValueOption{System.String},System.Collections.Generic.IEnumerable{System.String},System.Collections.Generic.IEnumerable{Circuit.Core.SkillReference},System.Collections.Generic.IEnumerable{System.Collections.Generic.KeyValuePair{System.String,System.String}})~Circuit.Core.AgentDefinition
+M:Circuit.Core.AgentRun`1.Create(Circuit.Core.RunId,System.Collections.Generic.IAsyncEnumerable{Circuit.Core.RunEvent{`0}},System.Func{Circuit.Core.ApprovalResponse,System.Threading.CancellationToken,System.Threading.Tasks.ValueTask},System.Func{System.Threading.Tasks.ValueTask})~Circuit.Core.AgentRun{`0}
+M:Circuit.Core.AgentRun`1.RespondAsync(Circuit.Core.ApprovalResponse,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.Core.ApprovalPrompt.#ctor(System.String,System.String,System.Collections.Generic.IEnumerable{System.Collections.Generic.KeyValuePair{System.String,System.String}})
 M:Circuit.Core.ApprovalPrompt.Create(System.String,System.String)~Circuit.Core.ApprovalPrompt
 M:Circuit.Core.ApprovalResponse.#ctor(System.String,System.Boolean,System.String)
@@ -48,6 +50,7 @@ M:Circuit.Core.ICircuitRuntime.RunAsync(Circuit.Core.AgentDefinition,Circuit.Cor
 M:Circuit.Core.ICircuitRuntime.RunStreamingAsync(Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Collections.Generic.IAsyncEnumerable{Circuit.Core.RunEvent{``1}}
 M:Circuit.Core.ICircuitRuntime.SerializeSessionAsync(Circuit.Core.AgentDefinition,Circuit.Core.CircuitSession,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Text.Json.JsonElement}
 M:Circuit.Core.IContractValidator`1.Validate(`0)~System.Collections.Generic.IReadOnlyList{Circuit.Core.ValidationIssue}
+M:Circuit.Core.IInteractiveCircuitRuntime.StartAsync(Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.AgentRun{``1}}
 M:Circuit.Core.ISkillResolver.ResolveAsync(Circuit.Core.SkillResolutionContext,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Collections.Generic.IReadOnlyList{Circuit.Core.ResolvedSkill}}
 M:Circuit.Core.ISkillScriptRunner.RunAsync(Circuit.Core.SkillScriptRequest,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.SkillScriptResult}
 M:Circuit.Core.IToolResolver.ResolveAsync(Circuit.Core.ToolResolutionContext,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Collections.Generic.IReadOnlyList{Circuit.Core.ResolvedTool}}
@@ -114,6 +117,8 @@ P:Circuit.Core.AgentDefinition.Name~System.String
 P:Circuit.Core.AgentDefinition.Skills~System.Collections.Generic.IReadOnlyList{Circuit.Core.SkillReference}
 P:Circuit.Core.AgentDefinition.ToolTags~System.Collections.Generic.IReadOnlySet{System.String}
 P:Circuit.Core.AgentDefinition.Version~Circuit.Core.SemanticVersion
+P:Circuit.Core.AgentRun`1.Events~System.Collections.Generic.IAsyncEnumerable{Circuit.Core.RunEvent{`0}}
+P:Circuit.Core.AgentRun`1.RunId~Circuit.Core.RunId
 P:Circuit.Core.ApprovalPrompt.Message~System.String
 P:Circuit.Core.ApprovalPrompt.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
 P:Circuit.Core.ApprovalPrompt.Title~System.String
@@ -264,6 +269,7 @@ P:Circuit.Core.WorkflowValidationIssue.Code~System.String
 P:Circuit.Core.WorkflowValidationIssue.Message~System.String
 P:Circuit.Core.WorkflowValidationIssue.NodeId~System.String
 T:Circuit.Core.AgentDefinition
+T:Circuit.Core.AgentRun`1
 T:Circuit.Core.ApprovalMode
 T:Circuit.Core.ApprovalPrompt
 T:Circuit.Core.ApprovalRequest
@@ -279,6 +285,7 @@ T:Circuit.Core.DelegateSkillResolver
 T:Circuit.Core.DelegateToolResolver
 T:Circuit.Core.ICircuitRuntime
 T:Circuit.Core.IContractValidator`1
+T:Circuit.Core.IInteractiveCircuitRuntime
 T:Circuit.Core.ISkillResolver
 T:Circuit.Core.ISkillScriptRunner
 T:Circuit.Core.IToolResolver

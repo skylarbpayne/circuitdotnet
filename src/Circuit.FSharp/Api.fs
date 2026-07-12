@@ -174,6 +174,10 @@ module Agent =
     let run (runtime: ICircuitRuntime) agent signature input options cancellationToken =
         runtime.RunAsync(agent, signature, input, options, cancellationToken)
 
+    /// Starts an interactive agent run and returns its live event and approval handle.
+    let start (runtime: IInteractiveCircuitRuntime) agent signature input options cancellationToken =
+        runtime.StartAsync(agent, signature, input, options, cancellationToken)
+
 /// Represents a composable F# Circuit computation expression.
 [<Sealed>]
 type CircuitProgram<'T> internal (program: CircuitPrograms.ProgramExpr<'T>) =

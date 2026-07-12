@@ -81,28 +81,6 @@ type ApprovalPrompt(title: string, message: string, metadata: IEnumerable<KeyVal
     static member Create(title: string, message: string) =
         ApprovalPrompt(title, message, Seq.empty)
 
-/// Represents the operator's response to a workflow approval request.
-[<AllowNullLiteral; Sealed>]
-type ApprovalResponse(requestId: string, approved: bool, note: string) =
-    do
-        WorkflowValidation.requireNonBlank "requestId" requestId |> ignore
-
-        if not (isNull note) && String.IsNullOrWhiteSpace note then
-            invalidArg "note" "note cannot be blank when provided."
-
-    /// Gets the approval request identifier being answered.
-    member _.RequestId = requestId
-
-    /// Gets whether the request was approved.
-    member _.Approved = approved
-
-    /// Gets the optional operator note.
-    member _.Note = note
-
-    /// Creates an approval response without a note.
-    static member Create(requestId: string, approved: bool) =
-        ApprovalResponse(requestId, approved, null)
-
 /// Provides the ambient context available to workflow code steps.
 [<Sealed>]
 type WorkflowContext

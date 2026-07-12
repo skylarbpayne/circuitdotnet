@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AgentRunsTests.fs" />
     <Compile Include="ContractsTests.fs" />
     <Compile Include="IdentifiersAndResultsTests.fs" />
     <Compile Include="ProgramsTests.fs" />
