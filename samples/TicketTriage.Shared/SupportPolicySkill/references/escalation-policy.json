@@ -1,0 +1,10 @@
+{
+  "queue": "billing-escalations",
+  "escalateSeverities": ["high", "critical"],
+  "vipAlwaysEscalate": true,
+  "guidance": [
+    "Confirm whether the billing issue is blocking the customer from launching or using the product.",
+    "Include the customer plan and current open incident count in the escalation note.",
+    "Do not include full payment details in summaries or logs."
+  ]
+}

@@ -1,0 +1,12 @@
+- name: Home
+  href: README.md
+- name: Concepts
+  href: docs/concepts/toc.yml
+- name: Getting started
+  href: docs/getting-started/toc.yml
+- name: Guides
+  href: docs/guides/toc.yml
+- name: Reference
+  href: docs/reference/toc.yml
+- name: API reference
+  href: api/index.md

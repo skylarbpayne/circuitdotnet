@@ -122,6 +122,117 @@ module WorkflowDefinitionTests =
         Assert.False(StringComparer.Ordinal.Equals(definitionOne.Fingerprint, definitionTwo.Fingerprint))
 
     [<Fact>]
+    let ``fingerprints handle internal null branch keys deterministically`` () =
+        let known =
+            Workflow.define
+                "workflow.null-branch.known"
+                "1.0.0"
+                (Workflow.code "known" (fun _ value -> Task.FromResult(value + 1)))
+
+        let fallback =
+            Workflow.define
+                "workflow.null-branch.fallback"
+                "1.0.0"
+                (Workflow.code "fallback" (fun _ value -> Task.FromResult(value + 10)))
+
+        let definitionOne =
+            Workflow.define
+                "workflow.null-branch"
+                "1.0.0"
+                (Workflow.chooseCases
+                    "branch.select"
+                    (fun value -> if value > 0 then "known" else null)
+                    [ null, fallback; "known", known ]
+                    None)
+
+        let definitionTwo =
+            Workflow.define
+                "workflow.null-branch"
+                "1.0.0"
+                (Workflow.chooseCases
+                    "branch.select"
+                    (fun value -> if value > 0 then "known" else null)
+                    [ null, fallback; "known", known ]
+                    None)
+
+        Assert.Equal(definitionOne.Fingerprint, definitionTwo.Fingerprint)
+
+    [<Fact>]
+    let ``fingerprints cover agent request parallel and loop node contracts`` () =
+        let agent =
+            AgentDefinition.Create(
+                "agent.workflow",
+                "1.0.0",
+                "Workflow agent",
+                "Handle workflow steps.",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                Seq.empty
+            )
+
+        let signature =
+            Signature<int, int>
+                .Create(
+                    "signature.workflow",
+                    "1.0.0",
+                    "Workflow signature",
+                    "Return an integer.",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let branchOne =
+            Workflow.define
+                "workflow.fingerprint.parallel.one"
+                "1.0.0"
+                (Workflow.code "branch.one" (fun _ value -> Task.FromResult(value + 1)))
+
+        let branchTwo =
+            Workflow.define
+                "workflow.fingerprint.parallel.two"
+                "1.0.0"
+                (Workflow.code "branch.two" (fun _ value -> Task.FromResult(value * 2)))
+
+        let loopBody =
+            Workflow.define
+                "workflow.fingerprint.loop.body"
+                "1.0.0"
+                (Workflow.code "body" (fun _ value -> Task.FromResult(value + 1)))
+
+        let agentDefinition =
+            Workflow.define "workflow.fingerprint.agent" "1.0.0" (Workflow.agent "agent" agent signature)
+
+        let requestDefinition =
+            Workflow.define
+                "workflow.fingerprint.request"
+                "1.0.0"
+                (Workflow.request "approve" (fun value -> ApprovalPrompt.Create($"Approve {value}", "Continue")))
+
+        let parallelDefinition =
+            Workflow.define
+                "workflow.fingerprint.parallel"
+                "1.0.0"
+                (Workflow.``parallel`` "parallel" 2 [ branchOne; branchTwo ] (fun values ->
+                    Task.FromResult(List.sum values)))
+
+        let loopDefinition =
+            Workflow.define
+                "workflow.fingerprint.loop"
+                "1.0.0"
+                (Workflow.loop "loop" 3 (fun (value: int) -> value < 5) loopBody)
+
+        let fingerprints =
+            [ agentDefinition.Fingerprint
+              requestDefinition.Fingerprint
+              parallelDefinition.Fingerprint
+              loopDefinition.Fingerprint ]
+
+        Assert.All(fingerprints, fun fingerprint -> Assert.False(String.IsNullOrWhiteSpace fingerprint))
+        Assert.Equal(4, fingerprints |> Set.ofList |> Set.count)
+
+    [<Fact>]
     let ``validate reports duplicate branch keys from internal choice construction`` () =
         let low =
             Workflow.define

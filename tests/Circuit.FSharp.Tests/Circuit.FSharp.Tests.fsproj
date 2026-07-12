@@ -6,12 +6,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="DocumentationExamples/*.fs" />
     <Compile Include="ApiTests.fs" />
+    <Compile Include="TestingRuntimeTests.fs" />
     <Compile Include="CircuitProgramsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Circuit.FSharp/Circuit.FSharp.fsproj" />
+    <ProjectReference Include="../../src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
     <ProjectReference Include="../../src/Circuit.Testing/Circuit.Testing.fsproj" />
   </ItemGroup>
 </Project>

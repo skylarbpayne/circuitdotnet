@@ -45,6 +45,9 @@ module internal MafErrors =
     let toolFailure runId message innerException =
         createFailure CircuitFailureCode.Tool runId ValueNone message ValueNone innerException
 
+    let toolResolutionFailure runId innerException =
+        createFailure CircuitFailureCode.Tool runId ValueNone "Tool resolution failed." ValueNone innerException
+
     let skillFailure runId message innerException =
         createFailure CircuitFailureCode.Skill runId ValueNone message ValueNone innerException
 

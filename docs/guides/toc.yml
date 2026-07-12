@@ -1,0 +1,16 @@
+- name: Structured output
+  href: structured-output.md
+- name: Dynamic tools and approval
+  href: dynamic-tools-and-approval.md
+- name: Skills and script security
+  href: skills-and-script-security.md
+- name: Lightweight programs
+  href: lightweight-programs.md
+- name: Workflows, checkpoints, and HITL
+  href: workflows-checkpoints-and-hitl.md
+- name: Sessions
+  href: sessions.md
+- name: Observability and redaction
+  href: observability-and-redaction.md
+- name: Testing
+  href: testing.md

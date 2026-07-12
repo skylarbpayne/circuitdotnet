@@ -1,11 +1,12 @@
-#pragma warning disable CS1591
-
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using Microsoft.FSharp.Core;
 
 namespace Circuit;
 
+/// <summary>
+/// Represents the agent failure.
+/// </summary>
 public sealed class AgentFailure
 {
     private AgentFailure(
@@ -24,16 +25,34 @@ public sealed class AgentFailure
         Exception = exception;
     }
 
+    /// <summary>
+    /// Gets the code.
+    /// </summary>
     public AgentFailureCode Code { get; }
 
+    /// <summary>
+    /// Gets the message.
+    /// </summary>
     public string Message { get; }
 
+    /// <summary>
+    /// Gets the run id.
+    /// </summary>
     public string? RunId { get; }
 
+    /// <summary>
+    /// Gets the operation id.
+    /// </summary>
     public string? OperationId { get; }
 
+    /// <summary>
+    /// Gets the request id.
+    /// </summary>
     public string? RequestId { get; }
 
+    /// <summary>
+    /// Gets the exception.
+    /// </summary>
     public Exception? Exception { get; }
 
     internal static AgentFailure FromCore(Circuit.Core.CircuitFailure failure)
@@ -47,6 +66,9 @@ public sealed class AgentFailure
         );
 }
 
+/// <summary>
+/// Represents the operation result.
+/// </summary>
 public sealed class OperationResult<T>
 {
     private OperationResult(T? value, AgentFailure? failure, bool isSuccess)
@@ -69,20 +91,38 @@ public sealed class OperationResult<T>
         Failure = isSuccess ? null : failure;
     }
 
+    /// <summary>
+    /// Gets the is success.
+    /// </summary>
     public bool IsSuccess { get; }
 
+    /// <summary>
+    /// Gets the value.
+    /// </summary>
     public T? Value { get; }
 
+    /// <summary>
+    /// Gets the failure.
+    /// </summary>
     public AgentFailure? Failure { get; }
 
+    /// <summary>
+    /// Executes success.
+    /// </summary>
     public static OperationResult<T> Success(T value) => new(value, null, true);
 
+    /// <summary>
+    /// Executes error.
+    /// </summary>
     public static OperationResult<T> Error(AgentFailure failure) => new(default, failure, false);
 
     internal static OperationResult<T> FromCore(Circuit.Core.CircuitResult<T> result)
         => result.IsSuccess ? Success(result.Value) : Error(AgentFailure.FromCore(result.Failure));
 }
 
+/// <summary>
+/// Represents the run usage.
+/// </summary>
 public sealed class RunUsage
 {
     private RunUsage(int inputTokens, int outputTokens)
@@ -92,15 +132,27 @@ public sealed class RunUsage
         TotalTokens = inputTokens + outputTokens;
     }
 
+    /// <summary>
+    /// Gets the input tokens.
+    /// </summary>
     public int InputTokens { get; }
 
+    /// <summary>
+    /// Gets the output tokens.
+    /// </summary>
     public int OutputTokens { get; }
 
+    /// <summary>
+    /// Gets the total tokens.
+    /// </summary>
     public int TotalTokens { get; }
 
     internal static RunUsage FromCore(Circuit.Core.RunUsage usage) => new(usage.InputTokens, usage.OutputTokens);
 }
 
+/// <summary>
+/// Represents the circuit session.
+/// </summary>
 public sealed class CircuitSession
 {
     private CircuitSession(Circuit.Core.CircuitSession inner)
@@ -112,8 +164,14 @@ public sealed class CircuitSession
 
     internal Circuit.Core.CircuitSession Inner { get; }
 
+    /// <summary>
+    /// Gets the id.
+    /// </summary>
     public string Id { get; }
 
+    /// <summary>
+    /// Gets the metadata.
+    /// </summary>
     public IReadOnlyDictionary<string, string> Metadata { get; }
 
     internal static CircuitSession FromCore(Circuit.Core.CircuitSession session) => new(session);
@@ -122,20 +180,44 @@ public sealed class CircuitSession
         => new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(source, StringComparer.Ordinal));
 }
 
+/// <summary>
+/// Represents the agent run options.
+/// </summary>
 public sealed class AgentRunOptions
 {
+    /// <summary>
+    /// Gets or sets the session.
+    /// </summary>
     public CircuitSession? Session { get; set; }
 
+    /// <summary>
+    /// Gets or sets the tenant id.
+    /// </summary>
     public string? TenantId { get; set; }
 
+    /// <summary>
+    /// Gets or sets the user id.
+    /// </summary>
     public string? UserId { get; set; }
 
+    /// <summary>
+    /// Gets or sets the tags.
+    /// </summary>
     public IReadOnlyDictionary<string, string> Tags { get; set; } = EmptyStringDictionary;
 
+    /// <summary>
+    /// Gets or sets the structured output policy.
+    /// </summary>
     public StructuredOutputPolicy StructuredOutputPolicy { get; set; } = StructuredOutputPolicy.NativeOnly;
 
+    /// <summary>
+    /// Gets or sets the sensitive data mode.
+    /// </summary>
     public SensitiveDataMode SensitiveDataMode { get; set; } = SensitiveDataMode.Standard;
 
+    /// <summary>
+    /// Gets or sets the services.
+    /// </summary>
     public IServiceProvider? Services { get; set; }
 
     internal Circuit.Core.RunOptions ToCore()
@@ -174,12 +256,21 @@ public sealed class AgentRunOptions
     {
         public static EmptyServiceProvider Instance { get; } = new();
 
+        /// <summary>
+        /// Executes get service.
+        /// </summary>
         public object? GetService(Type serviceType) => null;
     }
 }
 
+/// <summary>
+/// Represents the workflow run options.
+/// </summary>
 public sealed class WorkflowRunOptions
 {
+    /// <summary>
+    /// Gets or sets the session id.
+    /// </summary>
     public string? SessionId { get; set; }
 
     internal Circuit.Core.WorkflowRunOptions ToCore()
@@ -189,6 +280,9 @@ public sealed class WorkflowRunOptions
         => new() { SessionId = options.SessionId.IsSome ? options.SessionId.Value : null };
 }
 
+/// <summary>
+/// Represents the approval request.
+/// </summary>
 public sealed class ApprovalRequest
 {
     private ApprovalRequest(string requestId, string toolName, string? argumentsJson)
@@ -198,23 +292,41 @@ public sealed class ApprovalRequest
         ArgumentsJson = argumentsJson;
     }
 
+    /// <summary>
+    /// Gets the request id.
+    /// </summary>
     public string RequestId { get; }
 
+    /// <summary>
+    /// Gets the tool name.
+    /// </summary>
     public string ToolName { get; }
 
+    /// <summary>
+    /// Gets the arguments json.
+    /// </summary>
     public string? ArgumentsJson { get; }
 
     internal static ApprovalRequest FromCore(Circuit.Core.ApprovalRequest request)
         => new(request.RequestId, request.ToolName, request.ArgumentsJson.IsSome ? request.ArgumentsJson.Value : null);
 }
 
+/// <summary>
+/// Represents the approval prompt.
+/// </summary>
 public sealed class ApprovalPrompt
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ApprovalPrompt"/> class.
+    /// </summary>
     public ApprovalPrompt(string title, string message)
         : this(title, message, null)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ApprovalPrompt"/> class.
+    /// </summary>
     public ApprovalPrompt(string title, string message, IReadOnlyDictionary<string, string>? metadata)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(title);
@@ -226,10 +338,19 @@ public sealed class ApprovalPrompt
             : new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(metadata, StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// Gets the title.
+    /// </summary>
     public string Title { get; }
 
+    /// <summary>
+    /// Gets the message.
+    /// </summary>
     public string Message { get; }
 
+    /// <summary>
+    /// Gets the metadata.
+    /// </summary>
     public IReadOnlyDictionary<string, string> Metadata { get; }
 
     internal Circuit.Core.ApprovalPrompt ToCore()
@@ -245,13 +366,22 @@ public sealed class ApprovalPrompt
         => new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(source, StringComparer.Ordinal));
 }
 
+/// <summary>
+/// Represents the approval response.
+/// </summary>
 public sealed class ApprovalResponse
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ApprovalResponse"/> class.
+    /// </summary>
     public ApprovalResponse(string requestId, bool approved)
         : this(requestId, approved, null)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ApprovalResponse"/> class.
+    /// </summary>
     public ApprovalResponse(string requestId, bool approved, string? note)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
@@ -265,10 +395,19 @@ public sealed class ApprovalResponse
         Note = note;
     }
 
+    /// <summary>
+    /// Gets the request id.
+    /// </summary>
     public string RequestId { get; }
 
+    /// <summary>
+    /// Gets the approved.
+    /// </summary>
     public bool Approved { get; }
 
+    /// <summary>
+    /// Gets the note.
+    /// </summary>
     public string? Note { get; }
 
     internal Circuit.Core.ApprovalResponse ToCore() => new(RequestId, Approved, Note);
@@ -277,6 +416,9 @@ public sealed class ApprovalResponse
         => new(response.RequestId, response.Approved, response.Note);
 }
 
+/// <summary>
+/// Represents the agent run event.
+/// </summary>
 public sealed class AgentRunEvent<T>
 {
     private AgentRunEvent(
@@ -301,22 +443,49 @@ public sealed class AgentRunEvent<T>
         Approval = approval;
     }
 
+    /// <summary>
+    /// Gets the sequence.
+    /// </summary>
     public long Sequence { get; }
 
+    /// <summary>
+    /// Gets the run id.
+    /// </summary>
     public string RunId { get; }
 
+    /// <summary>
+    /// Gets the timestamp.
+    /// </summary>
     public DateTimeOffset Timestamp { get; }
 
+    /// <summary>
+    /// Gets the kind.
+    /// </summary>
     public AgentRunEventKind Kind { get; }
 
+    /// <summary>
+    /// Gets the operation id.
+    /// </summary>
     public string? OperationId { get; }
 
+    /// <summary>
+    /// Gets the text delta.
+    /// </summary>
     public string? TextDelta { get; }
 
+    /// <summary>
+    /// Gets the value.
+    /// </summary>
     public T? Value { get; }
 
+    /// <summary>
+    /// Gets the failure.
+    /// </summary>
     public AgentFailure? Failure { get; }
 
+    /// <summary>
+    /// Gets the approval.
+    /// </summary>
     public ApprovalRequest? Approval { get; }
 
     internal static AgentRunEvent<T> FromCore(Circuit.Core.RunEvent<T> @event)
@@ -333,6 +502,9 @@ public sealed class AgentRunEvent<T>
         );
 }
 
+/// <summary>
+/// Represents the agent run result.
+/// </summary>
 public sealed class AgentRunResult<T>
 {
     private AgentRunResult(
@@ -351,16 +523,34 @@ public sealed class AgentRunResult<T>
         CompletedAt = completedAt;
     }
 
+    /// <summary>
+    /// Gets the run id.
+    /// </summary>
     public string RunId { get; }
 
+    /// <summary>
+    /// Gets the result.
+    /// </summary>
     public OperationResult<T> Result { get; }
 
+    /// <summary>
+    /// Gets the usage.
+    /// </summary>
     public RunUsage Usage { get; }
 
+    /// <summary>
+    /// Gets the session.
+    /// </summary>
     public CircuitSession? Session { get; }
 
+    /// <summary>
+    /// Gets the started at.
+    /// </summary>
     public DateTimeOffset StartedAt { get; }
 
+    /// <summary>
+    /// Gets the completed at.
+    /// </summary>
     public DateTimeOffset CompletedAt { get; }
 
     internal static AgentRunResult<T> FromCore(Circuit.Core.RunResult<T> result)
@@ -374,6 +564,9 @@ public sealed class AgentRunResult<T>
         );
 }
 
+/// <summary>
+/// Represents the workflow checkpoint.
+/// </summary>
 public sealed class WorkflowCheckpoint<T>
 {
     private WorkflowCheckpoint(Circuit.Core.WorkflowCheckpoint<T> inner)
@@ -386,12 +579,24 @@ public sealed class WorkflowCheckpoint<T>
 
     internal Circuit.Core.WorkflowCheckpoint<T> Inner { get; }
 
+    /// <summary>
+    /// Gets the definition id.
+    /// </summary>
     public string DefinitionId { get; }
 
+    /// <summary>
+    /// Gets the definition version.
+    /// </summary>
     public string DefinitionVersion { get; }
 
+    /// <summary>
+    /// Gets the created at.
+    /// </summary>
     public DateTimeOffset CreatedAt { get; }
 
+    /// <summary>
+    /// Serializes serialize.
+    /// </summary>
     public JsonElement Serialize() => Inner.Serialize();
 
     internal static WorkflowCheckpoint<T> FromCore(Circuit.Core.WorkflowCheckpoint<T> checkpoint) => new(checkpoint);
@@ -400,6 +605,9 @@ public sealed class WorkflowCheckpoint<T>
         => new(Circuit.Core.WorkflowCheckpoint<T>.Deserialize(state));
 }
 
+/// <summary>
+/// Represents the workflow context.
+/// </summary>
 public sealed class WorkflowContext
 {
     internal WorkflowContext(Circuit.Core.WorkflowContext inner)
@@ -409,17 +617,35 @@ public sealed class WorkflowContext
 
     internal Circuit.Core.WorkflowContext Inner { get; }
 
+    /// <summary>
+    /// Gets the run id.
+    /// </summary>
     public string RunId => Inner.RunId.Value;
 
+    /// <summary>
+    /// Gets the definition id.
+    /// </summary>
     public string DefinitionId => Inner.DefinitionId.Value;
 
+    /// <summary>
+    /// Gets the definition version.
+    /// </summary>
     public string DefinitionVersion => Inner.DefinitionVersion.ToString();
 
+    /// <summary>
+    /// Gets the step id.
+    /// </summary>
     public string StepId => Inner.StepId;
 
+    /// <summary>
+    /// Gets the cancellation token.
+    /// </summary>
     public CancellationToken CancellationToken => Inner.CancellationToken;
 }
 
+/// <summary>
+/// Represents the workflow run.
+/// </summary>
 public sealed class WorkflowRun<T> : IAsyncDisposable
 {
     private readonly Circuit.Core.WorkflowRun<T> _inner;
@@ -431,19 +657,34 @@ public sealed class WorkflowRun<T> : IAsyncDisposable
         Events = Stream(inner.Events);
     }
 
+    /// <summary>
+    /// Gets the run id.
+    /// </summary>
     public string RunId { get; }
 
+    /// <summary>
+    /// Gets the events.
+    /// </summary>
     public IAsyncEnumerable<AgentRunEvent<T>> Events { get; }
 
+    /// <summary>
+    /// Executes respond async.
+    /// </summary>
     public ValueTask RespondAsync(ApprovalResponse response, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(response);
         return _inner.RespondAsync(response.ToCore(), cancellationToken);
     }
 
+    /// <summary>
+    /// Creates checkpoint async.
+    /// </summary>
     public async Task<WorkflowCheckpoint<T>> CreateCheckpointAsync(CancellationToken cancellationToken = default)
         => WorkflowCheckpoint<T>.FromCore(await _inner.CreateCheckpointAsync(cancellationToken).ConfigureAwait(false));
 
+    /// <summary>
+    /// Executes dispose async.
+    /// </summary>
     public ValueTask DisposeAsync() => ((IAsyncDisposable)_inner).DisposeAsync();
 
     private static async IAsyncEnumerable<AgentRunEvent<T>> Stream(

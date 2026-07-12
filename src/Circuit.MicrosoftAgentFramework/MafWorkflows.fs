@@ -143,34 +143,58 @@ module internal ParallelAggregateState =
 type internal LoopState() =
     member val Iteration = 0 with get, set
 
+[<RequireQualifiedAccess>]
+module internal LoopState =
+    let advance maxIterations (predicate: WorkflowGraph.ILoopConditionHandler) input (state: LoopState) =
+        let shouldContinue = state.Iteration < maxIterations && predicate.Invoke(box input)
+
+        if shouldContinue then
+            state.Iteration <- state.Iteration + 1
+
+        shouldContinue
+
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveEnvelope<'Input, 'BranchOutput>() =
+type internal ParallelWaveEnvelope<'Input, 'BranchOutput>() =
     member val Input = Unchecked.defaultof<'Input> with get, set
     member val Completed = Array.empty<WorkflowGraph.ParallelBranchResult<'BranchOutput>> with get, set
 
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveItem<'Input, 'BranchOutput>() =
+type internal ParallelWaveItem<'Input, 'BranchOutput>() =
     member val IsSeed = false with get, set
     member val Envelope = Unchecked.defaultof<ParallelWaveEnvelope<'Input, 'BranchOutput>> with get, set
     member val BranchIndex = -1 with get, set
     member val BranchValue = Unchecked.defaultof<'BranchOutput> with get, set
 
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveDispatch<'Input, 'BranchOutput>() =
+type internal ParallelWaveDispatch<'Input, 'BranchOutput>() =
     member val IsReady = false with get, set
     member val Envelope = Unchecked.defaultof<ParallelWaveEnvelope<'Input, 'BranchOutput>> with get, set
 
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveBranchDispatch<'Input>() =
+type internal ParallelWaveBranchDispatch<'Input>() =
     member val IsActive = false with get, set
     member val Input = Unchecked.defaultof<'Input> with get, set
 
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveBranchStartState() =
+type internal ParallelWaveBranchStartState() =
     member val Started = false with get, set
 
+[<RequireQualifiedAccess>]
+module internal ParallelWaveBranchStartState =
+    let dispatch (envelope: ParallelWaveEnvelope<'Input, 'BranchOutput>) (state: ParallelWaveBranchStartState) =
+        let dispatch = ParallelWaveBranchDispatch<'Input>()
+
+        if state.Started then
+            dispatch.IsActive <- false
+        else
+            state.Started <- true
+            dispatch.IsActive <- true
+            dispatch.Input <- envelope.Input
+
+        dispatch
+
 [<AllowNullLiteral; Sealed>]
-type private ParallelWaveCollectorState<'Input, 'BranchOutput>() =
+type internal ParallelWaveCollectorState<'Input, 'BranchOutput>() =
     member val HasSeed = false with get, set
     member val Seed = Unchecked.defaultof<ParallelWaveEnvelope<'Input, 'BranchOutput>> with get, set
     member val Received = Array.empty<bool> with get, set
@@ -181,7 +205,7 @@ type private ParallelWaveCollectorState<'Input, 'BranchOutput>() =
     [<JsonIgnore>]
     member val SyncRoot = obj () with get
 
-type private ParallelWaveCapture<'Input, 'BranchOutput> =
+type internal ParallelWaveCapture<'Input, 'BranchOutput> =
     | Pending
     | Ready of ParallelWaveEnvelope<'Input, 'BranchOutput>
     | DuplicateSeed
@@ -190,7 +214,7 @@ type private ParallelWaveCapture<'Input, 'BranchOutput> =
     | AlreadyCompleted
 
 [<RequireQualifiedAccess>]
-module private ParallelWaveCollectorState =
+module internal ParallelWaveCollectorState =
     let create<'Input, 'BranchOutput> branchCount =
         let state = ParallelWaveCollectorState<'Input, 'BranchOutput>()
         state.Received <- Array.zeroCreate branchCount
@@ -453,11 +477,31 @@ module private FailureFactory =
     let create code runId operationId requestId message innerException =
         CircuitFailure(code, message, ValueSome runId, operationId, requestId, innerException)
 
+    let diagnosticMetadata (failure: CircuitFailure) =
+        let entries = Dictionary<string, string>(StringComparer.Ordinal)
+        entries["circuit.failure.code"] <- string failure.Code
+        entries["circuit.operation.kind"] <- string Circuit.RunOperationKind.Run
+
+        match failure.Exception with
+        | ValueSome diagnosticException -> entries["error.type"] <- diagnosticException.GetType().Name
+        | ValueNone -> ()
+
+        entries :> IReadOnlyDictionary<string, string>
+
     let cancelled runId operationId ex =
         create CircuitFailureCode.Cancelled runId operationId ValueNone "The workflow run was cancelled." (ValueSome ex)
 
     let workflow runId operationId message ex =
         create CircuitFailureCode.Workflow runId operationId ValueNone message ex
+
+    let workflowStart runId innerException =
+        create CircuitFailureCode.Workflow runId ValueNone ValueNone "The workflow failed to start." innerException
+
+    let workflowResume runId innerException =
+        create CircuitFailureCode.Workflow runId ValueNone ValueNone "The workflow failed to resume." innerException
+
+    let checkpointMismatch runId message innerException =
+        create CircuitFailureCode.CheckpointMismatch runId ValueNone ValueNone message innerException
 
     let approvalRequired runId requestId =
         create
@@ -467,6 +511,45 @@ module private FailureFactory =
             (ValueSome requestId)
             "The workflow requires approval before it can continue."
             ValueNone
+
+module internal WorkflowBindingInternals =
+    let rethrowStepFailure runtimeRunId nodeId message (ex: exn) =
+        match ex with
+        | :? WorkflowStepFailureException as workflowFailure -> raise workflowFailure
+        | ex ->
+            raise (
+                WorkflowStepFailureException(
+                    FailureFactory.workflow runtimeRunId (ValueSome nodeId) message (ValueSome ex)
+                )
+            )
+
+    let rethrowStepFailureOrCancellation runtimeRunId nodeId message (cancellationToken: CancellationToken) (ex: exn) =
+        match ex with
+        | :? WorkflowStepFailureException as workflowFailure -> raise workflowFailure
+        | :? OperationCanceledException as cancelled when cancellationToken.IsCancellationRequested ->
+            raise (WorkflowStepFailureException(FailureFactory.cancelled runtimeRunId (ValueSome nodeId) cancelled))
+        | ex ->
+            raise (
+                WorkflowStepFailureException(
+                    FailureFactory.workflow runtimeRunId (ValueSome nodeId) message (ValueSome ex)
+                )
+            )
+
+    let validateCompletedEnvelope branchCount (envelope: ParallelWaveEnvelope<'Input, 'BranchOutput>) =
+        let completed =
+            if isNull (box envelope.Completed) then
+                Array.empty
+            else
+                envelope.Completed
+
+        if completed.Length <> branchCount then
+            invalidOp "The workflow parallel wave state is malformed."
+
+        for branchIndex in 0 .. branchCount - 1 do
+            if completed[branchIndex].BranchIndex <> branchIndex then
+                invalidOp "The workflow parallel wave state is malformed."
+
+        completed
 
 type private BindingFactory =
     static member Code<'Input, 'Output>
@@ -494,26 +577,14 @@ type private BindingFactory =
 
                                 let! output = handler.InvokeAsync(context, box input, cancellationToken)
                                 return unbox<'Output> output
-                            with
-                            | :? WorkflowStepFailureException as ex -> return raise ex
-                            | :? OperationCanceledException as ex when cancellationToken.IsCancellationRequested ->
+                            with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.cancelled runtimeRunId (ValueSome nodeId) ex
-                                        )
-                                    )
-                            | ex ->
-                                return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow step '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailureOrCancellation
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow step '{nodeId}' failed."
+                                        cancellationToken
+                                        ex
                         }
                     ))
 
@@ -565,15 +636,11 @@ type private BindingFactory =
                                     : WorkflowGraph.BranchSelection<'Input>)
                             with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow choice step '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow choice step '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -722,19 +789,13 @@ type private BindingFactory =
                                                     ValueNone
                                             )
                                         )
-                            with
-                            | :? WorkflowStepFailureException as ex -> return raise ex
-                            | ex ->
+                            with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow parallel step '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow parallel step '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -774,15 +835,11 @@ type private BindingFactory =
                                 return handler.Invoke(box input)
                             with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow request step '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow request step '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -817,10 +874,9 @@ type private BindingFactory =
                                         cancellationToken
                                     )
 
-                                let shouldContinue = state.Iteration < maxIterations && predicate.Invoke(box input)
+                                let shouldContinue = LoopState.advance maxIterations predicate input state
 
                                 if shouldContinue then
-                                    state.Iteration <- state.Iteration + 1
                                     do! workflowContext.QueueStateUpdateAsync("state", state, scope, cancellationToken)
                                 else
                                     do! workflowContext.QueueClearScopeAsync(scope, cancellationToken)
@@ -831,15 +887,11 @@ type private BindingFactory =
                                     : WorkflowGraph.LoopDecision<'Input>)
                             with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow loop step '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow loop step '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -899,30 +951,19 @@ type private BindingFactory =
                                         cancellationToken
                                     )
 
-                                let dispatch = ParallelWaveBranchDispatch<'Input>()
+                                let dispatch = ParallelWaveBranchStartState.dispatch envelope state
 
-                                if state.Started then
-                                    dispatch.IsActive <- false
-                                else
-                                    state.Started <- true
+                                if dispatch.IsActive then
                                     do! workflowContext.QueueStateUpdateAsync("start", state, scope, cancellationToken)
-                                    dispatch.IsActive <- true
-                                    dispatch.Input <- envelope.Input
 
                                 return dispatch
-                            with
-                            | :? WorkflowStepFailureException as ex -> return raise ex
-                            | ex ->
+                            with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow parallel wave branch '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow parallel wave branch '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -1088,19 +1129,13 @@ type private BindingFactory =
                                                     ValueNone
                                             )
                                         )
-                            with
-                            | :? WorkflowStepFailureException as ex -> return raise ex
-                            | ex ->
+                            with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow parallel wave '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow parallel wave '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -1194,17 +1229,7 @@ type private BindingFactory =
                                     do! workflowContext.QueueClearScopeAsync(scope, cancellationToken)
 
                                     let completed =
-                                        if isNull (box envelope.Completed) then
-                                            Array.empty
-                                        else
-                                            envelope.Completed
-
-                                    if completed.Length <> branchCount then
-                                        invalidOp "The workflow parallel wave state is malformed."
-
-                                    for branchIndex in 0 .. branchCount - 1 do
-                                        if completed[branchIndex].BranchIndex <> branchIndex then
-                                            invalidOp "The workflow parallel wave state is malformed."
+                                        WorkflowBindingInternals.validateCompletedEnvelope branchCount envelope
 
                                     let! output =
                                         handler.InvokeAsync(
@@ -1260,19 +1285,13 @@ type private BindingFactory =
                                                     ValueNone
                                             )
                                         )
-                            with
-                            | :? WorkflowStepFailureException as ex -> return raise ex
-                            | ex ->
+                            with ex ->
                                 return
-                                    raise (
-                                        WorkflowStepFailureException(
-                                            FailureFactory.workflow
-                                                runtimeRunId
-                                                (ValueSome nodeId)
-                                                $"Workflow parallel wave '{nodeId}' failed."
-                                                (ValueSome ex)
-                                        )
-                                    )
+                                    WorkflowBindingInternals.rethrowStepFailure
+                                        runtimeRunId
+                                        nodeId
+                                        $"Workflow parallel wave '{nodeId}' failed."
+                                        ex
                         }
                     ))
 
@@ -1473,23 +1492,15 @@ let private buildBinding
     | WorkflowGraph.ParallelBranchAdapter _ -> invokeBinding identityMethod [| node.InputType |] [| box node.Id |]
     | WorkflowGraph.ParallelCollector(_, branchIndex, _) ->
         invokeBinding parallelCollectorMethod [| node.InputType |] [| box node.Id; box branchIndex |]
-    | WorkflowGraph.ParallelAggregate(_, _, _, handler) ->
+    | WorkflowGraph.ParallelAggregate(parallelId, branchCount, _, handler) ->
         invokeBinding
             parallelAggregateMethod
             [| node.InputType.GenericTypeArguments[0]
                node.OutputType.GenericTypeArguments[0] |]
             [| box runtimeRunId
                box node.Id
-               box (
-                   match node.Kind with
-                   | WorkflowGraph.ParallelAggregate(parallelId, _, _, _) -> parallelId
-                   | _ -> invalidOp "unreachable"
-               )
-               box (
-                   match node.Kind with
-                   | WorkflowGraph.ParallelAggregate(_, branchCount, _, _) -> branchCount
-                   | _ -> invalidOp "unreachable"
-               )
+               box parallelId
+               box branchCount
                box handler |]
     | WorkflowGraph.RequestPrompt handler ->
         invokeBinding
@@ -1545,7 +1556,9 @@ let private buildParallelPlans
             let aggregateHandler =
                 match aggregateNode.Kind with
                 | WorkflowGraph.ParallelAggregate(_, _, _, handler) -> handler
-                | _ -> invalidOp "unreachable"
+                | _ ->
+                    invalidOp
+                        $"Parallel step '{parallelId}' aggregate node '{aggregateNode.Id}' has an unexpected shape."
 
             let aggregatePendingNodeId, aggregateCompleteNodeId =
                 match outgoing.TryGetValue aggregateNode.Id with
@@ -1955,8 +1968,77 @@ type internal CompiledMafWorkflow<'Input, 'Output>
                     )
         }
 
+    let createAcceptedFailureRun (runtimeRunId: RunId) (startedAt: DateTimeOffset) (failure: CircuitFailure) =
+        let completedAt = DateTimeOffset.UtcNow
+
+        let events =
+            [| RunEvent(
+                   0L,
+                   runtimeRunId,
+                   startedAt,
+                   RunEventKind.RunStarted,
+                   ValueNone,
+                   ValueNone,
+                   ValueNone,
+                   ValueNone,
+                   ValueNone
+               )
+               RunEvent(
+                   1L,
+                   runtimeRunId,
+                   completedAt,
+                   RunEventKind.RunFailed,
+                   ValueNone,
+                   ValueNone,
+                   ValueNone,
+                   ValueSome failure,
+                   ValueNone
+               ) |]
+
+        let eventStream =
+            { new IAsyncEnumerable<RunEvent<'Output>> with
+                member _.GetAsyncEnumerator(cancellationToken: CancellationToken) =
+                    let mutable index = -1
+                    let mutable current = Unchecked.defaultof<RunEvent<'Output>>
+
+                    { new IAsyncEnumerator<RunEvent<'Output>> with
+                        member _.Current = current
+
+                        member _.MoveNextAsync() =
+                            if cancellationToken.IsCancellationRequested then
+                                ValueTask<bool>(Task.FromCanceled<bool>(cancellationToken))
+                            else
+                                index <- index + 1
+
+                                if index < events.Length then
+                                    current <- events[index]
+                                    ValueTask<bool>(true)
+                                else
+                                    ValueTask<bool>(false)
+
+                        member _.DisposeAsync() = ValueTask() } }
+
+        let unavailable message = InvalidOperationException(message)
+
+        WorkflowRun<'Output>(
+            runtimeRunId,
+            eventStream,
+            (fun _ ->
+                ValueTask(Task.FromException(unavailable "The workflow is not waiting for an approval response."))),
+            (fun _ ->
+                ValueTask<WorkflowCheckpoint<'Output>>(
+                    Task.FromException<WorkflowCheckpoint<'Output>>(
+                        unavailable
+                            "A workflow checkpoint is not available because the run failed before execution started."
+                    )
+                )),
+            (fun () -> ValueTask())
+        )
+
     let createRunWrapper
         (runtimeRunId: RunId)
+        (observerSession: MafObserver.ObserverSession voption)
+        (startedAt: DateTimeOffset)
         (store: MafJsonCheckpointStore)
         (streamingRun: StreamingRun)
         (runCancellationToken: CancellationToken)
@@ -2001,11 +2083,13 @@ type internal CompiledMafWorkflow<'Input, 'Output>
 
                                         sequence <- sequence + 1L
 
+                                        let timestamp = DateTimeOffset.UtcNow
+
                                         let event =
                                             RunEvent(
                                                 sequence,
                                                 runtimeRunId,
-                                                DateTimeOffset.UtcNow,
+                                                timestamp,
                                                 kind,
                                                 operationId,
                                                 textDelta,
@@ -2013,6 +2097,84 @@ type internal CompiledMafWorkflow<'Input, 'Output>
                                                 failure,
                                                 approval
                                             )
+
+                                        do!
+                                            match observerSession with
+                                            | ValueSome _ ->
+                                                match kind, operationId, approval with
+                                                | RunEventKind.StepStarted, ValueSome stepId, _ ->
+                                                    MafObserver.notifyWorkflowStepStartedAsync
+                                                        observerSession
+                                                        stepId
+                                                        watcherToken
+                                                | RunEventKind.StepCompleted, ValueSome stepId, _ ->
+                                                    MafObserver.notifyWorkflowStepCompletedAsync
+                                                        observerSession
+                                                        stepId
+                                                        ValueNone
+                                                        watcherToken
+                                                | RunEventKind.ApprovalRequested,
+                                                  ValueSome approvalId,
+                                                  ValueSome approvalValue ->
+                                                    MafObserver.notifyApprovalRequestedAsync
+                                                        observerSession
+                                                        approvalId
+                                                        approvalValue.ToolName
+                                                        approvalValue
+                                                        watcherToken
+                                                | RunEventKind.RunCompleted, _, _ ->
+                                                    MafObserver.notifyWorkflowRootEventAsync
+                                                        observerSession
+                                                        kind
+                                                        (match value with
+                                                         | ValueSome output ->
+                                                             try
+                                                                 ValueSome(
+                                                                     JsonSerializer.Serialize(
+                                                                         output,
+                                                                         runtime.RuntimeOptions.JsonSerializerOptions
+                                                                     )
+                                                                 )
+                                                             with _ ->
+                                                                 ValueNone
+                                                         | ValueNone -> ValueNone)
+                                                        failure
+                                                        (ValueSome startedAt)
+                                                        (ValueSome timestamp)
+                                                        MafErrors.emptyDiagnosticMetadata
+                                                        watcherToken
+                                                | RunEventKind.RunFailed, ValueSome stepId, _ when failure.IsSome ->
+                                                    task {
+                                                        do!
+                                                            MafObserver.notifyWorkflowStepCompletedAsync
+                                                                observerSession
+                                                                stepId
+                                                                failure
+                                                                watcherToken
+
+                                                        do!
+                                                            MafObserver.notifyWorkflowRootEventAsync
+                                                                observerSession
+                                                                kind
+                                                                ValueNone
+                                                                failure
+                                                                (ValueSome startedAt)
+                                                                (ValueSome timestamp)
+                                                                MafErrors.emptyDiagnosticMetadata
+                                                                watcherToken
+                                                    }
+                                                | RunEventKind.RunFailed, _, _ ->
+                                                    MafObserver.notifyWorkflowRootEventAsync
+                                                        observerSession
+                                                        kind
+                                                        ValueNone
+                                                        failure
+                                                        (ValueSome startedAt)
+                                                        (ValueSome timestamp)
+                                                        MafErrors.emptyDiagnosticMetadata
+                                                        watcherToken
+                                                | _ -> task { return () }
+                                            | ValueNone -> task { return () }
 
                                         let writeToken =
                                             match kind with
@@ -2236,6 +2398,7 @@ type internal CompiledMafWorkflow<'Input, 'Output>
                                 with _ ->
                                     ()
 
+                                MafObserver.unregisterSession observerSession
                                 channel.Writer.TryComplete() |> ignore
                         }
 
@@ -2259,53 +2422,157 @@ type internal CompiledMafWorkflow<'Input, 'Output>
                 streamingRun.DisposeAsync())
         )
 
+    let createAcceptedFailureRunWithObservers
+        (runtimeRunId: RunId)
+        (observerSession: MafObserver.ObserverSession voption)
+        (startedAt: DateTimeOffset)
+        (failure: CircuitFailure)
+        (diagnosticMetadata: IReadOnlyDictionary<string, string>)
+        (cancellationToken: CancellationToken)
+        =
+        task {
+            let completedAt = DateTimeOffset.UtcNow
+
+            do!
+                MafObserver.notifyWorkflowRootEventAsync
+                    observerSession
+                    RunEventKind.RunFailed
+                    ValueNone
+                    (ValueSome failure)
+                    (ValueSome startedAt)
+                    (ValueSome completedAt)
+                    diagnosticMetadata
+                    cancellationToken
+
+            MafObserver.unregisterSession observerSession
+            return createAcceptedFailureRun runtimeRunId startedAt failure
+        }
+
+    let createStartFailureRun runtimeRunId observerSession startedAt cancellationToken ex =
+        let failure, diagnosticMetadata =
+            if MafErrors.isCancellationRequested cancellationToken ex then
+                let failure =
+                    FailureFactory.cancelled runtimeRunId ValueNone (OperationCanceledException(cancellationToken))
+
+                failure, FailureFactory.diagnosticMetadata failure
+            else
+                let failure = FailureFactory.workflowStart runtimeRunId (ValueSome ex)
+                failure, FailureFactory.diagnosticMetadata failure
+
+        createAcceptedFailureRunWithObservers
+            runtimeRunId
+            observerSession
+            startedAt
+            failure
+            diagnosticMetadata
+            cancellationToken
+
+    let createResumeFailureRun runtimeRunId observerSession startedAt cancellationToken (failure: CircuitFailure) =
+        let diagnosticMetadata = FailureFactory.diagnosticMetadata failure
+
+        createAcceptedFailureRunWithObservers
+            runtimeRunId
+            observerSession
+            startedAt
+            failure
+            diagnosticMetadata
+            cancellationToken
+
     member _.Fingerprint = fingerprint
 
     member this.RunStreamingAsync(input: 'Input, options: WorkflowRunOptions, cancellationToken: CancellationToken) =
+        if isNull (box options) then
+            nullArg "options"
+
         task {
             let runtimeRunId = RunId.New()
-            let workflow = buildWorkflow runtime definition runtimeRunId
-            let store = MafJsonCheckpointStore()
-            let environment = createEnvironment store
-            let sessionId = options.SessionId |> ValueOption.toObj
+            let startedAt = DateTimeOffset.UtcNow
+
+            let observerSession =
+                MafObserver.createWorkflowRunSession
+                    runtime.RuntimeOptions.Observers
+                    runtimeRunId
+                    definition.Id
+                    definition.Version
+
+            do! MafObserver.notifyStartedAsync observerSession startedAt ValueNone ValueNone cancellationToken
 
             try
+                let workflow = buildWorkflow runtime definition runtimeRunId
+                let store = MafJsonCheckpointStore()
+                let environment = createEnvironment store
+                let sessionId = options.SessionId |> ValueOption.toObj
+
                 let! streamingRun =
                     environment.RunStreamingAsync(workflow, input, sessionId, cancellationToken).AsTask()
 
-                return createRunWrapper runtimeRunId store streamingRun cancellationToken
+                return createRunWrapper runtimeRunId observerSession startedAt store streamingRun cancellationToken
             with ex ->
-                return raise (InvalidOperationException(ex.ToString(), ex))
+                return! createStartFailureRun runtimeRunId observerSession startedAt cancellationToken ex
         }
 
     member this.StartAsync(input: 'Input, options: WorkflowRunOptions, cancellationToken: CancellationToken) =
         this.RunStreamingAsync(input, options, cancellationToken)
 
     member this.ResumeAsync(checkpoint: WorkflowCheckpoint<'Output>, cancellationToken: CancellationToken) =
+        if isNull (box checkpoint) then
+            nullArg "checkpoint"
+
         task {
-            if checkpoint.DefinitionId <> definition.Id then
-                invalidOp "The supplied workflow checkpoint does not match this workflow definition ID."
-
-            if checkpoint.DefinitionVersion <> definition.Version then
-                invalidOp "The supplied workflow checkpoint does not match this workflow definition version."
-
-            if not (StringComparer.Ordinal.Equals(checkpoint.Fingerprint, fingerprint)) then
-                invalidOp "The supplied workflow checkpoint does not match this workflow definition fingerprint."
-
             let runtimeRunId = RunId.New()
-            let workflow = buildWorkflow runtime definition runtimeRunId
-            let store = MafJsonCheckpointStore()
-            let checkpointInfo = CheckpointInfo(checkpoint.SessionId, checkpoint.CheckpointId)
-            store.Import(checkpoint.SessionId, checkpointInfo, checkpoint.Payload)
-            let environment = createEnvironment store
+            let startedAt = DateTimeOffset.UtcNow
 
-            try
-                let! streamingRun =
-                    environment.ResumeStreamingAsync(workflow, checkpointInfo, cancellationToken).AsTask()
+            let observerSession =
+                MafObserver.createWorkflowRunSession
+                    runtime.RuntimeOptions.Observers
+                    runtimeRunId
+                    definition.Id
+                    definition.Version
 
-                return createRunWrapper runtimeRunId store streamingRun cancellationToken
-            with ex ->
-                return raise (InvalidOperationException(ex.ToString(), ex))
+            do! MafObserver.notifyStartedAsync observerSession startedAt ValueNone ValueNone cancellationToken
+
+            let checkpointMismatch message =
+                createResumeFailureRun
+                    runtimeRunId
+                    observerSession
+                    startedAt
+                    cancellationToken
+                    (FailureFactory.checkpointMismatch runtimeRunId message ValueNone)
+
+            if checkpoint.DefinitionId <> definition.Id then
+                return!
+                    checkpointMismatch "The supplied workflow checkpoint does not match this workflow definition ID."
+            elif checkpoint.DefinitionVersion <> definition.Version then
+                return!
+                    checkpointMismatch
+                        "The supplied workflow checkpoint does not match this workflow definition version."
+            elif not (StringComparer.Ordinal.Equals(checkpoint.Fingerprint, fingerprint)) then
+                return!
+                    checkpointMismatch
+                        "The supplied workflow checkpoint does not match this workflow definition fingerprint."
+            else
+                try
+                    let workflow = buildWorkflow runtime definition runtimeRunId
+                    let store = MafJsonCheckpointStore()
+                    let checkpointInfo = CheckpointInfo(checkpoint.SessionId, checkpoint.CheckpointId)
+                    store.Import(checkpoint.SessionId, checkpointInfo, checkpoint.Payload)
+                    let environment = createEnvironment store
+
+                    let! streamingRun =
+                        environment.ResumeStreamingAsync(workflow, checkpointInfo, cancellationToken).AsTask()
+
+                    return createRunWrapper runtimeRunId observerSession startedAt store streamingRun cancellationToken
+                with ex ->
+                    let failure =
+                        if MafErrors.isCancellationRequested cancellationToken ex then
+                            FailureFactory.cancelled
+                                runtimeRunId
+                                ValueNone
+                                (OperationCanceledException(cancellationToken))
+                        else
+                            FailureFactory.workflowResume runtimeRunId (ValueSome ex)
+
+                    return! createResumeFailureRun runtimeRunId observerSession startedAt cancellationToken failure
         }
 
     member this.RunAsync(input: 'Input, options: WorkflowRunOptions, cancellationToken: CancellationToken) =

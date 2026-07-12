@@ -9,10 +9,14 @@ open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 
+/// Identifies how a skill's contents are supplied to the runtime.
 [<RequireQualifiedAccess>]
 type SkillSourceKind =
+    /// Load the skill from one or more on-disk roots that each contain a <c>SKILL.md</c> entry point.
     | File = 0
+    /// Embed the skill instructions, resources, and scripts directly in memory.
     | Inline = 1
+    /// Delegate skill materialization to a custom runtime-specific implementation.
     | Custom = 2
 
 module internal SkillPathSecurity =
@@ -369,6 +373,7 @@ module private SkillValidation =
         Array.AsReadOnly(canonicalRoots.ToArray()) :> IReadOnlyList<string>
 
 
+/// Provides the ambient context available while reading a dynamic skill resource.
 [<Sealed>]
 type SkillResourceContext
     internal (runId: RunId, tenantId: string voption, userId: string voption, services: IServiceProvider) =
@@ -376,11 +381,22 @@ type SkillResourceContext
         if isNull services then
             nullArg "services"
 
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
+
+    /// Gets the user identifier for the run, if any.
     member _.UserId = userId
+
+    /// Gets the ambient service provider.
     member _.Services = services
 
+/// Describes a named resource exposed to a skill.
+/// <remarks>
+/// Dynamic resources execute inside the current process with access to ambient services. Treat them like code, not trusted data.
+/// </remarks>
 [<Sealed>]
 type SkillResource
     internal
@@ -401,16 +417,25 @@ type SkillResource
         | ValueNone, ValueSome reader when isNull reader -> nullArg "dynamicReader"
         | _ -> ()
 
+    /// Gets the resource name referenced by the skill.
     member _.Name = name
+
+    /// Gets the human-readable resource description.
     member _.Description = description
+
+    /// Gets whether the resource is computed on demand.
     member _.IsDynamic = dynamicReader.IsSome
 
+    /// Gets the static resource value when the resource is not dynamic.
+    /// <remarks>This property is ignored during JSON serialization.</remarks>
     [<JsonIgnore>]
     member _.StaticValue =
         match staticValue with
         | ValueSome value -> value
         | ValueNone -> null
 
+    /// Gets the dynamic resource reader when the resource is computed on demand.
+    /// <remarks>This property is ignored during JSON serialization.</remarks>
     [<JsonIgnore>]
     member _.DynamicReader =
         match dynamicReader with
@@ -423,6 +448,7 @@ type SkillResource
         | ValueNone, ValueSome value -> Task.FromResult value
         | _ -> invalidOp "The skill resource is not configured correctly."
 
+    /// Creates a static skill resource.
     static member Create(name: string, value: obj, description: string) =
         SkillResource(
             SkillValidation.validateSkillResourceName name,
@@ -431,9 +457,12 @@ type SkillResource
             ValueNone
         )
 
+    /// Creates a static skill resource without a description.
     static member Create(name: string, value: obj) =
         SkillResource.Create(name, value, String.Empty)
 
+    /// Creates a dynamic skill resource.
+    /// <remarks>The delegate may observe cancellation and may throw.</remarks>
     static member CreateDynamic
         (name: string, readAsync: Func<SkillResourceContext, CancellationToken, Task<obj>>, description: string)
         =
@@ -444,9 +473,11 @@ type SkillResource
             ValueSome readAsync
         )
 
+    /// Creates a dynamic skill resource without a description.
     static member CreateDynamic(name: string, readAsync: Func<SkillResourceContext, CancellationToken, Task<obj>>) =
         SkillResource.CreateDynamic(name, readAsync, String.Empty)
 
+/// Describes a named script entry point exposed by a skill.
 [<Sealed>]
 type SkillScriptDescriptor internal (name: string, description: string, metadata: IReadOnlyDictionary<string, string>) =
     do
@@ -456,10 +487,16 @@ type SkillScriptDescriptor internal (name: string, description: string, metadata
         SkillValidation.validateSkillScriptName name |> ignore
         SkillValidation.validateOptionalDescription "description" description |> ignore
 
+    /// Gets the script name referenced by the skill.
     member _.Name = name
+
+    /// Gets the human-readable script description.
     member _.Description = description
+
+    /// Gets script metadata supplied by the skill author.
     member _.Metadata = metadata
 
+    /// Creates a script descriptor.
     static member Create(name: string, description: string, metadata: IEnumerable<KeyValuePair<string, string>>) =
         if isNull metadata then
             nullArg "metadata"
@@ -470,9 +507,11 @@ type SkillScriptDescriptor internal (name: string, description: string, metadata
             SkillValidation.copyMetadata "metadata" metadata
         )
 
+    /// Creates a script descriptor without metadata.
     static member Create(name: string, description: string) =
         SkillScriptDescriptor.Create(name, description, Seq.empty)
 
+    /// Creates a script descriptor with only its name.
     static member Create(name: string) =
         SkillScriptDescriptor.Create(name, String.Empty, Seq.empty)
 
@@ -518,6 +557,10 @@ module private SkillCollections =
         else
             Array.AsReadOnly(snapshot.ToArray()) :> IReadOnlyList<SkillScriptDescriptor>
 
+/// Describes where a skill's content comes from.
+/// <remarks>
+/// File skills are restricted to validated roots that contain a <c>SKILL.md</c> entry point. Script execution is runtime-controlled and may be disabled entirely.
+/// </remarks>
 [<Sealed>]
 type SkillSource
     internal
@@ -538,12 +581,23 @@ type SkillSource
         if isNull scripts then
             nullArg "scripts"
 
+    /// Gets the source kind.
     member _.Kind = kind
+
+    /// Gets the canonical file roots for file-backed skills.
     member _.FileRoots = fileRoots
+
+    /// Gets the inline skill instructions.
     member _.Instructions = instructions
+
+    /// Gets the inline skill resources.
     member _.Resources = resources
+
+    /// Gets the inline skill scripts.
     member _.Scripts = scripts
 
+    /// Creates a file-backed skill source.
+    /// <exception cref="T:System.ArgumentException">Any root is missing, duplicated, unsafe, or lacks a <c>SKILL.md</c> entry point.</exception>
     static member CreateFile(fileRoots: IEnumerable<string>) =
         if isNull fileRoots then
             nullArg "fileRoots"
@@ -556,9 +610,11 @@ type SkillSource
             SkillCollections.emptyScripts
         )
 
+    /// Creates a file-backed skill source from a single root.
     static member CreateFile(fileRoot: string) =
         SkillSource.CreateFile(seq { fileRoot })
 
+    /// Creates an inline skill source.
     static member CreateInline
         (instructions: string, resources: IEnumerable<SkillResource>, scripts: IEnumerable<SkillScriptDescriptor>)
         =
@@ -576,9 +632,11 @@ type SkillSource
             SkillCollections.copyScripts scripts
         )
 
+    /// Creates an inline skill source without resources or scripts.
     static member CreateInline(instructions: string) =
         SkillSource.CreateInline(instructions, Seq.empty, Seq.empty)
 
+    /// Creates a custom skill source placeholder for runtime-specific skill implementations.
     static member CreateCustom() =
         SkillSource(
             SkillSourceKind.Custom,
@@ -588,6 +646,7 @@ type SkillSource
             SkillCollections.emptyScripts
         )
 
+/// Identifies a versioned skill and how to materialize it.
 [<Sealed>]
 type SkillReference
     internal
@@ -605,12 +664,22 @@ type SkillReference
         if isNull metadata then
             nullArg "metadata"
 
+    /// Gets the skill identifier.
     member _.Id = id
+
+    /// Gets the skill version.
     member _.Version = version
+
+    /// Gets the human-readable skill description.
     member _.Description = description
+
+    /// Gets the source used to materialize the skill.
     member _.Source = source
+
+    /// Gets arbitrary skill metadata.
     member _.Metadata = metadata
 
+    /// Creates a skill reference.
     static member Create
         (
             id: string,
@@ -630,12 +699,15 @@ type SkillReference
             SkillValidation.copyMetadata "metadata" metadata
         )
 
+    /// Creates a skill reference without metadata.
     static member Create(id: string, version: string, description: string, source: SkillSource) =
         SkillReference.Create(id, version, description, source, Seq.empty)
 
+    /// Creates a custom skill reference with no inline description.
     static member Create(id: string, version: string) =
         SkillReference.Create(id, version, String.Empty, SkillSource.CreateCustom(), Seq.empty)
 
+/// Represents a runtime-ready skill plus caller-supplied properties.
 [<Sealed>]
 type ResolvedSkill internal (reference: SkillReference, properties: IReadOnlyDictionary<string, obj>) =
     do
@@ -645,17 +717,22 @@ type ResolvedSkill internal (reference: SkillReference, properties: IReadOnlyDic
         if isNull properties then
             nullArg "properties"
 
+    /// Gets the resolved skill reference.
     member _.Reference = reference
 
+    /// Gets runtime-local properties attached to the skill.
+    /// <remarks>This property is ignored during JSON serialization.</remarks>
     [<JsonIgnore>]
     member _.Properties = properties
 
+    /// Creates a resolved skill with explicit properties.
     static member Create(reference: SkillReference, properties: IEnumerable<KeyValuePair<string, obj>>) =
         if isNull properties then
             nullArg "properties"
 
         ResolvedSkill(reference, SkillValidation.copyProperties properties)
 
+    /// Creates a resolved skill without additional properties.
     static member Create(reference: SkillReference) =
         ResolvedSkill.Create(reference, Seq.empty)
 
@@ -667,6 +744,7 @@ type ResolvedSkill internal (reference: SkillReference, properties: IReadOnlyDic
         else
             ValueNone
 
+/// Provides the ambient context available while resolving skills for a run.
 [<Sealed>]
 type SkillResolutionContext
     internal (runId: RunId, tenantId: string voption, userId: string voption, services: IServiceProvider) =
@@ -674,11 +752,22 @@ type SkillResolutionContext
         if isNull services then
             nullArg "services"
 
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
+
+    /// Gets the user identifier for the run, if any.
     member _.UserId = userId
+
+    /// Gets the ambient service provider.
     member _.Services = services
 
+/// Describes a script invocation requested by a resolved skill.
+/// <remarks>
+/// File-backed skill roots and script paths are sanitized canonical locations inside approved roots; runtimes are not expected to expose original unresolved paths.
+/// </remarks>
 [<Sealed>]
 type SkillScriptRequest
     internal
@@ -703,32 +792,60 @@ type SkillScriptRequest
         if isNull (box script) then
             nullArg "script"
 
+    /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
+
+    /// Gets the user identifier for the run, if any.
     member _.UserId = userId
 
+    /// Gets the ambient service provider.
+    /// <remarks>This property is ignored during JSON serialization.</remarks>
     [<JsonIgnore>]
     member _.Services = services
 
+    /// Gets the skill that requested the script invocation.
     member _.Skill = skill
+
+    /// Gets the target script descriptor.
     member _.Script = script
+
+    /// Gets the optional JSON arguments passed to the script.
     member _.Arguments = arguments
+
+    /// Gets the canonical skill root for file-backed skills when one exists.
     member _.SkillRoot = skillRoot
+
+    /// Gets the canonical script path for file-backed skills when one exists.
     member _.ScriptPath = scriptPath
 
+/// Represents the output returned by a skill script runner.
 [<Sealed>]
 type SkillScriptResult internal (output: obj) =
+    /// Gets the script output value.
     member _.Output = output
+
+    /// Creates a script result.
     static member Create(output: obj) = SkillScriptResult(output)
 
+/// Resolves the skills available to a run.
 type ISkillResolver =
+    /// Resolves skills for the supplied run context.
     abstract ResolveAsync:
         context: SkillResolutionContext * cancellationToken: CancellationToken ->
             ValueTask<IReadOnlyList<ResolvedSkill>>
 
+/// Executes a resolved skill script request.
 type ISkillScriptRunner =
+    /// Executes a script request.
+    /// <remarks>
+    /// Script runners are trusted code. They should enforce their own process, file-system, and network isolation if needed.
+    /// </remarks>
     abstract RunAsync: request: SkillScriptRequest * cancellationToken: CancellationToken -> Task<SkillScriptResult>
 
+/// Returns a fixed skill list for every resolution request.
 [<Sealed>]
 type StaticSkillResolver(skills: IEnumerable<ResolvedSkill>) =
     let snapshot =
@@ -741,6 +858,7 @@ type StaticSkillResolver(skills: IEnumerable<ResolvedSkill>) =
         member _.ResolveAsync(_context, _cancellationToken) =
             ValueTask<IReadOnlyList<ResolvedSkill>>(snapshot :> IReadOnlyList<ResolvedSkill>)
 
+/// Resolves skills through a caller-supplied delegate.
 [<Sealed>]
 type DelegateSkillResolver
     (resolver: Func<SkillResolutionContext, CancellationToken, ValueTask<IReadOnlyList<ResolvedSkill>>>) =
@@ -759,30 +877,33 @@ module internal SkillResolution =
         if isNull (box skill) then
             invalidOp "Skill resolvers cannot return null skill entries."
 
-        if isNull (box skill.Reference) then
-            invalidOp "Resolved skill references cannot be null."
-
-        SkillValidation.requireNonBlank "skill.Reference.Id" skill.Reference.Id.Value
-        |> ignore
-
         if isNull skill.Reference.Description then
             invalidOp "Resolved skill descriptions cannot be null."
 
-        if isNull (box skill.Reference.Source) then
-            invalidOp "Resolved skill sources cannot be null."
+    let private appendResolvedSkills
+        (skills: ResizeArray<ResolvedSkill>)
+        (identities: HashSet<string>)
+        (resolvedSkills: IReadOnlyList<ResolvedSkill>)
+        =
+        if isNull resolvedSkills then
+            invalidOp "Skill resolvers cannot return null skill lists."
 
-        if isNull skill.Reference.Metadata then
-            invalidOp "Resolved skill metadata cannot be null."
+        for skill in resolvedSkills do
+            validateResolvedSkill skill
 
-        if isNull skill.Properties then
-            invalidOp "Resolved skill properties cannot be null."
+            let identity = $"{skill.Reference.Id.Value}@{skill.Reference.Version}"
+
+            if not (identities.Add identity) then
+                invalidOp $"Duplicate skill identity '{identity}' was resolved."
+
+            skills.Add skill
 
     let resolveAllAsync
         (resolvers: IReadOnlyList<ISkillResolver>)
         (context: SkillResolutionContext)
         (cancellationToken: CancellationToken)
         =
-        task {
+        try
             if isNull resolvers then
                 nullArg "resolvers"
 
@@ -790,29 +911,32 @@ module internal SkillResolution =
                 nullArg "context"
 
             if resolvers.Count = 0 then
-                return emptySkills
+                Task.FromResult(emptySkills)
             else
-                let skills = ResizeArray<ResolvedSkill>()
-                let identities = HashSet<string>(StringComparer.Ordinal)
+                let tasks = Array.zeroCreate<Task<IReadOnlyList<ResolvedSkill>>> resolvers.Count
 
-                for resolver in resolvers do
+                for index = 0 to resolvers.Count - 1 do
+                    let resolver = resolvers[index]
+
                     if isNull (box resolver) then
                         invalidOp "Skill resolvers cannot contain null entries."
 
-                    let! resolvedSkills = resolver.ResolveAsync(context, cancellationToken).AsTask()
+                    tasks[index] <- resolver.ResolveAsync(context, cancellationToken).AsTask()
 
-                    if isNull resolvedSkills then
-                        invalidOp "Skill resolvers cannot return null skill lists."
+                (Task.WhenAll tasks)
+                    .ContinueWith(
+                        Func<Task<IReadOnlyList<ResolvedSkill>[]>, IReadOnlyList<ResolvedSkill>>(fun completed ->
+                            let resolvedBatches = completed.GetAwaiter().GetResult()
+                            let skills = ResizeArray<ResolvedSkill>()
+                            let identities = HashSet<string>(StringComparer.Ordinal)
 
-                    for skill in resolvedSkills do
-                        validateResolvedSkill skill
+                            for resolvedSkills in resolvedBatches do
+                                appendResolvedSkills skills identities resolvedSkills
 
-                        let identity = $"{skill.Reference.Id.Value}@{skill.Reference.Version}"
-
-                        if not (identities.Add identity) then
-                            invalidOp $"Duplicate skill identity '{identity}' was resolved."
-
-                        skills.Add skill
-
-                return skills.ToArray() :> IReadOnlyList<ResolvedSkill>
-        }
+                            skills.ToArray() :> IReadOnlyList<ResolvedSkill>),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )
+        with ex ->
+            Task.FromException<IReadOnlyList<ResolvedSkill>>(ex)

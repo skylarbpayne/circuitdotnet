@@ -1,7 +1,4 @@
-#pragma warning disable CS1591
-
 using System.ComponentModel.DataAnnotations;
-using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -409,106 +406,6 @@ public sealed class SmokeTests
         Assert.Equal("pong", result.Result.Value!.Message);
     }
 
-    [Fact]
-    public async Task package_console_smoke_uses_built_nupkgs_not_project_references()
-    {
-        var packagesDir = Path.Combine(Path.GetTempPath(), $"circuit-packages-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(packagesDir);
-
-        try
-        {
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit.Core", "Circuit.Core.fsproj"), packagesDir);
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit", "Circuit.csproj"), packagesDir);
-            await PackAsync(Path.Combine(RepoRoot, "src", "Circuit.MicrosoftAgentFramework", "Circuit.MicrosoftAgentFramework.fsproj"), packagesDir);
-
-            var packageVersion = GetPackedVersion(packagesDir, "CircuitDotNet");
-            var projectDir = Path.Combine(Path.GetTempPath(), $"circuit-smoke-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(projectDir);
-
-            try
-            {
-                await File.WriteAllTextAsync(
-                    Path.Combine(projectDir, "Smoke.csproj"),
-                    $$"""
-                    <Project Sdk="Microsoft.NET.Sdk">
-                      <PropertyGroup>
-                        <OutputType>Exe</OutputType>
-                        <TargetFramework>net10.0</TargetFramework>
-                        <Nullable>enable</Nullable>
-                        <RestoreSources>{{packagesDir}};https://api.nuget.org/v3/index.json</RestoreSources>
-                      </PropertyGroup>
-                      <ItemGroup>
-                        <PackageReference Include="CircuitDotNet" Version="{{packageVersion}}" />
-                        <PackageReference Include="CircuitDotNet.MicrosoftAgentFramework" Version="{{packageVersion}}" />
-                        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
-                      </ItemGroup>
-                    </Project>
-                    """);
-
-                await File.WriteAllTextAsync(
-                    Path.Combine(projectDir, "Program.cs"),
-                    """
-                    using System.Collections.Generic;
-                    using System.Threading;
-                    using System.Threading.Tasks;
-                    using Circuit;
-                    using Microsoft.Extensions.AI;
-                    using Microsoft.Extensions.DependencyInjection;
-
-                    var services = new ServiceCollection();
-                    services.AddSingleton<IChatClient>(new SmokeChatClient());
-                    services.AddCircuit(_ => { });
-                    await using var provider = services.BuildServiceProvider();
-                    var client = provider.GetRequiredService<ICircuitClient>();
-                    var agent = new AgentDefinition("smoke.agent", "1.0.0", "Smoke", "Return pong.");
-                    var signature = new AgentSignature<SmokeInput, SmokeOutput>("smoke.signature", "1.0.0", "Smoke", "Return pong.");
-                    var result = await client.RunAsync(agent, signature, new SmokeInput { Message = "ping" });
-                    if (!result.Result.IsSuccess || result.Result.Value?.Message != "pong")
-                    {
-                        throw new System.Exception("Smoke failed.");
-                    }
-                    System.Console.WriteLine(result.Result.Value!.Message);
-
-                    sealed class SmokeInput
-                    {
-                        public required string Message { get; init; }
-                    }
-
-                    sealed class SmokeOutput
-                    {
-                        public required string Message { get; init; }
-                    }
-
-                    sealed class SmokeChatClient : IChatClient, System.IDisposable
-                    {
-                        public void Dispose() { }
-                        public object? GetService(System.Type serviceType, object? serviceKey) => null;
-                        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
-                            => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "{\"message\":\"pong\"}")));
-                        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            yield return new ChatResponseUpdate(ChatRole.Assistant, "{\"message\":\"pong\"}");
-                            await Task.Yield();
-                        }
-                    }
-                    """);
-
-                await RunProcessAsync(projectDir, "dotnet", "build -v minimal");
-                var output = await RunProcessAsync(projectDir, "dotnet", "run --no-build");
-                Assert.Contains("pong", output);
-            }
-            finally
-            {
-                TryDelete(projectDir);
-            }
-        }
-        finally
-        {
-            TryDelete(packagesDir);
-        }
-    }
-
     private static void InspectType(Type type, string location, ISet<string> forbidden, ISet<Type> visited)
     {
         Inspect(type, location, forbidden, visited);
@@ -605,57 +502,6 @@ public sealed class SmokeTests
             {
                 Inspect(argument, location, forbidden, visited);
             }
-        }
-    }
-
-    private static async Task PackAsync(string projectPath, string outputDirectory)
-    {
-        var projectDirectory = Path.GetDirectoryName(projectPath)!;
-        await RunProcessAsync(projectDirectory, "dotnet", $"pack {Path.GetFileName(projectPath)} -c Release --no-build -o \"{outputDirectory}\"");
-    }
-
-    private static string GetPackedVersion(string packagesDirectory, string packageId)
-    {
-        var package = Directory.GetFiles(packagesDirectory, "*.nupkg")
-            .Where(path => !path.EndsWith(".symbols.nupkg", StringComparison.OrdinalIgnoreCase))
-            .Where(path => !path.EndsWith(".snupkg", StringComparison.OrdinalIgnoreCase))
-            .Single(path => Path.GetFileName(path).StartsWith(packageId + ".0", StringComparison.Ordinal));
-
-        var fileName = Path.GetFileNameWithoutExtension(package);
-        return fileName[(packageId.Length + 1)..];
-    }
-
-    private static async Task<string> RunProcessAsync(string workingDirectory, string fileName, string arguments)
-    {
-        var startInfo = new ProcessStartInfo(fileName, arguments)
-        {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-
-        startInfo.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH");
-        startInfo.Environment["DOTNET_ROOT"] = Environment.GetEnvironmentVariable("DOTNET_ROOT");
-
-        using var process = Process.Start(startInfo)!;
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-
-        if (process.ExitCode != 0)
-        {
-            throw new Xunit.Sdk.XunitException($"Command failed: {fileName} {arguments}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
-        }
-
-        return stdout + stderr;
-    }
-
-    private static void TryDelete(string path)
-    {
-        if (Directory.Exists(path))
-        {
-            Directory.Delete(path, recursive: true);
         }
     }
 

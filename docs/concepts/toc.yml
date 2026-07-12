@@ -1,0 +1,6 @@
+- name: Circuits
+  href: circuits.md
+- name: Signatures and validation
+  href: signatures-and-validation.md
+- name: Tools vs. skills
+  href: tools-vs-skills.md

@@ -450,6 +450,86 @@ type internal CircuitResolvedToolFunction
             |> String.concat "; "
             |> fun details -> $"Validation failed: {details}"
 
+    member private _.TryGetOperationId(arguments: AIFunctionArguments) =
+        let tryGetFromPair (pair: KeyValuePair<obj, obj>) =
+            match pair.Key with
+            | :? string as keyName when StringComparer.OrdinalIgnoreCase.Equals(keyName, "callId") ->
+                match pair.Value with
+                | :? string as callId when not (String.IsNullOrWhiteSpace callId) -> ValueSome callId
+                | _ -> ValueNone
+            | _ ->
+                match pair.Value with
+                | :? FunctionCallContent as functionCall when not (String.IsNullOrWhiteSpace functionCall.CallId) ->
+                    ValueSome functionCall.CallId
+                | _ -> ValueNone
+
+        if isNull arguments then
+            ValueNone
+        elif not (isNull arguments.Context) then
+            arguments.Context
+            |> Seq.tryPick (fun pair -> tryGetFromPair pair |> ValueOption.toOption)
+            |> Option.toValueOption
+        else
+            ValueNone
+
+    member private _.SerializeArguments(arguments: AIFunctionArguments) =
+        try
+            ValueSome(JsonSerializer.Serialize(arguments, jsonOptions))
+        with _ ->
+            ValueNone
+
+    member private _.CreateObserverFailure (operationId: string) (ex: exn) =
+        match ex with
+        | :? OperationCanceledException as cancelled ->
+            CircuitFailure(
+                CircuitFailureCode.Cancelled,
+                "The tool was cancelled.",
+                ValueSome runContext.RunId,
+                ValueSome operationId,
+                ValueNone,
+                ValueSome cancelled
+            )
+        | :? SanitizedToolException as sanitized when
+            sanitized.Message.StartsWith("Validation failed", StringComparison.Ordinal)
+            ->
+            CircuitFailure(
+                CircuitFailureCode.Validation,
+                sanitized.Message,
+                ValueSome runContext.RunId,
+                ValueSome operationId,
+                ValueNone,
+                ValueSome sanitized
+            )
+        | :? SanitizedToolException as sanitized when
+            StringComparer.Ordinal.Equals(sanitized.Message, "Tool input could not be parsed.")
+            ->
+            CircuitFailure(
+                CircuitFailureCode.Decode,
+                sanitized.Message,
+                ValueSome runContext.RunId,
+                ValueSome operationId,
+                ValueNone,
+                ValueSome sanitized
+            )
+        | :? SanitizedToolException as sanitized ->
+            CircuitFailure(
+                CircuitFailureCode.Tool,
+                sanitized.Message,
+                ValueSome runContext.RunId,
+                ValueSome operationId,
+                ValueNone,
+                ValueSome sanitized
+            )
+        | other ->
+            CircuitFailure(
+                CircuitFailureCode.Tool,
+                "Tool execution failed.",
+                ValueSome runContext.RunId,
+                ValueSome operationId,
+                ValueNone,
+                ValueSome other
+            )
+
     override _.Name = modelName
     override _.Description = tool.Description
     override _.AdditionalProperties = emptyAdditionalProperties
@@ -460,36 +540,78 @@ type internal CircuitResolvedToolFunction
 
     override this.InvokeCoreAsync(arguments: AIFunctionArguments, cancellationToken: CancellationToken) =
         task {
-            cancellationToken.ThrowIfCancellationRequested()
+            let operationId =
+                this.TryGetOperationId(arguments)
+                |> ValueOption.defaultWith (fun () -> $"{tool.Name.Value}:{Guid.NewGuid():N}")
 
-            let input = this.DeserializeInput(arguments, cancellationToken)
-            let inputIssues = tool.ValidateInput input
+            do!
+                MafObserver.notifyToolStartedAsync
+                    runContext.RunId
+                    operationId
+                    tool.Name.Value
+                    (this.SerializeArguments(arguments))
+                    cancellationToken
 
-            if inputIssues.Count > 0 then
-                raise (SanitizedToolException(this.FormatValidationIssues(inputIssues)))
+            try
+                cancellationToken.ThrowIfCancellationRequested()
 
-            cancellationToken.ThrowIfCancellationRequested()
+                let input = this.DeserializeInput(arguments, cancellationToken)
+                let inputIssues = tool.ValidateInput input
 
-            let! output =
-                task {
-                    try
-                        return! tool.InvokeAsync(this.CreateToolContext(cancellationToken), input)
-                    with
-                    | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
-                        return raise (OperationCanceledException(cancellationToken))
-                    | ex -> return raise (SanitizedToolException("Tool execution failed.", ex))
-                }
+                if inputIssues.Count > 0 then
+                    raise (SanitizedToolException(this.FormatValidationIssues(inputIssues)))
 
-            let outputIssues = tool.ValidateOutput output
+                cancellationToken.ThrowIfCancellationRequested()
 
-            if outputIssues.Count > 0 then
-                raise (SanitizedToolException(this.FormatValidationIssues(outputIssues)))
+                let! output =
+                    task {
+                        try
+                            return! tool.InvokeAsync(this.CreateToolContext(cancellationToken), input)
+                        with
+                        | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+                            return raise (OperationCanceledException(cancellationToken))
+                        | ex -> return raise (SanitizedToolException("Tool execution failed.", ex))
+                    }
 
-            return output
+                let outputIssues = tool.ValidateOutput output
+
+                if outputIssues.Count > 0 then
+                    raise (SanitizedToolException(this.FormatValidationIssues(outputIssues)))
+
+                do!
+                    MafObserver.notifyToolCompletedAsync
+                        runContext.RunId
+                        operationId
+                        tool.Name.Value
+                        ValueNone
+                        cancellationToken
+
+                return output
+            with ex ->
+                do!
+                    MafObserver.notifyToolCompletedAsync
+                        runContext.RunId
+                        operationId
+                        tool.Name.Value
+                        (ValueSome(this.CreateObserverFailure (operationId) ex))
+                        cancellationToken
+
+                return raise ex
         }
         |> ValueTask<obj>
 
+type internal ToolResolverFailureException(innerException: exn) =
+    inherit InvalidOperationException("Tool resolver failed.", innerException)
+
+type internal ToolCapabilityFailureException(failure: CircuitFailure) =
+    inherit InvalidOperationException(failure.Message, failure.Exception |> ValueOption.defaultValue null)
+
+    member _.Failure = failure
+
 module internal MafAgentFactory =
+    let private createToolCapabilityFailure runId message =
+        CircuitFailure(CircuitFailureCode.Tool, message, ValueSome runId, ValueNone, ValueNone, ValueNone)
+
     let private toReadOnlyList<'T> (items: 'T seq) =
         items |> Seq.toArray :> IReadOnlyList<'T>
 
@@ -525,14 +647,19 @@ module internal MafAgentFactory =
     let private createToolResolutionContext (context: RunContext) =
         ToolResolutionContext(context.RunId, context.Options.TenantId, context.Options.UserId, context.Options.Services)
 
-    let private ensureDistinctModelNames (tools: ResolvedMafTool[]) =
+    let private ensureDistinctModelNames (runId: RunId) (tools: ResolvedMafTool[]) =
         let modelNames = Dictionary<string, string>(StringComparer.Ordinal)
 
         for tool in tools do
             match modelNames.TryGetValue tool.ModelName with
             | true, existingIdentity ->
-                invalidOp
-                    $"Multiple tools map to the same model-facing identity '{tool.ModelName}': {existingIdentity}, {tool.Tool.Name.Value}@{tool.Tool.Version}."
+                raise (
+                    ToolCapabilityFailureException(
+                        createToolCapabilityFailure
+                            runId
+                            $"Multiple tools map to the same model-facing identity '{tool.ModelName}': {existingIdentity}, {tool.Tool.Name.Value}@{tool.Tool.Version}."
+                    )
+                )
             | false, _ -> modelNames[tool.ModelName] <- $"{tool.Tool.Name.Value}@{tool.Tool.Version}"
 
     let resolveToolsAsync
@@ -543,10 +670,17 @@ module internal MafAgentFactory =
         =
         task {
             let! resolvedTools =
-                ToolResolution.resolveAllAsync
-                    runtimeOptions.ToolResolvers
-                    (createToolResolutionContext context)
-                    cancellationToken
+                task {
+                    try
+                        return!
+                            ToolResolution.resolveAllAsync
+                                runtimeOptions.ToolResolvers
+                                (createToolResolutionContext context)
+                                cancellationToken
+                    with
+                    | :? OperationCanceledException -> return raise (OperationCanceledException(cancellationToken))
+                    | ex -> return raise (ToolResolverFailureException(ex))
+                }
 
             let selectedTools =
                 if agent.ToolTags.Count = 0 then
@@ -562,18 +696,32 @@ module internal MafAgentFactory =
                             |> Seq.toArray
 
                         match matches.Length with
-                        | 0 -> invalidOp $"No tool was resolved for requested tag '{requestedTag}'."
+                        | 0 ->
+                            raise (
+                                ToolCapabilityFailureException(
+                                    createToolCapabilityFailure
+                                        context.RunId
+                                        $"No tool was resolved for requested tag '{requestedTag}'."
+                                )
+                            )
                         | 1 -> selectedByName[matches[0].Name.Value] <- matches[0]
                         | _ ->
                             let names = matches |> Array.map (fun tool -> tool.Name.Value) |> String.concat ", "
-                            invalidOp $"Multiple tools were resolved for requested tag '{requestedTag}': {names}."
+
+                            raise (
+                                ToolCapabilityFailureException(
+                                    createToolCapabilityFailure
+                                        context.RunId
+                                        $"Multiple tools were resolved for requested tag '{requestedTag}': {names}."
+                                )
+                            )
 
                     selectedByName.Values |> Seq.toArray
 
             let mappedTools =
                 selectedTools |> Array.map (createToolFunction runtimeOptions context)
 
-            ensureDistinctModelNames mappedTools
+            ensureDistinctModelNames context.RunId mappedTools
             return mappedTools :> IReadOnlyList<ResolvedMafTool>
         }
 

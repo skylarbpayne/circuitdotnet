@@ -16,5 +16,6 @@
     <Project Path="tests/Circuit.Interop.Tests/Circuit.Interop.Tests.csproj" />
     <Project Path="tests/Circuit.MicrosoftAgentFramework.Tests/Circuit.MicrosoftAgentFramework.Tests.fsproj" />
     <Project Path="tests/Circuit.Package.Tests/Circuit.Package.Tests.fsproj" />
+    <Project Path="tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj" />
   </Folder>
 </Solution>

@@ -49,72 +49,17 @@ module internal CSharpFacadeAdapters =
             |> Seq.toArray
             :> IReadOnlyList<Circuit.Core.ISkillResolver>
 
-        runtimeOptions.Observers <-
-            observers
-            |> Seq.map (fun (observer: Circuit.IRunObserver) ->
-                { new Circuit.MicrosoftAgentFramework.IRunObserver with
-                    member _.OnRunStartedAsync(context, startedAt, cancellationToken) =
-                        observer.OnRunStartedAsync(Circuit.RunContext.FromCore(context), startedAt, cancellationToken)
-
-                    member _.OnRunEventAsync(event, cancellationToken) =
-                        observer.OnRunEventAsync(
-                            Circuit.ObservedRunEvent.FromCore(
-                                event.RunId.Value,
-                                event.Timestamp,
-                                enum<Circuit.AgentRunEventKind> (int event.Kind),
-                                (if event.OperationId.IsSome then
-                                     Some event.OperationId.Value
-                                 else
-                                     None)
-                                |> Option.toObj,
-                                (if event.TextDelta.IsSome then
-                                     Some event.TextDelta.Value
-                                 else
-                                     None)
-                                |> Option.toObj,
-                                (if event.Failure.IsSome then
-                                     Some(Circuit.AgentFailure.FromCore(event.Failure.Value))
-                                 else
-                                     None)
-                                |> Option.toObj,
-                                (if event.Approval.IsSome then
-                                     Some(Circuit.ApprovalRequest.FromCore(event.Approval.Value))
-                                 else
-                                     None)
-                                |> Option.toObj
-                            ),
-                            cancellationToken
-                        )
-
-                    member _.OnRunCompletedAsync(observation, cancellationToken) =
-                        observer.OnRunCompletedAsync(
-                            Circuit.RunObservation.FromCore(
-                                Circuit.RunContext.FromCore(observation.Context),
-                                observation.StartedAt,
-                                observation.CompletedAt,
-                                observation.Repaired,
-                                Circuit.RunUsage.FromCore(observation.Usage),
-                                (if observation.Session.IsSome then
-                                     Some(Circuit.CircuitSession.FromCore(observation.Session.Value))
-                                 else
-                                     None)
-                                |> Option.toObj,
-                                (if observation.Failure.IsSome then
-                                     Some(Circuit.AgentFailure.FromCore(observation.Failure.Value))
-                                 else
-                                     None)
-                                |> Option.toObj,
-                                observation.DiagnosticMetadata
-                            ),
-                            cancellationToken
-                        ) })
-            |> Seq.toArray
-            :> IReadOnlyList<Circuit.MicrosoftAgentFramework.IRunObserver>
+        runtimeOptions.Observers <- observers
 
         runtimeOptions
 
+/// Creates high-level Circuit clients backed by the Microsoft Agent Framework runtime.
 [<AbstractClass; Sealed>]
 type MicrosoftAgentFrameworkRuntimeFactory private () =
+    /// Creates an <see cref="T:Circuit.ICircuitClient" /> from a chat client and optional adapters.
+    /// <remarks>
+    /// Tool and skill resolvers are runtime extension points, not security boundaries. Approval and script-execution behavior still depends on the configured runtime options.
+    /// </remarks>
     static member CreateClient
         (
             chatClient: IChatClient,
@@ -211,8 +156,14 @@ module private AddCircuitServiceRegistration =
         | :? Circuit.Core.IWorkflowRuntime as workflowRuntime -> workflowRuntime
         | _ -> UnsupportedWorkflowRuntime(UnsupportedWorkflowRuntimeMessage) :> Circuit.Core.IWorkflowRuntime
 
+/// Extension methods for registering the high-level Circuit client abstractions.
 [<AbstractClass; Sealed; Extension>]
 type ServiceCollectionExtensions private () =
+    /// Registers <see cref="T:Circuit.ICircuitClient" />, <see cref="T:Circuit.IAgentClient" />, and <see cref="T:Circuit.IWorkflowClient" />.
+    /// <remarks>
+    /// If no <see cref="T:Circuit.Core.ICircuitRuntime" /> is already registered, this method creates a default
+    /// <see cref="T:Circuit.MicrosoftAgentFramework.MafRuntime" /> from the configured <see cref="T:Microsoft.Extensions.AI.IChatClient" />.
+    /// </remarks>
     [<Extension>]
     static member AddCircuit(services: IServiceCollection, configure: Action<Circuit.CircuitOptions>) =
         if isNull (box services) then

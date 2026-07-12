@@ -250,6 +250,7 @@
       "CircuitDotNet.Testing": {
         "type": "Project",
         "dependencies": {
+          "CircuitDotNet": "[0.1.0-alpha.1, )",
           "CircuitDotNet.Core": "[0.1.0-alpha.1, )",
           "FSharp.Core": "[10.1.301, )"
         }

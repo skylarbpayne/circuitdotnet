@@ -11,6 +11,10 @@ module private SignatureValidation =
 
         value
 
+/// Describes an agent contract: input type, output type, and execution instructions.
+/// <remarks>
+/// Signatures snapshot their JSON serializer options at creation time so schemas, validation, and runtime decoding stay aligned.
+/// </remarks>
 [<Sealed>]
 type Signature<'Input, 'Output>
     internal
@@ -23,14 +27,34 @@ type Signature<'Input, 'Output>
         input: Contract<'Input>,
         output: Contract<'Output>
     ) =
+    /// Gets the signature identifier.
     member _.Id = id
+
+    /// Gets the signature version.
     member _.Version = version
+
+    /// Gets the short human-readable description of the capability.
     member _.Description = description
+
+    /// Gets the validated input contract.
     member _.Input = input
+
+    /// Gets the validated output contract.
     member _.Output = output
+
+    /// Gets the additional execution instructions appended to the agent prompt.
     member _.Instructions = instructions
     member internal _.JsonSerializerOptions = jsonOptions
 
+    /// Creates a signature from its public metadata and validators.
+    /// <param name="id">The signature identifier.</param>
+    /// <param name="version">The semantic version in <c>major.minor.patch</c> form.</param>
+    /// <param name="description">A short human-readable description.</param>
+    /// <param name="instructions">The runtime instructions paired with the signature.</param>
+    /// <param name="jsonOptions">The serializer options that define the input and output wire contracts.</param>
+    /// <param name="inputValidators">Additional validators for the input contract.</param>
+    /// <param name="outputValidators">Additional validators for the output contract.</param>
+    /// <returns>The created signature.</returns>
     static member Create
         (
             id: string,

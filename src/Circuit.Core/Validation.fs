@@ -12,6 +12,7 @@ open System.Text.Json.Nodes
 open System.Text.Json.Schema
 open System.Text.Json.Serialization
 
+/// Wraps a JSON Schema document generated for a contract type.
 [<Sealed>]
 type SchemaDocument internal (node: JsonNode) =
     let json, valueType =
@@ -26,19 +27,32 @@ type SchemaDocument internal (node: JsonNode) =
 
         json, valueType
 
+    /// Gets the schema root element.
+    /// <remarks>A defensive clone is returned on each call.</remarks>
     member _.RootElement =
         use document = JsonDocument.Parse(json)
         document.RootElement.Clone()
 
+    /// Serializes the schema to JSON.
     member _.ToJsonString() = json
+
+    /// Gets the root JSON value kind for the schema document.
     member _.ValueType = valueType
 
+/// Describes one validation failure discovered for a contract value.
 type ValidationIssue =
-    { Path: string
-      Code: string
-      Message: string }
+    {
+        /// Gets the JSON-style path of the failing value.
+        Path: string
+        /// Gets a stable, machine-readable validation code.
+        Code: string
+        /// Gets a human-readable explanation of the failure.
+        Message: string
+    }
 
+/// Validates values supplied to or returned from a Circuit contract.
 type IContractValidator<'T> =
+    /// Validates a value and returns zero or more issues.
     abstract Validate: value: 'T -> IReadOnlyList<ValidationIssue>
 
 type private BoundedCache<'K, 'V when 'K: equality>(capacity: int) =
@@ -252,6 +266,10 @@ type internal DataAnnotationsValidator<'T>(namingPolicy: JsonNamingPolicy) =
         member _.Validate(value: 'T) =
             ValidationTraversal.validate namingPolicy value
 
+/// Describes the serialized shape and validators for a public contract type.
+/// <remarks>
+/// Every contract automatically includes a DataAnnotations-based validator derived from the configured JSON naming policy.
+/// </remarks>
 [<Sealed>]
 type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidator<'T>[]) =
     let validatorSnapshot =
@@ -262,10 +280,18 @@ type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidat
 
     let validatorView = ReadOnlyCollection(validatorSnapshot)
 
+    /// Gets the CLR type represented by the contract.
     member _.ValueType = typeof<'T>
+
+    /// Gets the generated JSON Schema for the contract.
     member _.Schema = schema
+
+    /// Gets the validators that will run for this contract.
     member _.Validators = validatorView :> IReadOnlyList<IContractValidator<'T>>
 
+    /// Validates a value against all configured validators.
+    /// <param name="value">The value to validate.</param>
+    /// <returns>The collected validation issues, or an empty list when validation succeeds.</returns>
     member _.Validate(value: 'T) =
         let issues = ResizeArray<ValidationIssue>()
 
@@ -284,6 +310,12 @@ type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidat
 
         issues.ToArray() :> IReadOnlyList<ValidationIssue>
 
+    /// Creates a contract using the supplied serializer options and custom validators.
+    /// <param name="jsonOptions">The JSON serializer options that define the public wire shape.</param>
+    /// <param name="validators">Additional validators to append after Circuit's built-in DataAnnotations validator.</param>
+    /// <returns>The created contract.</returns>
+    /// <exception cref="T:System.ArgumentNullException"><paramref name="jsonOptions" /> or <paramref name="validators" /> is <see langword="null" />.</exception>
+    /// <exception cref="T:System.ArgumentException"><paramref name="validators" /> contains a <see langword="null" /> entry.</exception>
     static member Create(jsonOptions: JsonSerializerOptions, validators: IEnumerable<IContractValidator<'T>>) =
         if isNull jsonOptions then
             nullArg "jsonOptions"

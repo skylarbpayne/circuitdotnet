@@ -1,0 +1,58 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "metadata": [
+    {
+      "src": [
+        {
+          "cwd": ".",
+          "files": [
+            "src/Circuit.Core/bin/Release/net10.0/Circuit.Core.dll",
+            "src/Circuit.FSharp/bin/Release/net10.0/Circuit.FSharp.dll",
+            "src/Circuit/bin/Release/net10.0/Circuit.dll",
+            "src/Circuit.MicrosoftAgentFramework/bin/Release/net10.0/Circuit.MicrosoftAgentFramework.dll",
+            "src/Circuit.Testing/bin/Release/net10.0/Circuit.Testing.dll"
+          ]
+        }
+      ],
+      "dest": "api",
+      "disableGitFeatures": true,
+      "disableDefaultFilter": true,
+      "shouldSkipMarkup": true
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [
+          "README.md",
+          "toc.yml",
+          "api/index.md",
+          "api/**.yml",
+          "api/**/toc.yml",
+          "docs/**/*.md",
+          "docs/**/toc.yml"
+        ]
+      }
+    ],
+    "resource": [
+      {
+        "files": [
+          "tests/Circuit.Interop.Tests/DocumentationExamples/**",
+          "tests/Circuit.FSharp.Tests/DocumentationExamples/**",
+          "samples/TicketTriage.Shared/**"
+        ]
+      }
+    ],
+    "dest": "_site",
+    "template": [
+      "default",
+      "modern"
+    ],
+    "globalMetadata": {
+      "_appTitle": "Circuit",
+      "_appName": "Circuit",
+      "_enableSearch": true
+    },
+    "markdownEngineName": "markdig"
+  }
+}

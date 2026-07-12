@@ -4,7 +4,7 @@
     <PackageId>CircuitDotNet</PackageId>
     <Description>Primary C# Circuit package for typed composition in agentic .NET applications.</Description>
     <PackageTags>circuit;agents;dotnet;csharp</PackageTags>
-    <NoWarn>$(NoWarn);CS1591;RS0016;RS0017;RS0037</NoWarn>
+    <NoWarn>$(NoWarn);RS0016;RS0017;RS0037</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

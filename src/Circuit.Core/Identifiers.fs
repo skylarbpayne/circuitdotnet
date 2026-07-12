@@ -13,23 +13,33 @@ module private IdentifierRules =
     let semanticVersionPattern =
         Regex("^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", RegexOptions.CultureInvariant)
 
+/// Identifies a single run with a stable, opaque 32-character lowercase hexadecimal value.
 [<Struct; CustomEquality; CustomComparison>]
 type RunId =
     private
     | RunId of string
 
+    /// Gets the raw run identifier value.
     member this.Value =
         let (RunId value) = this
         value
 
+    /// Creates a new random run identifier.
     static member New() = RunId(Guid.NewGuid().ToString("N"))
 
+    /// Parses an existing run identifier.
+    /// <param name="value">The exact 32-character lowercase hexadecimal identifier.</param>
+    /// <exception cref="T:System.ArgumentException"><paramref name="value" /> is not a valid run identifier.</exception>
     static member Parse(value: string) =
         if isNull value || not (IdentifierRules.runIdPattern.IsMatch value) then
             invalidArg "value" "Run IDs must be 32 lowercase hexadecimal characters."
 
         RunId value
 
+    /// Attempts to parse an existing run identifier.
+    /// <param name="value">The candidate identifier.</param>
+    /// <param name="result">Receives the parsed identifier when successful.</param>
+    /// <returns><see langword="true" /> when parsing succeeds; otherwise <see langword="false" />.</returns>
     static member TryParse(value: string, result: byref<RunId>) =
         if isNull value || not (IdentifierRules.runIdPattern.IsMatch value) then
             result <- Unchecked.defaultof<RunId>
@@ -57,15 +67,24 @@ type RunId =
         member this.CompareTo(other: RunId) =
             StringComparer.Ordinal.Compare(this.Value, other.Value)
 
+/// Identifies a versioned public definition such as an agent, tool, signature, or workflow.
+/// <remarks>
+/// Circuit definition identifiers are intentionally restrictive so they remain predictable in public APIs,
+/// telemetry, and serialized checkpoints.
+/// </remarks>
 [<Struct; CustomEquality; CustomComparison>]
 type DefinitionId =
     private
     | DefinitionId of string
 
+    /// Gets the raw definition identifier value.
     member this.Value =
         let (DefinitionId value) = this
         value
 
+    /// Creates a validated definition identifier.
+    /// <param name="value">A lowercase identifier starting with a letter and containing up to 128 characters.</param>
+    /// <exception cref="T:System.ArgumentException"><paramref name="value" /> is not a valid definition identifier.</exception>
     static member Create(value: string) =
         if isNull value || not (IdentifierRules.definitionIdPattern.IsMatch value) then
             invalidArg
@@ -74,6 +93,10 @@ type DefinitionId =
 
         DefinitionId value
 
+    /// Attempts to create a validated definition identifier.
+    /// <param name="value">The candidate identifier.</param>
+    /// <param name="result">Receives the parsed identifier when successful.</param>
+    /// <returns><see langword="true" /> when the identifier is valid; otherwise <see langword="false" />.</returns>
     static member TryCreate(value: string, result: byref<DefinitionId>) =
         if isNull value || not (IdentifierRules.definitionIdPattern.IsMatch value) then
             result <- Unchecked.defaultof<DefinitionId>
@@ -102,11 +125,14 @@ type DefinitionId =
         member this.CompareTo(other: DefinitionId) =
             StringComparer.Ordinal.Compare(this.Value, other.Value)
 
+/// Represents an exact semantic version in <c>major.minor.patch</c> form.
+/// <remarks>Pre-release labels and build metadata are intentionally unsupported.</remarks>
 [<Struct; CustomEquality; CustomComparison>]
 type SemanticVersion =
     private
     | SemanticVersion of Version
 
+    /// Gets the underlying three-part <see cref="T:System.Version" /> value.
     member this.Value =
         let (SemanticVersion value) = this
         value
@@ -137,11 +163,18 @@ type SemanticVersion =
                 else
                     ValueNone
 
+    /// Parses an exact three-part semantic version.
+    /// <param name="value">The version string in <c>major.minor.patch</c> form.</param>
+    /// <exception cref="T:System.ArgumentException"><paramref name="value" /> is not a supported semantic version.</exception>
     static member Parse(value: string) =
         match SemanticVersion.TryParseParts value with
         | ValueSome(major, minor, patch) -> SemanticVersion(Version(major, minor, patch))
         | ValueNone -> invalidArg "value" "Semantic versions must use the exact major.minor.patch format."
 
+    /// Attempts to parse an exact three-part semantic version.
+    /// <param name="value">The candidate version string.</param>
+    /// <param name="result">Receives the parsed version when successful.</param>
+    /// <returns><see langword="true" /> when parsing succeeds; otherwise <see langword="false" />.</returns>
     static member TryParse(value: string, result: byref<SemanticVersion>) =
         match SemanticVersion.TryParseParts value with
         | ValueSome(major, minor, patch) ->

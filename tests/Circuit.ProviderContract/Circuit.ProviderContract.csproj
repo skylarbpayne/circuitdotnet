@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <EnableProviderPackages Condition="'$(EnableProviderPackages)' == ''">false</EnableProviderPackages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="ContractRunner.cs" />
+    <Compile Include="Models.cs" />
+    <Compile Include="Providers/ProviderFactory.cs" />
+    <Compile Include="Providers/OpenAIProviderFactory.Disabled.cs" Condition="'$(EnableProviderPackages)' != 'true'" />
+    <Compile Include="Providers/OpenAIProviderFactory.Enabled.cs" Condition="'$(EnableProviderPackages)' == 'true'" />
+    <Compile Include="Providers/AzureOpenAIProviderFactory.Disabled.cs" Condition="'$(EnableProviderPackages)' != 'true'" />
+    <Compile Include="Providers/AzureOpenAIProviderFactory.Enabled.cs" Condition="'$(EnableProviderPackages)' == 'true'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Circuit/Circuit.csproj" />
+    <ProjectReference Include="../../src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.InMemory" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(EnableProviderPackages)' == 'true'">
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="OpenAI" />
+    <PackageReference Include="Azure.AI.OpenAI" />
+    <PackageReference Include="Azure.AI.Extensions.OpenAI" />
+  </ItemGroup>
+</Project>

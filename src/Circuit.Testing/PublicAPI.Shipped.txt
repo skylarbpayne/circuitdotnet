@@ -1,0 +1,79 @@
+#nullable enable
+F:Circuit.Testing.ScriptedCallKind.Run = 0
+F:Circuit.Testing.ScriptedCallKind.Streaming = 1
+F:Circuit.Testing.ScriptedResponse.Tags.Failure = 3
+F:Circuit.Testing.ScriptedResponse.Tags.OutputJson = 0
+F:Circuit.Testing.ScriptedResponse.Tags.OutputValue = 1
+F:Circuit.Testing.ScriptedResponse.Tags.Stream = 2
+F:Circuit.Testing.ScriptedResponse.Tags.Throw = 4
+F:Circuit.Testing.ScriptedResponse.Tags.WaitForCancellation = 5
+M:Circuit.Testing.RecordingRunObserver.#ctor()
+M:Circuit.Testing.RecordingRunObserver.Clear()~System.Void
+M:Circuit.Testing.RunAssertions.AssertMonotonicSequence(System.Collections.Generic.IEnumerable{Circuit.AgentRunEvent{``0}})~System.Void
+M:Circuit.Testing.RunAssertions.AssertMonotonicSequence(System.Collections.Generic.IEnumerable{Circuit.Core.RunEvent{``0}})~System.Void
+M:Circuit.Testing.RunAssertions.AssertOperationOrder(System.Collections.Generic.IEnumerable{Circuit.Testing.RecordedObserverEvent},System.String[])~System.Void
+M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.AgentRunEvent{``0}},System.Int32)~System.Void
+M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.Core.RunEvent{``0}},System.Int32)~System.Void
+M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.Testing.RecordedObserverEvent},System.Int32)~System.Void
+M:Circuit.Testing.ScriptedResponseExhaustedException.#ctor(System.String)
+M:Circuit.Testing.ScriptedResponses.Failure(Circuit.Core.CircuitFailure)~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.OutputJson(System.String)~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.OutputValue(System.Object)~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.Stream(System.Collections.Generic.IEnumerable{System.String})~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.Throw(System.Exception)~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.WaitForCancellation()~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedRuntime.#ctor(System.Collections.Generic.IEnumerable{Circuit.Testing.ScriptedResponse})
+M:Circuit.Testing.TestFailures.Create(Circuit.Core.CircuitFailureCode,System.String)~Circuit.Core.CircuitFailure
+M:Circuit.Testing.TestFailures.Create(Circuit.Core.CircuitFailureCode,System.String,System.String,System.String,System.String,System.Exception)~Circuit.Core.CircuitFailure
+P:Circuit.Testing.RecordedCall.AgentId~System.String
+P:Circuit.Testing.RecordedCall.AgentName~System.String
+P:Circuit.Testing.RecordedCall.AgentVersion~System.String
+P:Circuit.Testing.RecordedCall.InputJson~System.String
+P:Circuit.Testing.RecordedCall.InputSchemaJson~System.String
+P:Circuit.Testing.RecordedCall.Kind~Circuit.Testing.ScriptedCallKind
+P:Circuit.Testing.RecordedCall.OptionsJson~System.String
+P:Circuit.Testing.RecordedCall.OutputSchemaJson~System.String
+P:Circuit.Testing.RecordedCall.RunId~System.String
+P:Circuit.Testing.RecordedCall.SignatureId~System.String
+P:Circuit.Testing.RecordedCall.SignatureVersion~System.String
+P:Circuit.Testing.RecordedObserverEvent.ApprovalRequestId~System.String
+P:Circuit.Testing.RecordedObserverEvent.FailureCode~System.String
+P:Circuit.Testing.RecordedObserverEvent.Kind~Circuit.AgentRunEventKind
+P:Circuit.Testing.RecordedObserverEvent.OperationId~System.String
+P:Circuit.Testing.RecordedObserverEvent.OperationKind~Circuit.RunOperationKind
+P:Circuit.Testing.RecordedObserverEvent.OperationName~System.String
+P:Circuit.Testing.RecordedObserverEvent.Repaired~System.Boolean
+P:Circuit.Testing.RecordedObserverEvent.RunId~System.String
+P:Circuit.Testing.RecordedObserverEvent.Timestamp~System.DateTimeOffset
+P:Circuit.Testing.RecordingRunObserver.Events~System.Collections.Generic.IReadOnlyList{Circuit.Testing.RecordedObserverEvent}
+P:Circuit.Testing.ScriptedResponse.Failure.Item~Circuit.Core.CircuitFailure
+P:Circuit.Testing.ScriptedResponse.IsFailure~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsOutputJson~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsOutputValue~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsStream~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsThrow~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsWaitForCancellation~System.Boolean
+P:Circuit.Testing.ScriptedResponse.OutputJson.Item~System.String
+P:Circuit.Testing.ScriptedResponse.OutputValue.Item~System.Object
+P:Circuit.Testing.ScriptedResponse.Stream.Item~Microsoft.FSharp.Collections.FSharpList{System.String}
+P:Circuit.Testing.ScriptedResponse.Tag~System.Int32
+P:Circuit.Testing.ScriptedResponse.Throw.Item~System.Exception
+P:Circuit.Testing.ScriptedResponse.WaitForCancellation~Circuit.Testing.ScriptedResponse
+P:Circuit.Testing.ScriptedRuntime.Calls~System.Collections.Generic.IReadOnlyList{Circuit.Testing.RecordedCall}
+P:Circuit.Testing.ScriptedRuntime.RemainingResponses~System.Int32
+T:Circuit.Testing.RecordedCall
+T:Circuit.Testing.RecordedObserverEvent
+T:Circuit.Testing.RecordingRunObserver
+T:Circuit.Testing.RunAssertions
+T:Circuit.Testing.ScriptedCallKind
+T:Circuit.Testing.ScriptedResponse
+T:Circuit.Testing.ScriptedResponse.Failure
+T:Circuit.Testing.ScriptedResponse.OutputJson
+T:Circuit.Testing.ScriptedResponse.OutputValue
+T:Circuit.Testing.ScriptedResponse.Stream
+T:Circuit.Testing.ScriptedResponse.Tags
+T:Circuit.Testing.ScriptedResponse.Throw
+T:Circuit.Testing.ScriptedResponseExhaustedException
+T:Circuit.Testing.ScriptedResponses
+T:Circuit.Testing.ScriptedRuntime
+T:Circuit.Testing.TestFailures

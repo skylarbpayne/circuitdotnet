@@ -17,7 +17,13 @@ module internal MafStreaming =
     [<Literal>]
     let StreamBufferCapacity = 64
 
-    let private createWrappedResponseFormat<'Input, 'Output> (signature: Signature<'Input, 'Output>) =
+    let internal tryGetCallId (callId: string) =
+        if String.IsNullOrWhiteSpace callId then
+            ValueNone
+        else
+            ValueSome callId
+
+    let internal createWrappedResponseFormat<'Input, 'Output> (signature: Signature<'Input, 'Output>) =
         let responseFormat =
             ChatResponseFormat.ForJsonSchema<'Output>(
                 signature.JsonSerializerOptions,
@@ -45,7 +51,7 @@ module internal MafStreaming =
             :> ChatResponseFormat,
             true
 
-    let private deserializeOutput<'Input, 'Output>
+    let internal deserializeOutput<'Input, 'Output>
         (signature: Signature<'Input, 'Output>)
         (wrapped: bool)
         (text: string)
@@ -70,13 +76,13 @@ module internal MafStreaming =
 
         value
 
-    let private tryGetOperationId (toolCall: ToolCallContent) =
-        if isNull toolCall || String.IsNullOrWhiteSpace toolCall.CallId then
+    let internal tryGetOperationId (toolCall: ToolCallContent) =
+        if isNull toolCall then
             ValueNone
         else
-            ValueSome toolCall.CallId
+            tryGetCallId toolCall.CallId
 
-    let private trySerializeApprovalArguments
+    let internal trySerializeApprovalArguments
         (jsonOptions: JsonSerializerOptions)
         (arguments: IDictionary<string, obj>)
         =
@@ -88,7 +94,7 @@ module internal MafStreaming =
             with _ ->
                 ValueNone
 
-    let private createApprovalRequest (jsonOptions: JsonSerializerOptions) (approval: ToolApprovalRequestContent) =
+    let internal createApprovalRequest (jsonOptions: JsonSerializerOptions) (approval: ToolApprovalRequestContent) =
         match approval.ToolCall with
         | :? FunctionCallContent as functionCall ->
             let toolName =
@@ -104,7 +110,34 @@ module internal MafStreaming =
             )
         | _ -> ApprovalRequest(approval.RequestId, "unknown-tool-call", ValueNone)
 
-    let private tryUpdateUsage
+    type internal StreamingMappedEvent =
+        | ToolStarted of string voption
+        | ToolCompleted of string voption
+        | ApprovalRequested of string voption * ApprovalRequest
+
+    [<RequireQualifiedAccess>]
+    module internal StreamingMappedEvent =
+        let tryMapContent (jsonOptions: JsonSerializerOptions) (content: AIContent) =
+            match content with
+            | :? FunctionCallContent as functionCall ->
+                ValueSome(StreamingMappedEvent.ToolStarted(tryGetCallId functionCall.CallId))
+            | :? FunctionResultContent as functionResult ->
+                ValueSome(StreamingMappedEvent.ToolCompleted(tryGetCallId functionResult.CallId))
+            | :? ToolApprovalRequestContent as approval ->
+                ValueSome(
+                    StreamingMappedEvent.ApprovalRequested(
+                        tryGetOperationId approval.ToolCall,
+                        createApprovalRequest jsonOptions approval
+                    )
+                )
+            | _ -> ValueNone
+
+        let isTerminal kind =
+            kind = RunEventKind.RunCompleted || kind = RunEventKind.RunFailed
+
+        let shouldSuppressTerminal terminalEventWritten kind = terminalEventWritten && isTerminal kind
+
+    let internal tryUpdateUsage
         (usageDetails: byref<UsageDetails>)
         (usage: byref<RunUsage>)
         (update: AgentResponseUpdate)
@@ -132,6 +165,36 @@ module internal MafStreaming =
             let! repaired = secondaryClient.GetResponseAsync(messages, chatOptions, cancellationToken)
             return repaired.Text, repaired.Usage
         }
+
+    let internal decodeFinalOutput<'Input, 'Output>
+        (runId: RunId)
+        (cancellationToken: CancellationToken)
+        (signature: Signature<'Input, 'Output>)
+        (wrapped: bool)
+        (text: string)
+        =
+        try
+            let output = deserializeOutput signature wrapped text
+            let outputIssues = signature.Output.Validate output
+
+            if outputIssues.Count > 0 then
+                Error(MafErrors.validationFailure runId (MafErrors.formatValidationIssues outputIssues))
+            else
+                Ok output
+        with
+        | ex when MafErrors.isCancellationRequested cancellationToken ex ->
+            Error(MafErrors.cancelledFailure runId "The run was cancelled." (ValueSome ex))
+        | ex when MafErrors.isStructuredOutputUnsupported ex ->
+            Error(
+                MafErrors.structuredOutputUnsupportedFailure
+                    runId
+                    "Structured output is not supported for this run."
+                    ValueNone
+                    (ValueSome ex)
+            )
+        | ex when MafErrors.isDecodeFailure ex ->
+            Error(MafErrors.decodeFailure runId "The provider response could not be decoded." ValueNone (ValueSome ex))
+        | ex -> Error(MafErrors.providerFailure runId "The provider request failed." ValueNone (ValueSome ex))
 
     let private createBoundedChannel<'T> () =
         let options = BoundedChannelOptions(StreamBufferCapacity)
@@ -226,6 +289,19 @@ module internal MafStreaming =
                 let startedAt = DateTimeOffset.UtcNow
                 let runContext = runtime.CreateRunContext(runId, agent, signature, runOptions)
 
+                let observerSession =
+                    MafObserver.createAgentRunSession
+                        runtime.RuntimeOptions.Observers
+                        runId
+                        agent.Name
+                        signature.Id
+                        signature.Version
+                        (runtime.ResolveRequestModel agent)
+                        runOptions.Services
+
+                let prompt = ValueSome(runtime.CreatePrompt(agent, signature))
+                let inputPayload = runtime.TrySerializeInputPayload signature input
+
                 let background: Task =
                     task {
                         let mutable sequence = -1L
@@ -246,13 +322,10 @@ module internal MafStreaming =
                             (approval: ApprovalRequest voption)
                             =
                             task {
-                                if
-                                    terminalEventWritten
-                                    && (kind = RunEventKind.RunCompleted || kind = RunEventKind.RunFailed)
-                                then
+                                if StreamingMappedEvent.shouldSuppressTerminal terminalEventWritten kind then
                                     ()
                                 else
-                                    if kind = RunEventKind.RunCompleted || kind = RunEventKind.RunFailed then
+                                    if StreamingMappedEvent.isTerminal kind then
                                         terminalEventWritten <- true
 
                                     sequence <- sequence + 1L
@@ -271,15 +344,77 @@ module internal MafStreaming =
                                         )
 
                                     do!
-                                        MafObserver.notifyEventAsync
-                                            runtime.RuntimeOptions.Observers
-                                            runId
-                                            kind
-                                            operationId
-                                            textDelta
-                                            failure
-                                            approval
-                                            providerToken
+                                        match kind with
+                                        | RunEventKind.RunStarted -> Task.CompletedTask
+                                        | RunEventKind.OutputDelta ->
+                                            MafObserver.notifyRootEventAsync
+                                                observerSession
+                                                kind
+                                                textDelta
+                                                ValueNone
+                                                failure
+                                                approval
+                                                ValueNone
+                                                ValueNone
+                                                false
+                                                ValueNone
+                                                ValueNone
+                                                MafErrors.emptyDiagnosticMetadata
+                                                providerToken
+                                        | RunEventKind.ApprovalRequested ->
+                                            match approval with
+                                            | ValueSome approvalValue ->
+                                                let approvalOperationId =
+                                                    match operationId with
+                                                    | ValueSome value -> value
+                                                    | ValueNone -> approvalValue.RequestId
+
+                                                MafObserver.notifyApprovalRequestedAsync
+                                                    observerSession
+                                                    approvalOperationId
+                                                    approvalValue.ToolName
+                                                    approvalValue
+                                                    providerToken
+                                            | ValueNone -> Task.CompletedTask
+                                        | RunEventKind.RunCompleted ->
+                                            MafObserver.notifyRootEventAsync
+                                                observerSession
+                                                kind
+                                                ValueNone
+                                                (match value with
+                                                 | ValueSome output ->
+                                                     runtime.TrySerializeOutputPayload signature output
+                                                 | ValueNone -> ValueNone)
+                                                failure
+                                                approval
+                                                (ValueSome startedAt)
+                                                (ValueSome DateTimeOffset.UtcNow)
+                                                repaired
+                                                (ValueSome usage)
+                                                resultSession
+                                                diagnosticMetadata
+                                                providerToken
+                                        | RunEventKind.RunFailed ->
+                                            MafObserver.notifyRootEventAsync
+                                                observerSession
+                                                kind
+                                                ValueNone
+                                                ValueNone
+                                                failure
+                                                approval
+                                                (ValueSome startedAt)
+                                                (ValueSome DateTimeOffset.UtcNow)
+                                                repaired
+                                                (ValueSome usage)
+                                                resultSession
+                                                diagnosticMetadata
+                                                providerToken
+                                        | RunEventKind.ToolStarted
+                                        | RunEventKind.ToolCompleted
+                                        | RunEventKind.StepStarted
+                                        | RunEventKind.StepCompleted
+                                        | RunEventKind.IntermediateOutput
+                                        | _ -> Task.CompletedTask
 
                                     let writeToken =
                                         match kind with
@@ -308,9 +443,10 @@ module internal MafStreaming =
                         try
                             do!
                                 MafObserver.notifyStartedAsync
-                                    runtime.RuntimeOptions.Observers
-                                    runContext
+                                    observerSession
                                     startedAt
+                                    prompt
+                                    inputPayload
                                     providerToken
 
                             do! emit RunEventKind.RunStarted ValueNone ValueNone ValueNone ValueNone ValueNone
@@ -474,20 +610,12 @@ module internal MafStreaming =
                                                                                             ValueNone
 
                                                                                 for content in update.Contents do
-                                                                                    match content with
-                                                                                    | :? FunctionCallContent as functionCall ->
-                                                                                        let operationId =
-                                                                                            if
-                                                                                                String
-                                                                                                    .IsNullOrWhiteSpace(
-                                                                                                        functionCall.CallId
-                                                                                                    )
-                                                                                            then
-                                                                                                ValueNone
-                                                                                            else
-                                                                                                ValueSome
-                                                                                                    functionCall.CallId
-
+                                                                                    match
+                                                                                        StreamingMappedEvent.tryMapContent
+                                                                                            jsonOptions
+                                                                                            content
+                                                                                    with
+                                                                                    | ValueSome(StreamingMappedEvent.ToolStarted operationId) ->
                                                                                         do!
                                                                                             emit
                                                                                                 RunEventKind.ToolStarted
@@ -496,19 +624,7 @@ module internal MafStreaming =
                                                                                                 ValueNone
                                                                                                 ValueNone
                                                                                                 ValueNone
-                                                                                    | :? FunctionResultContent as functionResult ->
-                                                                                        let operationId =
-                                                                                            if
-                                                                                                String
-                                                                                                    .IsNullOrWhiteSpace(
-                                                                                                        functionResult.CallId
-                                                                                                    )
-                                                                                            then
-                                                                                                ValueNone
-                                                                                            else
-                                                                                                ValueSome
-                                                                                                    functionResult.CallId
-
+                                                                                    | ValueSome(StreamingMappedEvent.ToolCompleted operationId) ->
                                                                                         do!
                                                                                             emit
                                                                                                 RunEventKind.ToolCompleted
@@ -517,21 +633,18 @@ module internal MafStreaming =
                                                                                                 ValueNone
                                                                                                 ValueNone
                                                                                                 ValueNone
-                                                                                    | :? ToolApprovalRequestContent as approval ->
+                                                                                    | ValueSome(StreamingMappedEvent.ApprovalRequested(operationId,
+                                                                                                                                       approvalRequest)) ->
                                                                                         do!
                                                                                             emit
                                                                                                 RunEventKind.ApprovalRequested
-                                                                                                (tryGetOperationId
-                                                                                                    approval.ToolCall)
+                                                                                                operationId
                                                                                                 ValueNone
                                                                                                 ValueNone
                                                                                                 ValueNone
-                                                                                                (ValueSome(
-                                                                                                    createApprovalRequest
-                                                                                                        jsonOptions
-                                                                                                        approval
-                                                                                                ))
-                                                                                    | _ -> ()
+                                                                                                (ValueSome
+                                                                                                    approvalRequest)
+                                                                                    | ValueNone -> ()
                                                                     finally
                                                                         streamEnumerator
                                                                             .DisposeAsync()
@@ -611,69 +724,12 @@ module internal MafStreaming =
                                                                         | Ok repairedText ->
                                                                             finalText <- repairedText
 
-                                                                            let decodedResult =
-                                                                                try
-                                                                                    Ok(
-                                                                                        deserializeOutput
-                                                                                            signature
-                                                                                            wrapped
-                                                                                            finalText
-                                                                                    )
-                                                                                with
-                                                                                | ex when
-                                                                                    MafErrors.isCancellationRequested
-                                                                                        providerToken
-                                                                                        ex
-                                                                                    ->
-                                                                                    Error(
-                                                                                        MafErrors.cancelledFailure
-                                                                                            runId
-                                                                                            "The run was cancelled."
-                                                                                            (ValueSome ex)
-                                                                                    )
-                                                                                | ex when
-                                                                                    MafErrors.isStructuredOutputUnsupported
-                                                                                        ex
-                                                                                    ->
-                                                                                    Error(
-                                                                                        MafErrors.structuredOutputUnsupportedFailure
-                                                                                            runId
-                                                                                            "Structured output is not supported for this run."
-                                                                                            ValueNone
-                                                                                            (ValueSome ex)
-                                                                                    )
-                                                                                | ex when MafErrors.isDecodeFailure ex ->
-                                                                                    Error(
-                                                                                        MafErrors.decodeFailure
-                                                                                            runId
-                                                                                            "The provider response could not be decoded."
-                                                                                            ValueNone
-                                                                                            (ValueSome ex)
-                                                                                    )
-                                                                                | ex ->
-                                                                                    Error(
-                                                                                        MafErrors.providerFailure
-                                                                                            runId
-                                                                                            "The provider request failed."
-                                                                                            ValueNone
-                                                                                            (ValueSome ex)
-                                                                                    )
-
-                                                                            match decodedResult with
-                                                                            | Error failure -> Error failure
-                                                                            | Ok output ->
-                                                                                let outputIssues =
-                                                                                    signature.Output.Validate output
-
-                                                                                if outputIssues.Count > 0 then
-                                                                                    Error(
-                                                                                        MafErrors.validationFailure
-                                                                                            runId
-                                                                                            (MafErrors.formatValidationIssues
-                                                                                                outputIssues)
-                                                                                    )
-                                                                                else
-                                                                                    Ok output
+                                                                            decodeFinalOutput
+                                                                                runId
+                                                                                providerToken
+                                                                                signature
+                                                                                wrapped
+                                                                                finalText
                                                                 with
                                                                 | ex when
                                                                     MafErrors.isCancellationRequested providerToken ex
@@ -719,27 +775,7 @@ module internal MafStreaming =
 
                                                             return ()
                         finally
-                            let observation =
-                                MafRunObservation(
-                                    runContext,
-                                    startedAt,
-                                    DateTimeOffset.UtcNow,
-                                    repaired,
-                                    usage,
-                                    resultSession,
-                                    failureForObservers,
-                                    diagnosticMetadata
-                                )
-
-                            try
-                                MafObserver.notifyCompletedAsync
-                                    runtime.RuntimeOptions.Observers
-                                    observation
-                                    providerToken
-                                |> fun task -> task.GetAwaiter().GetResult()
-                            with _ ->
-                                ()
-
+                            MafObserver.unregisterSession observerSession
                             channel.Writer.TryComplete() |> ignore
                     }
 

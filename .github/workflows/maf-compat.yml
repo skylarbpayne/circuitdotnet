@@ -1,0 +1,99 @@
+name: MAF compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  maf-compat:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.301
+
+      - name: Resolve newest supported MAF 1.x versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          packages = {
+              'microsoft.agents.ai': 'maf_version',
+              'microsoft.agents.ai.workflows': 'maf_workflows_version',
+          }
+
+          for package, output_name in packages.items():
+              with urllib.request.urlopen(f'https://api.nuget.org/v3-flatcontainer/{package}/index.json') as response:
+                  versions = json.load(response)['versions']
+
+              stable = [version for version in versions if re.fullmatch(r'1\.\d+\.\d+', version)]
+              latest = stable[-1]
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+                  handle.write(f'{output_name}={latest}\n')
+          PY
+
+      - name: Restore with MAF compatibility overrides
+        run: >-
+          dotnet restore CircuitDotNet.slnx --force-evaluate
+          -p:MicrosoftAgentsAIVersion=${{ steps.versions.outputs.maf_version }}
+          -p:MicrosoftAgentsAIWorkflowsVersion=${{ steps.versions.outputs.maf_workflows_version }}
+
+      - name: Run MAF adapter compatibility tests
+        id: tests
+        continue-on-error: true
+        run: >-
+          dotnet test tests/Circuit.MicrosoftAgentFramework.Tests/Circuit.MicrosoftAgentFramework.Tests.fsproj
+          -c Release
+          --no-restore
+          --logger "trx;LogFileName=maf-compat.trx"
+          -p:MicrosoftAgentsAIVersion=${{ steps.versions.outputs.maf_version }}
+          -p:MicrosoftAgentsAIWorkflowsVersion=${{ steps.versions.outputs.maf_workflows_version }}
+
+      - name: Write compatibility report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/reports
+          status="${{ steps.tests.outcome }}"
+          cat > artifacts/reports/maf-compat.md <<EOF
+          # MAF compatibility report
+
+          - Microsoft.Agents.AI: `${{ steps.versions.outputs.maf_version }}`
+          - Microsoft.Agents.AI.Workflows: `${{ steps.versions.outputs.maf_workflows_version }}`
+          - Test project: `tests/Circuit.MicrosoftAgentFramework.Tests/Circuit.MicrosoftAgentFramework.Tests.fsproj`
+          - Result: `${status}`
+
+          This workflow only uploads the compatibility report and test results. It does not open issues automatically in v1.
+          EOF
+
+      - name: Upload compatibility artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maf-compat-report
+          path: |
+            artifacts/reports/maf-compat.md
+            tests/Circuit.MicrosoftAgentFramework.Tests/TestResults/maf-compat.trx
+          if-no-files-found: warn
+
+      - name: Fail if compatibility checks failed
+        if: steps.tests.outcome == 'failure'
+        run: exit 1

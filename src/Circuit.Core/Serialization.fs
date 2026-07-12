@@ -8,7 +8,13 @@ open System.Text.Json
 open System.Text.Json.Serialization
 open System.Text.Json.Serialization.Metadata
 
+/// Helpers for the JSON defaults Circuit uses in public contracts and persisted state.
 module CircuitJson =
+    /// Creates the default serializer options used by Circuit contracts.
+    /// <remarks>
+    /// The returned options use web defaults, case-sensitive property matching, disallow unmapped members,
+    /// and serialize enums as camel-case strings.
+    /// </remarks>
     let createOptions () =
         let options = JsonSerializerOptions(JsonSerializerDefaults.Web)
         options.PropertyNameCaseInsensitive <- false
@@ -43,9 +49,6 @@ module internal SerializationPolicy =
             tryFingerprintJsonStringEnumConverter (value :?> JsonStringEnumConverter)
         elif value :? IJsonTypeInfoResolver then
             tryFingerprintResolver (value :?> IJsonTypeInfoResolver)
-        elif value :? Type then
-            let valueType = value :?> Type
-            ValueSome $"type:{encode valueType.AssemblyQualifiedName}"
         elif value :? System.Text.Encodings.Web.JavaScriptEncoder then
             if obj.ReferenceEquals(value, JavaScriptEncoder.Default) then
                 ValueSome "encoder:default"
@@ -67,16 +70,7 @@ module internal SerializationPolicy =
                 ValueSome $"seq:{encode joined}"
             else
                 ValueNone
-        elif
-            value.GetType().IsPrimitive
-            || value.GetType().IsEnum
-            || value :? decimal
-            || value :? DateTime
-            || value :? DateTimeOffset
-            || value :? TimeSpan
-            || value :? Guid
-            || value :? Uri
-        then
+        elif value.GetType().IsPrimitive || value.GetType().IsEnum then
             ValueSome
                 $"{value.GetType().AssemblyQualifiedName}:{encode (Convert.ToString(value, CultureInfo.InvariantCulture))}"
         else
@@ -100,24 +94,8 @@ module internal SerializationPolicy =
                     match tryFingerprintJsonNamingPolicy (value :?> JsonNamingPolicy) with
                     | ValueSome fingerprint -> fieldFingerprints.Add(encode field.Name + encode fingerprint)
                     | ValueNone -> stable <- false
-                | value when field.FieldType = typeof<string> ->
-                    fieldFingerprints.Add(encode field.Name + encode $"string:{encode (value :?> string)}")
                 | value when field.FieldType.IsEnum ->
                     fieldFingerprints.Add(encode field.Name + encode $"{field.FieldType.AssemblyQualifiedName}:{value}")
-                | value when field.FieldType = typeof<bool> ->
-                    fieldFingerprints.Add(encode field.Name + encode (if value :?> bool then "true" else "false"))
-                | value when field.FieldType.IsPrimitive ->
-                    fieldFingerprints.Add(
-                        encode field.Name
-                        + encode
-                            $"{field.FieldType.AssemblyQualifiedName}:{encode (Convert.ToString(value, CultureInfo.InvariantCulture))}"
-                    )
-                | value when field.FieldType = typeof<decimal> ->
-                    fieldFingerprints.Add(
-                        encode field.Name
-                        + encode
-                            $"{field.FieldType.AssemblyQualifiedName}:{encode (Convert.ToString(value, CultureInfo.InvariantCulture))}"
-                    )
                 | _ -> stable <- false
 
             if stable then
