@@ -13,9 +13,20 @@ type SensitiveDataMode =
     | Redact = 1
 
 [<Sealed>]
-type CircuitSession internal (id: string, metadata: IReadOnlyDictionary<string, string>) =
+type CircuitSession
+    internal
+    (
+        id: string,
+        metadata: IReadOnlyDictionary<string, string>,
+        adapterId: string voption,
+        definitionFingerprint: string voption,
+        providerSession: obj voption
+    ) =
     member _.Id = id
     member _.Metadata = metadata
+    member internal _.AdapterId = adapterId
+    member internal _.DefinitionFingerprint = definitionFingerprint
+    member internal _.ProviderSession = providerSession
 
 [<Sealed>]
 type RunUsage internal (inputTokens: int, outputTokens: int) =
@@ -116,3 +127,39 @@ type RunResult<'T>
     member _.Session = session
     member _.StartedAt = startedAt
     member _.CompletedAt = completedAt
+
+type RunEventKind =
+    | RunStarted = 0
+    | OutputDelta = 1
+    | ToolStarted = 2
+    | ToolCompleted = 3
+    | ApprovalRequested = 4
+    | StepStarted = 5
+    | StepCompleted = 6
+    | IntermediateOutput = 7
+    | RunCompleted = 8
+    | RunFailed = 9
+
+[<Sealed>]
+type RunEvent<'T>
+    internal
+    (
+        sequence: int64,
+        runId: RunId,
+        timestamp: DateTimeOffset,
+        kind: RunEventKind,
+        operationId: string voption,
+        textDelta: string voption,
+        value: 'T voption,
+        failure: CircuitFailure voption,
+        approval: ApprovalRequest voption
+    ) =
+    member _.Sequence = sequence
+    member _.RunId = runId
+    member _.Timestamp = timestamp
+    member _.Kind = kind
+    member _.OperationId = operationId
+    member _.TextDelta = textDelta
+    member _.Value = value
+    member _.Failure = failure
+    member _.Approval = approval
