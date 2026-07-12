@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Circuit;
 using Circuit.MicrosoftAgentFramework;
 using Microsoft.Extensions.AI;
@@ -90,6 +91,92 @@ public sealed class SmokeTests
             "1.0.0",
             "Echo",
             (context, input, cancellationToken) => Task.FromResult(new ToolOutput { Message = input.Message }));
+    }
+
+    [Fact]
+    public void agent_run_options_validate_tag_constraints_before_crossing_the_core_boundary()
+    {
+        var toCore = typeof(AgentRunOptions).GetMethod("ToCore", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        static Exception InvokeToCore(MethodInfo toCoreMethod, AgentRunOptions options)
+            => Assert.Throws<TargetInvocationException>(() => toCoreMethod.Invoke(options, null)).InnerException!;
+
+        var tooMany = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary(Enumerable.Range(0, 33).Select(index => new KeyValuePair<string, string>($"tag-{index}", "value")))
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, tooMany)).ParamName);
+
+        var reserved = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("circuit.trace", "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, reserved)).ParamName);
+
+        var longKey = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new(new string('k', 65), "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, longKey)).ParamName);
+
+        var longValue = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("team", new string('v', 257))])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, longValue)).ParamName);
+
+        var blankKey = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new(" ", "value")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, blankKey)).ParamName);
+
+        var nullValue = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new KeyValuePair<string, string>("team", null!)])
+        };
+        Assert.Equal("tags", ((ArgumentNullException)InvokeToCore(toCore, nullValue)).ParamName);
+
+        var duplicate = new AgentRunOptions
+        {
+            Tags = new EnumeratedTagDictionary([new("team", "one"), new("team", "two")])
+        };
+        Assert.Equal("tags", ((ArgumentException)InvokeToCore(toCore, duplicate)).ParamName);
+    }
+
+    [Fact]
+    public void add_tool_validator_preserves_the_original_contract_serializer_options()
+    {
+        var options = Circuit.Core.CircuitJson.createOptions();
+        options.PropertyNamingPolicy = new PrefixNamingPolicy("x_");
+        options.Converters.Clear();
+        options.Converters.Add(new JsonStringEnumConverter(new PrefixNamingPolicy("enum_")));
+        options.MakeReadOnly();
+
+        var input = Circuit.Core.Contract<ToolSchemaCarrier>.Create(options, []);
+        var output = Circuit.Core.Contract<ToolSchemaCarrier>.Create(options, []);
+        var coreTool = Circuit.Core.ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>.Create(
+            "tool.schema",
+            "1.0.0",
+            "Schema",
+            input,
+            output,
+            new Func<Circuit.Core.ToolContext, ToolSchemaCarrier, Task<ToolSchemaCarrier>>((_, value) => Task.FromResult(value)));
+
+        var constructor = typeof(ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(info => info.GetParameters() is [{ ParameterType: var parameterType }] && parameterType == typeof(Circuit.Core.ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>));
+
+        var wrapper = (ToolDefinition<ToolSchemaCarrier, ToolSchemaCarrier>)constructor.Invoke([coreTool]);
+        var withInputValidator = wrapper.AddInputValidator(new NoOpValidator<ToolSchemaCarrier>());
+        var withOutputValidator = wrapper.AddOutputValidator(new NoOpValidator<ToolSchemaCarrier>());
+
+        Assert.Equal(wrapper.InputJsonSchema, withInputValidator.InputJsonSchema);
+        Assert.Equal(wrapper.OutputJsonSchema, withOutputValidator.OutputJsonSchema);
+        Assert.Contains("x_mode", withInputValidator.InputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("enum_ready", withInputValidator.InputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("x_mode", withOutputValidator.OutputJsonSchema, StringComparison.Ordinal);
+        Assert.Contains("enum_ready", withOutputValidator.OutputJsonSchema, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -667,6 +754,68 @@ public sealed class SmokeTests
     {
         [Required]
         public string Message { get; set; } = string.Empty;
+    }
+
+    private sealed class EnumeratedTagDictionary(IEnumerable<KeyValuePair<string, string>> entries) : IReadOnlyDictionary<string, string>
+    {
+        private readonly KeyValuePair<string, string>[] _entries = entries.ToArray();
+
+        public IEnumerator<KeyValuePair<string, string>> GetEnumerator()
+        {
+            foreach (var entry in _entries)
+            {
+                yield return entry;
+            }
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public int Count => _entries.Length;
+
+        public IEnumerable<string> Keys => _entries.Select(static entry => entry.Key);
+
+        public IEnumerable<string> Values => _entries.Select(static entry => entry.Value);
+
+        public bool ContainsKey(string key) => _entries.Any(entry => string.Equals(entry.Key, key, StringComparison.Ordinal));
+
+        public bool TryGetValue(string key, out string value)
+        {
+            foreach (var entry in _entries)
+            {
+                if (string.Equals(entry.Key, key, StringComparison.Ordinal))
+                {
+                    value = entry.Value;
+                    return true;
+                }
+            }
+
+            value = string.Empty;
+            return false;
+        }
+
+        public string this[string key]
+            => TryGetValue(key, out var value) ? value : throw new KeyNotFoundException(key);
+    }
+
+    private sealed class PrefixNamingPolicy(string prefix) : JsonNamingPolicy
+    {
+        public override string ConvertName(string name) => prefix + name.ToLowerInvariant();
+    }
+
+    private sealed class NoOpValidator<T> : IContractValidator<T>
+    {
+        public IReadOnlyList<ValidationIssue> Validate(T value) => [];
+    }
+
+    private enum ToolSchemaMode
+    {
+        Ready,
+    }
+
+    private sealed class ToolSchemaCarrier
+    {
+        [Required]
+        public ToolSchemaMode Mode { get; set; } = ToolSchemaMode.Ready;
     }
 
     private static async Task ConsumeAsync<T>(WorkflowRun<T> run, CancellationToken cancellationToken)

@@ -87,11 +87,9 @@ module private OpenTelemetryRunObserverInternals =
 
     let createMetricTagTemplate (event: RunEventEnvelope) =
         let tags = ResizeArray<KeyValuePair<string, obj>>()
-        maybeAdd tags "gen_ai.agent.name" event.AgentName
         maybeAdd tags "circuit.definition.id" event.DefinitionId
         maybeAdd tags "circuit.definition.version" event.DefinitionVersion
         maybeAdd tags "circuit.operation.kind" (string event.OperationKind)
-        maybeAdd tags "gen_ai.request.model" event.RequestModel
         tags.ToArray()
 
     let createMetricTags (baseTags: KeyValuePair<string, obj>[]) status =

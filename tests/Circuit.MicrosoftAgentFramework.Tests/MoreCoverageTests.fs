@@ -755,6 +755,247 @@ module MoreSkillAndSessionCoverageTests =
         Assert.False(String.IsNullOrWhiteSpace definitionFingerprint)
         Assert.False(String.IsNullOrWhiteSpace bindingFingerprint)
 
+    [<Fact>]
+    let ``definition fingerprints reject delimiter collisions in metadata values`` () =
+        let agentWithEmbeddedMetadata =
+            AgentDefinition.Create(
+                "agent.collision",
+                "1.0.0",
+                "Agent Collision",
+                "Stay stable.",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                seq [ KeyValuePair("alpha", "one\nmetadata=beta=two") ]
+            )
+
+        let agentWithSplitMetadata =
+            AgentDefinition.Create(
+                "agent.collision",
+                "1.0.0",
+                "Agent Collision",
+                "Stay stable.",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                seq [ KeyValuePair("alpha", "one"); KeyValuePair("beta", "two") ]
+            )
+
+        Assert.NotEqual<string>(
+            MafSessionContracts.definitionFingerprint agentWithEmbeddedMetadata,
+            MafSessionContracts.definitionFingerprint agentWithSplitMetadata
+        )
+
+    [<Fact>]
+    let ``session bindings include deterministic collection semantics and reject unsupported enumerables`` () =
+        let runtime =
+            createMafRuntimeWith
+                ignore
+                (new FakeChatClient(
+                    (fun _ _ _ -> Task.FromResult(jsonResponse "unused")),
+                    (fun _ _ _ -> ArrayAsyncEnumerable(Array.empty))
+                ))
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let agent = createAgent "Use skill properties."
+        let signature = createSignature<TestOutput> ()
+
+        let runContextA =
+            runtime.CreateRunContext(
+                RunId.New(),
+                agent,
+                signature,
+                createRunOptions None StructuredOutputPolicy.NativeOnly
+            )
+
+        let runContextB =
+            runtime.CreateRunContext(
+                RunId.New(),
+                agent,
+                signature,
+                createRunOptions None StructuredOutputPolicy.NativeOnly
+            )
+
+        let skillReference =
+            SkillReference.Create("skill.properties", "1.0.0", "Skill properties", SkillSource.CreateCustom())
+
+        let bindingFor runContext properties =
+            ResolvedSkill.Create(skillReference, properties)
+            |> fun skill -> MafSessionContracts.createSessionBinding runContext signature [||] [| skill |]
+
+        let rec createNestedList depth =
+            if depth = 0 then
+                box "leaf"
+            else
+                let list = ResizeArray<obj>()
+                list.Add(createNestedList (depth - 1))
+                box list
+
+        let jsonElement =
+            JsonDocument.Parse("{\"kind\":\"element\",\"value\":1}").RootElement.Clone()
+
+        use jsonDocument = JsonDocument.Parse("{\"kind\":\"document\",\"value\":2}")
+
+        let scalarBindingA =
+            bindingFor runContextA (seq { KeyValuePair("mode", box "alpha") })
+
+        let scalarBindingB =
+            bindingFor runContextA (seq { KeyValuePair("mode", box "beta") })
+
+        let richBindingA =
+            bindingFor
+                runContextA
+                (seq {
+                    KeyValuePair("enabled", box true)
+                    KeyValuePair("glyph", box 'a')
+                    KeyValuePair("comparison", box StringComparison.Ordinal)
+                    KeyValuePair("jsonElement", box jsonElement)
+                    KeyValuePair("jsonDocument", box jsonDocument)
+                })
+
+        let richBindingB =
+            bindingFor
+                runContextA
+                (seq {
+                    KeyValuePair("enabled", box false)
+                    KeyValuePair("glyph", box 'a')
+                    KeyValuePair("comparison", box StringComparison.OrdinalIgnoreCase)
+                    KeyValuePair("jsonElement", box jsonElement)
+                    KeyValuePair("jsonDocument", box jsonDocument)
+                })
+
+        let hashSetBindingA =
+            bindingFor
+                runContextA
+                (seq { KeyValuePair("items", box (HashSet<string>(seq [ "b"; "a" ], StringComparer.Ordinal))) })
+
+        let hashSetBindingB =
+            bindingFor
+                runContextA
+                (seq { KeyValuePair("items", box (HashSet<string>(seq [ "a"; "b" ], StringComparer.Ordinal))) })
+
+        let dictionaryA = Dictionary<string, obj>(StringComparer.Ordinal)
+        dictionaryA.Add("b", box 2)
+        dictionaryA.Add("a", box 1)
+
+        let dictionaryB = Dictionary<string, obj>(StringComparer.Ordinal)
+        dictionaryB.Add("a", box 1)
+        dictionaryB.Add("b", box 2)
+
+        let dictionaryBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box dictionaryA) })
+
+        let dictionaryBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box dictionaryB) })
+
+        let orderedListA = ResizeArray<obj>(seq [ box "a"; box "b" ])
+        let orderedListB = ResizeArray<obj>(seq [ box "b"; box "a" ])
+
+        let orderedListBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box orderedListA) })
+
+        let orderedListBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box orderedListB) })
+
+        let unsupportedEnumerableA = LinkedList<obj>(seq [ box "a"; box "b" ])
+        let unsupportedEnumerableB = LinkedList<obj>(seq [ box "b"; box "a" ])
+
+        let unsupportedBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box unsupportedEnumerableA) })
+
+        let unsupportedBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box unsupportedEnumerableB) })
+
+        let unsupportedBindingC =
+            bindingFor runContextB (seq { KeyValuePair("items", box unsupportedEnumerableA) })
+
+        let nestedUnsupportedDictionaryA = Dictionary<string, obj>(StringComparer.Ordinal)
+        nestedUnsupportedDictionaryA.Add("items", box unsupportedEnumerableA)
+
+        let nestedUnsupportedDictionaryB = Dictionary<string, obj>(StringComparer.Ordinal)
+        nestedUnsupportedDictionaryB.Add("items", box unsupportedEnumerableB)
+
+        let nestedUnsupportedDictionaryBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box nestedUnsupportedDictionaryA) })
+
+        let nestedUnsupportedDictionaryBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box nestedUnsupportedDictionaryB) })
+
+        let nestedUnsupportedSetA = HashSet<obj>(ReferenceEqualityComparer.Instance)
+        nestedUnsupportedSetA.Add(unsupportedEnumerableA :> obj) |> ignore
+
+        let nestedUnsupportedSetB = HashSet<obj>(ReferenceEqualityComparer.Instance)
+        nestedUnsupportedSetB.Add(unsupportedEnumerableB :> obj) |> ignore
+
+        let nestedUnsupportedSetBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box nestedUnsupportedSetA) })
+
+        let nestedUnsupportedSetBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box nestedUnsupportedSetB) })
+
+        let deepBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", createNestedList 33) })
+
+        let deepBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", createNestedList 34) })
+
+        let cyclicA = ResizeArray<obj>()
+        cyclicA.Add(cyclicA :> obj)
+
+        let cyclicB = ResizeArray<obj>()
+        cyclicB.Add(cyclicB :> obj)
+
+        let cyclicBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box cyclicA) })
+
+        let cyclicBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box cyclicB) })
+
+        let largeListA =
+            ResizeArray<obj>(
+                seq {
+                    for value in 0..4099 do
+                        yield box value
+                }
+            )
+
+        let largeListB =
+            ResizeArray<obj>(
+                seq {
+                    for value in 0..4098 do
+                        yield box value
+                        yield box 999999
+                }
+            )
+
+        let largeBindingA =
+            bindingFor runContextA (seq { KeyValuePair("items", box largeListA) })
+
+        let largeBindingB =
+            bindingFor runContextA (seq { KeyValuePair("items", box largeListB) })
+
+        Assert.NotEqual<string>(scalarBindingA, scalarBindingB)
+        Assert.NotEqual<string>(richBindingA, richBindingB)
+        Assert.Equal<string>(hashSetBindingA, hashSetBindingB)
+        Assert.Equal<string>(dictionaryBindingA, dictionaryBindingB)
+        Assert.NotEqual<string>(orderedListBindingA, orderedListBindingB)
+        Assert.Equal<string>(unsupportedBindingA, unsupportedBindingB)
+        Assert.NotEqual<string>(unsupportedBindingA, unsupportedBindingC)
+        Assert.Equal<string>(nestedUnsupportedDictionaryBindingA, nestedUnsupportedDictionaryBindingB)
+        Assert.Equal<string>(nestedUnsupportedSetBindingA, nestedUnsupportedSetBindingB)
+        Assert.Equal<string>(deepBindingA, deepBindingB)
+        Assert.Equal<string>(cyclicBindingA, cyclicBindingB)
+        Assert.Equal<string>(largeBindingA, largeBindingB)
+
+        let session =
+            MafSessionContracts.createCircuitSession
+                agent
+                (MafSessionContracts.createSessionMetadata unsupportedBindingA)
+                (DummyAgentSession() :> AgentSession)
+
+        Assert.False(MafSessionContracts.hasMatchingSessionBinding unsupportedBindingC session)
+
 module MoreOpenTelemetryCoverageTests =
     open Helpers
 
@@ -1298,8 +1539,7 @@ module MoreOpenTelemetryCoverageTests =
 
         let expectedOperationKeys =
             set
-                [ "gen_ai.agent.name"
-                  "circuit.definition.id"
+                [ "circuit.definition.id"
                   "circuit.definition.version"
                   "circuit.operation.kind"
                   "circuit.status" ]
@@ -1524,81 +1764,64 @@ module MoreOpenTelemetryCoverageTests =
             Map.ofList
                 [ ("circuit.runs",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.run.duration",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.runs.active",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.tools",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.tool.duration",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.workflow.steps",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
                          "circuit.status" ])
                   ("circuit.workflow.step.duration",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
                          "circuit.status" ])
                   ("circuit.validation.failures",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ])
+                         "circuit.status" ])
                   ("circuit.approvals.requested",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
                          "circuit.status" ])
                   ("circuit.structured_output.repairs",
                    set
-                       [ "gen_ai.agent.name"
-                         "circuit.definition.id"
+                       [ "circuit.definition.id"
                          "circuit.definition.version"
                          "circuit.operation.kind"
-                         "circuit.status"
-                         "gen_ai.request.model" ]) ]
+                         "circuit.status" ]) ]
 
         for KeyValue(metricName, expectedKeys) in expectedTagKeys do
             let actualKeys =
@@ -1607,6 +1830,14 @@ module MoreOpenTelemetryCoverageTests =
                 |> Set.ofArray
 
             Assert.True((actualKeys = expectedKeys))
+
+        let disallowedMetricKeys =
+            metrics
+            |> Array.collect metricTags
+            |> Array.map (fun (tag: Collections.Generic.KeyValuePair<string, obj>) -> tag.Key)
+            |> Array.filter (fun key -> key = "gen_ai.agent.name" || key = "gen_ai.request.model")
+
+        Assert.Empty disallowedMetricKeys
 
         let statuses =
             metrics

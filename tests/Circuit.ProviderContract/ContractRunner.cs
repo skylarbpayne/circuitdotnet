@@ -53,24 +53,24 @@ internal static class ContractRunner
         var createHost = factoryResult.CreateHost!;
         var worstCaseCostUsd = Budgets.Sum(budget => Costing.EstimateWorstCaseUsd(budget, metadata));
 
-        if (worstCaseCostUsd > arguments.MaxCostUsd)
+        if (worstCaseCostUsd > arguments.MaxPerProviderCostUsd)
         {
             var summary = new ContractSummary
             {
                 Provider = metadata.Provider,
                 Model = metadata.Model,
                 DateUtc = arguments.UtcDate,
-                MaxCostUsd = arguments.MaxCostUsd,
+                PerProviderMaxCostUsd = arguments.MaxPerProviderCostUsd,
                 WorstCaseEstimatedCostUsd = worstCaseCostUsd,
                 ActualEstimatedCostUsd = null,
                 TotalTokens = TokenTotals.Zero,
                 Packages = metadata.Packages,
                 Capabilities = [],
-                Limitations = [$"worst-case budget {worstCaseCostUsd:F6} exceeds configured cap {arguments.MaxCostUsd:F6}"],
+                Limitations = [$"worst-case budget {worstCaseCostUsd:F6} exceeds configured per-provider cap {arguments.MaxPerProviderCostUsd:F6}"],
             };
 
             await WriteSummaryAsync(artifactDirectory, summary).ConfigureAwait(false);
-            Console.WriteLine($"provider-contract {arguments.Provider}: budget exceeds cap");
+            Console.WriteLine($"provider-contract {arguments.Provider}: per-provider budget exceeds cap");
             return 2;
         }
 
@@ -99,7 +99,7 @@ internal static class ContractRunner
             Provider = metadata.Provider,
             Model = metadata.Model,
             DateUtc = arguments.UtcDate,
-            MaxCostUsd = arguments.MaxCostUsd,
+            PerProviderMaxCostUsd = arguments.MaxPerProviderCostUsd,
             WorstCaseEstimatedCostUsd = worstCaseCostUsd,
             ActualEstimatedCostUsd = actualEstimatedCostUsd,
             TotalTokens = totalTokens,
@@ -131,7 +131,7 @@ internal static class ContractRunner
             Provider = arguments.Provider,
             Model = "unavailable",
             DateUtc = arguments.UtcDate,
-            MaxCostUsd = arguments.MaxCostUsd,
+            PerProviderMaxCostUsd = arguments.MaxPerProviderCostUsd,
             WorstCaseEstimatedCostUsd = 0,
             ActualEstimatedCostUsd = null,
             TotalTokens = TokenTotals.Zero,
@@ -154,7 +154,7 @@ internal static class ContractRunner
         markdown.AppendLine();
         markdown.AppendLine($"- Model: `{summary.Model}`");
         markdown.AppendLine($"- Date (UTC): `{summary.DateUtc}`");
-        markdown.AppendLine($"- Max cost cap (USD): `{summary.MaxCostUsd:F6}`");
+        markdown.AppendLine($"- Per-provider cost cap (USD): `{summary.PerProviderMaxCostUsd:F6}`");
         markdown.AppendLine($"- Worst-case estimated cost (USD): `{summary.WorstCaseEstimatedCostUsd:F6}`");
         markdown.AppendLine($"- Actual estimated cost (USD): `{summary.ActualEstimatedCostUsd?.ToString("F6") ?? "unavailable"}`");
         markdown.AppendLine($"- Total tokens: `{summary.TotalTokens.TotalTokens}` (input `{summary.TotalTokens.InputTokens}`, output `{summary.TotalTokens.OutputTokens}`)");

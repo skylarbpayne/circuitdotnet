@@ -620,6 +620,8 @@ module internal MafAgentFactory =
 
         $"{baseName}_v{tool.Version.Value.Major}"
 
+    let private toolIdentity (tool: Circuit.Core.ResolvedTool) = $"{tool.Name.Value}@{tool.Version}"
+
     let private wrapApprovalIfRequired (tool: ResolvedMafTool) =
         if tool.RequiresApproval then
             ApprovalRequiredAIFunction(tool.MafFunction) :> AITool
@@ -657,10 +659,20 @@ module internal MafAgentFactory =
                     ToolCapabilityFailureException(
                         createToolCapabilityFailure
                             runId
-                            $"Multiple tools map to the same model-facing identity '{tool.ModelName}': {existingIdentity}, {tool.Tool.Name.Value}@{tool.Tool.Version}."
+                            $"Multiple tools map to the same model-facing identity '{tool.ModelName}': {existingIdentity}, {toolIdentity tool.Tool}."
                     )
                 )
-            | false, _ -> modelNames[tool.ModelName] <- $"{tool.Tool.Name.Value}@{tool.Tool.Version}"
+            | false, _ -> modelNames[tool.ModelName] <- toolIdentity tool.Tool
+
+    let private sortResolvedToolsForSelection (tools: seq<Circuit.Core.ResolvedTool>) =
+        tools
+        |> Seq.sortBy (fun tool -> toModelFacingToolName tool, tool.Name.Value, tool.Version)
+
+    let private formatResolvedToolIdentities (tools: seq<Circuit.Core.ResolvedTool>) =
+        tools
+        |> sortResolvedToolsForSelection
+        |> Seq.map (fun tool -> $"{tool.Name.Value}@{tool.Version}")
+        |> String.concat ", "
 
     let resolveToolsAsync
         (runtimeOptions: MafRuntimeOptions)
@@ -686,17 +698,17 @@ module internal MafAgentFactory =
                 if agent.ToolTags.Count = 0 then
                     resolvedTools |> Seq.toArray
                 else
-                    let selectedByName =
-                        Dictionary<string, Circuit.Core.ResolvedTool>(StringComparer.Ordinal)
+                    let selectedByModelName =
+                        Dictionary<string, struct (string * string * Circuit.Core.ResolvedTool)>(StringComparer.Ordinal)
 
                     for requestedTag in agent.ToolTags |> Seq.sort do
                         let matches =
                             resolvedTools
                             |> Seq.filter (fun tool -> tool.Tags.Contains requestedTag)
+                            |> sortResolvedToolsForSelection
                             |> Seq.toArray
 
-                        match matches.Length with
-                        | 0 ->
+                        if matches.Length = 0 then
                             raise (
                                 ToolCapabilityFailureException(
                                     createToolCapabilityFailure
@@ -704,19 +716,57 @@ module internal MafAgentFactory =
                                         $"No tool was resolved for requested tag '{requestedTag}'."
                                 )
                             )
-                        | 1 -> selectedByName[matches[0].Name.Value] <- matches[0]
-                        | _ ->
-                            let names = matches |> Array.map (fun tool -> tool.Name.Value) |> String.concat ", "
+
+                        let ambiguousModelNames =
+                            matches
+                            |> Array.groupBy toModelFacingToolName
+                            |> Array.choose (fun (modelName, grouped) ->
+                                if grouped.Length > 1 then
+                                    Some(modelName, grouped)
+                                else
+                                    None)
+
+                        if ambiguousModelNames.Length > 0 then
+                            let details =
+                                ambiguousModelNames
+                                |> Array.sortBy fst
+                                |> Array.map (fun (modelName, grouped) ->
+                                    $"{modelName}: {formatResolvedToolIdentities grouped}")
+                                |> String.concat "; "
 
                             raise (
                                 ToolCapabilityFailureException(
                                     createToolCapabilityFailure
                                         context.RunId
-                                        $"Multiple tools were resolved for requested tag '{requestedTag}': {names}."
+                                        $"Multiple tools were resolved for requested tag '{requestedTag}' with the same model-facing identity. {details}."
                                 )
                             )
 
-                    selectedByName.Values |> Seq.toArray
+                        for tool in matches do
+                            let modelName = toModelFacingToolName tool
+                            let identity = toolIdentity tool
+
+                            match selectedByModelName.TryGetValue modelName with
+                            | true, struct (existingIdentity, existingTag, existingTool) when
+                                StringComparer.Ordinal.Equals(existingIdentity, identity)
+                                ->
+                                ()
+                            | true, struct (existingIdentity, existingTag, existingTool) ->
+                                raise (
+                                    ToolCapabilityFailureException(
+                                        createToolCapabilityFailure
+                                            context.RunId
+                                            $"Requested tags '{existingTag}' and '{requestedTag}' resolved incompatible tools for model-facing identity '{modelName}': {formatResolvedToolIdentities [| existingTool; tool |]}."
+                                    )
+                                )
+                            | false, _ -> selectedByModelName[modelName] <- struct (identity, requestedTag, tool)
+
+                    selectedByModelName
+                    |> Seq.sortBy _.Key
+                    |> Seq.map (fun entry ->
+                        let struct (_, _, tool) = entry.Value
+                        tool)
+                    |> Seq.toArray
 
             let mappedTools =
                 selectedTools |> Array.map (createToolFunction runtimeOptions context)

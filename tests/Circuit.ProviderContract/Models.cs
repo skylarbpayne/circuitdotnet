@@ -33,11 +33,6 @@ internal sealed class ProviderMetadata
     public required IReadOnlyList<ProviderPackageMetadata> Packages { get; init; }
 }
 
-internal sealed class ProviderBudget
-{
-    public required decimal MaxCostUsd { get; init; }
-}
-
 internal sealed class CapabilityBudget
 {
     public required string Name { get; init; }
@@ -104,7 +99,7 @@ internal sealed class ContractSummary
     public required string Provider { get; init; }
     public required string Model { get; init; }
     public required string DateUtc { get; init; }
-    public required decimal MaxCostUsd { get; init; }
+    public required decimal PerProviderMaxCostUsd { get; init; }
     public decimal WorstCaseEstimatedCostUsd { get; init; }
     public decimal? ActualEstimatedCostUsd { get; init; }
     public required TokenTotals TotalTokens { get; init; }
@@ -267,12 +262,10 @@ internal sealed class TelemetryArtifacts : IDisposable
 {
     private static readonly HashSet<string> AllowedMetricTags =
     [
-        "gen_ai.agent.name",
         "circuit.definition.id",
         "circuit.definition.version",
         "circuit.operation.kind",
         "circuit.status",
-        "gen_ai.request.model",
     ];
 
     private readonly List<Activity> _spans = [];

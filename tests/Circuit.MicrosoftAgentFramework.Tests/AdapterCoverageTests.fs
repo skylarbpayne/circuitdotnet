@@ -1709,7 +1709,7 @@ module BindingAndResolverCoverageTests =
         Assert.Contains("ChatResponseFormatText", unsupportedEx.Message)
 
     [<Fact>]
-    let ``tool resolution honors tag filters and reports missing or ambiguous tags`` () =
+    let ``tool resolution honors tag filters allows distinct major versions and rejects ambiguous model names`` () =
         let primary =
             new FakeChatClient(
                 (fun _messages _options _ct -> Task.FromResult(jsonResponse "unused")),
@@ -1720,18 +1720,32 @@ module BindingAndResolverCoverageTests =
             createResolvedTool
                 (createTestTool "tool.one" ApprovalMode.Never ValueNone (fun _ _ ->
                     Task.FromResult(TestOutput(Text = "one"))))
-                [| "alpha"; "shared" |]
+                [| "alpha"; "shared"; "versioned" |]
 
-        let toolTwo =
+        let toolOneV2 =
             createResolvedTool
-                (createTestTool "tool.two" ApprovalMode.Never ValueNone (fun _ _ ->
-                    Task.FromResult(TestOutput(Text = "two"))))
-                [| "beta"; "shared" |]
+                (createToolDefinition<TestInput, TestOutput>
+                    "tool.one"
+                    "2.0.0"
+                    "tool.one v2 description"
+                    ApprovalMode.Never
+                    ValueNone
+                    (Contract<TestInput>.Create(CircuitJson.createOptions (), Seq.empty))
+                    (Contract<TestOutput>.Create(CircuitJson.createOptions (), Seq.empty))
+                    (fun _ _ -> Task.FromResult(TestOutput(Text = "two"))))
+                [| "versioned" |]
+
+        let ambiguousTool =
+            createResolvedTool
+                (createTestTool "tool-one" ApprovalMode.Never ValueNone (fun _ _ ->
+                    Task.FromResult(TestOutput(Text = "ambiguous"))))
+                [| "shared" |]
 
         let runtime =
             createMafRuntimeWith
                 (fun options ->
-                    options.ToolResolvers <- [| StaticToolResolver([| toolOne; toolTwo |]) :> IToolResolver |])
+                    options.ToolResolvers <-
+                        [| StaticToolResolver([| toolOne; toolOneV2; ambiguousTool |]) :> IToolResolver |])
                 primary
                 None
                 Array.empty<Circuit.IRunObserver>
@@ -1787,11 +1801,45 @@ module BindingAndResolverCoverageTests =
             Assert.Equal(CircuitFailureCode.Tool, failure.Code)
             Assert.Contains("requested tag 'missing'", failure.Message)
 
-        let duplicateTagAgent =
+        let versionedAgent =
             AgentDefinition.Create(
-                "agent.tags.duplicate",
+                "agent.tags.versioned",
                 "1.0.0",
-                "Agent Duplicate Tag",
+                "Agent Versioned Tags",
+                "Use tagged tools.",
+                ValueNone,
+                [| "versioned" |],
+                Seq.empty,
+                Seq.empty
+            )
+
+        let versionedContext =
+            runtime.CreateRunContext(RunId.New(), versionedAgent, signature, runOptions)
+
+        match
+            runtime.ResolveCapabilitiesAsync
+                versionedContext.RunId
+                versionedContext
+                versionedAgent
+                CancellationToken.None
+            |> _.Result
+        with
+        | Error failure -> Assert.True(false, failure.Message)
+        | Ok(tools, _skills) ->
+            Assert.Equal<string>(
+                [| "tool.one@1.0.0"; "tool.one@2.0.0" |],
+                tools
+                |> Seq.map (fun tool -> $"{tool.Tool.Name.Value}@{tool.Tool.Version}")
+                |> Seq.toArray
+            )
+
+            Assert.Equal<string>([| "tool_one_v1"; "tool_one_v2" |], tools |> Seq.map _.ModelName |> Seq.toArray)
+
+        let ambiguousTagAgent =
+            AgentDefinition.Create(
+                "agent.tags.ambiguous",
+                "1.0.0",
+                "Agent Ambiguous Tag",
                 "Use tagged tools.",
                 ValueNone,
                 [| "shared" |],
@@ -1799,21 +1847,138 @@ module BindingAndResolverCoverageTests =
                 Seq.empty
             )
 
-        let duplicateContext =
-            runtime.CreateRunContext(RunId.New(), duplicateTagAgent, signature, runOptions)
+        let ambiguousContext =
+            runtime.CreateRunContext(RunId.New(), ambiguousTagAgent, signature, runOptions)
 
         match
             runtime.ResolveCapabilitiesAsync
-                duplicateContext.RunId
-                duplicateContext
-                duplicateTagAgent
+                ambiguousContext.RunId
+                ambiguousContext
+                ambiguousTagAgent
                 CancellationToken.None
             |> _.Result
         with
-        | Ok _ -> Assert.True(false, "Expected duplicate tag failure.")
+        | Ok _ -> Assert.True(false, "Expected ambiguous tag failure.")
         | Error failure ->
             Assert.Equal(CircuitFailureCode.Tool, failure.Code)
             Assert.Contains("Multiple tools were resolved for requested tag 'shared'", failure.Message)
+            Assert.Contains("tool_one_v1", failure.Message)
+
+    [<Fact>]
+    let ``tool resolution deduplicates exact matches across requested tags`` () =
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "unused")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let sharedTool =
+            createResolvedTool
+                (createTestTool "tool.one" ApprovalMode.Never ValueNone (fun _ _ ->
+                    Task.FromResult(TestOutput(Text = "one"))))
+                [| "alpha"; "shared" |]
+
+        let otherTool =
+            createResolvedTool
+                (createTestTool "tool.two" ApprovalMode.Never ValueNone (fun _ _ ->
+                    Task.FromResult(TestOutput(Text = "two"))))
+                [| "beta" |]
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    options.ToolResolvers <- [| StaticToolResolver([| sharedTool; otherTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let signature = createSignature<TestOutput> ()
+        let runOptions = createRunOptions None StructuredOutputPolicy.NativeOnly
+
+        let agent =
+            AgentDefinition.Create(
+                "agent.tags.dedup",
+                "1.0.0",
+                "Agent Dedup",
+                "Use tagged tools.",
+                ValueNone,
+                [| "alpha"; "shared"; "beta" |],
+                Seq.empty,
+                Seq.empty
+            )
+
+        let context = runtime.CreateRunContext(RunId.New(), agent, signature, runOptions)
+
+        match
+            runtime.ResolveCapabilitiesAsync context.RunId context agent CancellationToken.None
+            |> _.Result
+        with
+        | Error failure -> Assert.True(false, failure.Message)
+        | Ok(tools, _skills) ->
+            Assert.Equal(2, tools.Count)
+
+            Assert.Equal<string>(
+                [| "tool.one@1.0.0"; "tool.two@1.0.0" |],
+                tools
+                |> Seq.map (fun tool -> $"{tool.Tool.Name.Value}@{tool.Tool.Version}")
+                |> Seq.toArray
+            )
+
+    [<Fact>]
+    let ``tool resolution rejects colliding model-facing names from distinct requested tags`` () =
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "unused")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let dottedTool =
+            createResolvedTool
+                (createTestTool "tool.one" ApprovalMode.Never ValueNone (fun _ _ ->
+                    Task.FromResult(TestOutput(Text = "one"))))
+                [| "alpha" |]
+
+        let dashedTool =
+            createResolvedTool
+                (createTestTool "tool-one" ApprovalMode.Never ValueNone (fun _ _ ->
+                    Task.FromResult(TestOutput(Text = "two"))))
+                [| "beta" |]
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    options.ToolResolvers <- [| StaticToolResolver([| dottedTool; dashedTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let signature = createSignature<TestOutput> ()
+        let runOptions = createRunOptions None StructuredOutputPolicy.NativeOnly
+
+        let agent =
+            AgentDefinition.Create(
+                "agent.tags.collision",
+                "1.0.0",
+                "Agent Collision",
+                "Use tagged tools.",
+                ValueNone,
+                [| "alpha"; "beta" |],
+                Seq.empty,
+                Seq.empty
+            )
+
+        let context = runtime.CreateRunContext(RunId.New(), agent, signature, runOptions)
+
+        match
+            runtime.ResolveCapabilitiesAsync context.RunId context agent CancellationToken.None
+            |> _.Result
+        with
+        | Ok _ -> Assert.True(false, "Expected tag collision failure.")
+        | Error failure ->
+            Assert.Equal(CircuitFailureCode.Tool, failure.Code)
+            Assert.Contains("model-facing identity 'tool_one_v1'", failure.Message)
+            Assert.Contains("tool.one@1.0.0", failure.Message)
+            Assert.Contains("tool-one@1.0.0", failure.Message)
 
     [<Fact>]
     let ``skill resolution reports missing and duplicate requested skills`` () =

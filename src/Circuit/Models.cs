@@ -228,7 +228,7 @@ public sealed class AgentRunOptions
             Session is null ? FSharpValueOption<Circuit.Core.CircuitSession>.None : FSharpValueOption<Circuit.Core.CircuitSession>.Some(Session.Inner),
             string.IsNullOrWhiteSpace(TenantId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(TenantId),
             string.IsNullOrWhiteSpace(UserId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(UserId),
-            Copy(tags),
+            ValidateAndCopyTags(tags),
             (Circuit.Core.StructuredOutputPolicy)StructuredOutputPolicy,
             (Circuit.Core.SensitiveDataMode)SensitiveDataMode,
             Services ?? EmptyServiceProvider.Instance);
@@ -251,6 +251,55 @@ public sealed class AgentRunOptions
 
     private static IReadOnlyDictionary<string, string> Copy(IReadOnlyDictionary<string, string> source)
         => new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(source, StringComparer.Ordinal));
+
+    private static IReadOnlyDictionary<string, string> ValidateAndCopyTags(IReadOnlyDictionary<string, string> source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        var entries = source.ToArray();
+
+        if (entries.Length > 32)
+        {
+            throw new ArgumentException("No more than 32 tags are allowed.", "tags");
+        }
+
+        var copy = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var entry in entries)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Key))
+            {
+                throw new ArgumentException("Tag keys cannot be blank.", "tags");
+            }
+
+            if (entry.Key.Length > 64)
+            {
+                throw new ArgumentException("Tag keys must be 64 characters or fewer.", "tags");
+            }
+
+            if (entry.Key.StartsWith("circuit.", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("Tag keys beginning with 'circuit.' are reserved.", "tags");
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentNullException("tags");
+            }
+
+            if (entry.Value.Length > 256)
+            {
+                throw new ArgumentException("Tag values must be 256 characters or fewer.", "tags");
+            }
+
+            if (!copy.TryAdd(entry.Key, entry.Value))
+            {
+                throw new ArgumentException("Duplicate tag keys are not allowed.", "tags");
+            }
+        }
+
+        return new ReadOnlyDictionary<string, string>(copy);
+    }
 
     private sealed class EmptyServiceProvider : IServiceProvider
     {

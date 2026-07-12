@@ -2,6 +2,7 @@ namespace Circuit.Core.Tests
 
 open System
 open System.Collections.Generic
+open System.Diagnostics
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
@@ -660,6 +661,37 @@ module WorkflowsTests =
         Assert.Empty(Workflow.validate parallelDefinition)
         Assert.Empty(Workflow.validate requestDefinition)
         Assert.Empty(Workflow.validate loopDefinition)
+
+    [<Fact>]
+    let ``workflow validation handles a 10k step chain without recursion blowups or pathological append costs`` () =
+        let stepCount = 10000
+
+        let seed =
+            Workflow.define
+                "workflow.large"
+                "1.0.0"
+                (Workflow.code "step.0" (fun _ value -> Task.FromResult(value + 1)))
+
+        let stopwatch = Stopwatch.StartNew()
+
+        let definition =
+            [ 1 .. stepCount - 1 ]
+            |> List.fold
+                (fun current index ->
+                    current
+                    |> Workflow.thenStep (Workflow.code $"step.{index}" (fun _ value -> Task.FromResult(value + 1))))
+                seed
+
+        let issues = Workflow.validate definition
+        stopwatch.Stop()
+
+        Assert.Empty issues
+        Assert.Equal(stepCount, definition.Nodes.Length)
+
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(10.0),
+            $"Building and validating {stepCount} steps took {stopwatch.Elapsed}."
+        )
 
     [<Fact>]
     let ``workflow graph reports names for every node kind`` () =

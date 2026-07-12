@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       providers:
-        description: all, openai, or azure-openai
+        description: Which provider matrix to run
         required: true
         default: all
-        type: string
-      max_cost_usd:
-        description: Hard USD cap for the full provider capability matrix
+        type: choice
+        options:
+          - all
+          - openai
+          - azure-openai
+      per_provider_max_cost_usd:
+        description: Hard USD cap per provider job
         required: true
         default: "3.00"
         type: string
@@ -57,11 +61,22 @@ jobs:
         run: |
           set -euo pipefail
           requested="${{ inputs.providers }}"
-          if [[ "$requested" == "all" || "$requested" == "${{ matrix.provider }}" ]]; then
-            echo "selected=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "selected=false" >> "$GITHUB_OUTPUT"
-          fi
+          case "$requested" in
+            all)
+              echo "selected=true" >> "$GITHUB_OUTPUT"
+              ;;
+            openai|azure-openai)
+              if [[ "$requested" == "${{ matrix.provider }}" ]]; then
+                echo "selected=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "selected=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "Unknown provider selector: $requested" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Check provider credentials and cost metadata
         if: steps.provider-filter.outputs.selected == 'true'
@@ -113,10 +128,10 @@ jobs:
             --provider "${{ matrix.provider }}" \
             --artifact-root "$GITHUB_WORKSPACE/artifacts/provider-contract" \
             --utc-date "$utc_date" \
-            --max-cost-usd "${{ inputs.max_cost_usd }}"
+            --max-per-provider-cost-usd "${{ inputs.per_provider_max_cost_usd }}"
 
       - name: Upload provider contract artifacts
-        if: always() && steps.provider-filter.outputs.selected == 'true'
+        if: always() && steps.provider-filter.outputs.selected == 'true' && steps.gate.outputs.skip != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: provider-contract-${{ matrix.provider }}

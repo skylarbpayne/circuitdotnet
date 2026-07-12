@@ -10,14 +10,14 @@ internal sealed class CommandLineArguments
     public required string Provider { get; init; }
     public required string ArtifactRoot { get; init; }
     public required string UtcDate { get; init; }
-    public required decimal MaxCostUsd { get; init; }
+    public required decimal MaxPerProviderCostUsd { get; init; }
 
     public static CommandLineArguments Parse(string[] args)
     {
         string? provider = null;
         string artifactRoot = Path.Combine(Environment.CurrentDirectory, "artifacts", "provider-contract");
         string utcDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        decimal? maxCostUsd = null;
+        decimal? maxPerProviderCostUsd = null;
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -32,8 +32,8 @@ internal sealed class CommandLineArguments
                 case "--utc-date":
                     utcDate = RequireValue(args, ++index, "--utc-date");
                     break;
-                case "--max-cost-usd":
-                    maxCostUsd = decimal.Parse(RequireValue(args, ++index, "--max-cost-usd"), System.Globalization.CultureInfo.InvariantCulture);
+                case "--max-per-provider-cost-usd":
+                    maxPerProviderCostUsd = decimal.Parse(RequireValue(args, ++index, "--max-per-provider-cost-usd"), System.Globalization.CultureInfo.InvariantCulture);
                     break;
                 case "--help":
                 case "-h":
@@ -50,9 +50,14 @@ internal sealed class CommandLineArguments
             throw new InvalidOperationException("--provider is required.");
         }
 
-        if (!maxCostUsd.HasValue || maxCostUsd.Value <= 0)
+        if (!ProviderFactoryRegistry.SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("--max-cost-usd must be greater than zero.");
+            throw new InvalidOperationException($"Unsupported provider '{provider}'. Expected one of: {string.Join(", ", ProviderFactoryRegistry.SupportedProviders)}.");
+        }
+
+        if (!maxPerProviderCostUsd.HasValue || maxPerProviderCostUsd.Value <= 0)
+        {
+            throw new InvalidOperationException("--max-per-provider-cost-usd must be greater than zero.");
         }
 
         return new CommandLineArguments
@@ -60,7 +65,7 @@ internal sealed class CommandLineArguments
             Provider = provider,
             ArtifactRoot = Path.GetFullPath(artifactRoot),
             UtcDate = utcDate,
-            MaxCostUsd = maxCostUsd.Value,
+            MaxPerProviderCostUsd = maxPerProviderCostUsd.Value,
         };
     }
 
@@ -69,7 +74,7 @@ internal sealed class CommandLineArguments
 
     private static void PrintHelp()
     {
-        Console.WriteLine("Usage: dotnet run --project tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj -- --provider <name> --max-cost-usd <amount> [--artifact-root <path>] [--utc-date <yyyy-MM-dd>]");
+        Console.WriteLine("Usage: dotnet run --project tests/Circuit.ProviderContract/Circuit.ProviderContract.csproj -- --provider <name> --max-per-provider-cost-usd <amount> [--artifact-root <path>] [--utc-date <yyyy-MM-dd>]");
         Console.WriteLine($"Supported providers: {string.Join(", ", ProviderFactoryRegistry.SupportedProviders)}");
     }
 }

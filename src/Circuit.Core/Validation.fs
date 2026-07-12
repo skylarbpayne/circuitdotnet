@@ -271,12 +271,19 @@ type internal DataAnnotationsValidator<'T>(namingPolicy: JsonNamingPolicy) =
 /// Every contract automatically includes a DataAnnotations-based validator derived from the configured JSON naming policy.
 /// </remarks>
 [<Sealed>]
-type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidator<'T>[]) =
+type Contract<'T>
+    internal (schema: SchemaDocument, validators: IContractValidator<'T>[], jsonOptions: JsonSerializerOptions) =
     let validatorSnapshot =
         if isNull validators then
             nullArg "validators"
 
         validators |> Array.copy
+
+    let jsonOptionsSnapshot =
+        if isNull jsonOptions then
+            nullArg "jsonOptions"
+
+        jsonOptions
 
     let validatorView = ReadOnlyCollection(validatorSnapshot)
 
@@ -288,6 +295,7 @@ type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidat
 
     /// Gets the validators that will run for this contract.
     member _.Validators = validatorView :> IReadOnlyList<IContractValidator<'T>>
+    member internal _.JsonSerializerOptions = jsonOptionsSnapshot
 
     /// Validates a value against all configured validators.
     /// <param name="value">The value to validate.</param>
@@ -328,11 +336,14 @@ type Contract<'T> internal (schema: SchemaDocument, validators: IContractValidat
         if customValidators |> Array.exists (fun validator -> isNull (box validator)) then
             invalidArg "validators" "Validators cannot contain null entries."
 
-        let schema = SchemaGeneration.getOrCreateSchema<'T> jsonOptions
+        let jsonOptionsSnapshot = JsonSerializerOptions(jsonOptions)
+        jsonOptionsSnapshot.MakeReadOnly()
+
+        let schema = SchemaGeneration.getOrCreateSchema<'T> jsonOptionsSnapshot
 
         let allValidators =
             Array.append
-                [| DataAnnotationsValidator<'T>(jsonOptions.PropertyNamingPolicy) :> IContractValidator<'T> |]
+                [| DataAnnotationsValidator<'T>(jsonOptionsSnapshot.PropertyNamingPolicy) :> IContractValidator<'T> |]
                 customValidators
 
-        Contract<'T>(schema, allValidators)
+        Contract<'T>(schema, allValidators, jsonOptionsSnapshot)

@@ -24,6 +24,17 @@ Use a workflow when you need:
 - Resuming with a changed definition version or fingerprint fails with checkpoint mismatch behavior.
 - Parallel workflow branches cancel siblings on failure.
 
+## Checkpoint versioning rule
+
+Workflow checkpoints are only safe when **both** of these remain compatible:
+
+- the workflow definition semantic version; and
+- the workflow graph fingerprint.
+
+The fingerprint covers topology and declared metadata only. It intentionally does **not** hash runtime delegates or objects such as code-step handlers, branch selectors, approval prompt builders, parallel aggregates, or loop predicates.
+
+That means you must bump the workflow definition semantic version whenever any of those behaviors change, even if the graph shape stays the same.
+
 ## Cancellation behavior
 
 Workflow cancellation stops active steps, drains the event stream, and emits one cancelled terminal event/result.

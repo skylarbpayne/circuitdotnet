@@ -428,6 +428,14 @@ module internal WorkflowGraph =
             let bytes = Encoding.UTF8.GetBytes payload |> sha.ComputeHash
             Convert.ToHexString(bytes).ToLowerInvariant()
 
+module private WorkflowListBuilder =
+    let ofList (items: 'T list) : ('T list -> 'T list) = fun tail -> items @ tail
+
+    let append (left: 'T list -> 'T list) (right: 'T list -> 'T list) : ('T list -> 'T list) =
+        fun tail -> left (right tail)
+
+    let materialize (builder: 'T list -> 'T list) = builder []
+
 /// Represents a composable workflow step prior to being named as a full definition.
 [<Sealed>]
 type WorkflowStep<'Input, 'Output> internal (fragment: WorkflowGraph.Fragment) =
@@ -443,22 +451,63 @@ type WorkflowDefinition<'Input, 'Output>
         nodes: WorkflowGraph.Node list,
         edges: WorkflowGraph.Edge list,
         entryId: string,
-        terminalIds: string list
+        terminalIds: string list,
+        ?nodeListBuilder: (WorkflowGraph.Node list -> WorkflowGraph.Node list),
+        ?edgeListBuilder: (WorkflowGraph.Edge list -> WorkflowGraph.Edge list)
     ) =
+    let nodeBuilder = defaultArg nodeListBuilder (WorkflowListBuilder.ofList nodes)
+    let edgeBuilder = defaultArg edgeListBuilder (WorkflowListBuilder.ofList edges)
+
+    let mutable nodeCache =
+        match nodeListBuilder with
+        | Some _ -> ValueNone
+        | None -> ValueSome nodes
+
+    let mutable edgeCache =
+        match edgeListBuilder with
+        | Some _ -> ValueNone
+        | None -> ValueSome edges
+
+    let materializeNodes () =
+        match nodeCache with
+        | ValueSome cached -> cached
+        | ValueNone ->
+            let materialized = WorkflowListBuilder.materialize nodeBuilder
+            nodeCache <- ValueSome materialized
+            materialized
+
+    let materializeEdges () =
+        match edgeCache with
+        | ValueSome cached -> cached
+        | ValueNone ->
+            let materialized = WorkflowListBuilder.materialize edgeBuilder
+            edgeCache <- ValueSome materialized
+            materialized
+
     /// Gets the workflow identifier.
     member _.Id = id
 
     /// Gets the workflow version.
     member _.Version = version
-    member internal _.Nodes = nodes
-    member internal _.Edges = edges
+    member internal _.Nodes = materializeNodes ()
+    member internal _.Edges = materializeEdges ()
+    member internal _.NodeBuilder = nodeBuilder
+    member internal _.EdgeBuilder = edgeBuilder
     member internal _.EntryId = entryId
     member internal _.TerminalIds = terminalIds
     member internal _.InputType = typeof<'Input>
     member internal _.OutputType = typeof<'Output>
 
     member internal this.Fingerprint =
-        WorkflowGraph.FingerprintJson.compute id version this.InputType this.OutputType nodes edges entryId terminalIds
+        WorkflowGraph.FingerprintJson.compute
+            id
+            version
+            this.InputType
+            this.OutputType
+            this.Nodes
+            this.Edges
+            entryId
+            terminalIds
 
 /// Represents an opaque resumable workflow checkpoint.
 /// <remarks>
@@ -677,21 +726,26 @@ module Workflow =
         if isNull (box definition) then
             nullArg "definition"
 
-        let merged =
-            appendFragments
-                { Nodes = definition.Nodes
-                  Edges = definition.Edges
-                  EntryId = definition.EntryId
-                  TerminalIds = definition.TerminalIds }
-                step.Fragment
+        let linkingEdges =
+            definition.TerminalIds
+            |> List.map (fun sourceId ->
+                ({ SourceId = sourceId
+                   TargetId = step.Fragment.EntryId }
+                : WorkflowGraph.Edge))
 
         WorkflowDefinition<'Input, 'B>(
             definition.Id,
             definition.Version,
-            merged.Nodes,
-            merged.Edges,
-            merged.EntryId,
-            merged.TerminalIds
+            [],
+            [],
+            definition.EntryId,
+            step.Fragment.TerminalIds,
+            nodeListBuilder =
+                WorkflowListBuilder.append definition.NodeBuilder (WorkflowListBuilder.ofList step.Fragment.Nodes),
+            edgeListBuilder =
+                WorkflowListBuilder.append
+                    definition.EdgeBuilder
+                    (WorkflowListBuilder.ofList (step.Fragment.Edges @ linkingEdges))
         )
 
     let internal chooseCases
@@ -1111,15 +1165,20 @@ module Workflow =
 
         let outgoing = edges |> Seq.groupBy _.SourceId |> dict
         let reachable = HashSet<string>(StringComparer.Ordinal)
-
-        let rec visit nodeId =
-            if reachable.Add nodeId then
-                match outgoing.TryGetValue nodeId with
-                | true, nextEdges -> nextEdges |> Seq.iter (fun edge -> visit edge.TargetId)
-                | _ -> ()
+        let pending = Stack<string>()
 
         if not (String.IsNullOrWhiteSpace definition.EntryId) then
-            visit definition.EntryId
+            pending.Push(definition.EntryId)
+
+        while pending.Count > 0 do
+            let nodeId = pending.Pop()
+
+            if reachable.Add nodeId then
+                match outgoing.TryGetValue nodeId with
+                | true, nextEdges ->
+                    for edge in nextEdges do
+                        pending.Push(edge.TargetId)
+                | _ -> ()
 
         for node in nodes do
             if not (reachable.Contains node.Id) then

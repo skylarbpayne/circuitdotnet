@@ -374,7 +374,7 @@ public sealed class ToolDefinition<TInput, TOutput>
                 Id,
                 Version,
                 Description,
-                Circuit.Core.Contract<TInput>.Create(CreateDefaultJsonOptions(), _inner.Input.Validators.Append(CoreAdapters.ToCore(validator))),
+                Circuit.Core.Contract<TInput>.Create(CloneContractJsonOptions(_inner.Input), _inner.Input.Validators.Append(CoreAdapters.ToCore(validator))),
                 _inner.Output,
                 (Circuit.Core.ApprovalMode)ApprovalMode,
                 ApprovalPolicy is null ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(ApprovalPolicy),
@@ -393,7 +393,7 @@ public sealed class ToolDefinition<TInput, TOutput>
                 Version,
                 Description,
                 _inner.Input,
-                Circuit.Core.Contract<TOutput>.Create(CreateDefaultJsonOptions(), _inner.Output.Validators.Append(CoreAdapters.ToCore(validator))),
+                Circuit.Core.Contract<TOutput>.Create(CloneContractJsonOptions(_inner.Output), _inner.Output.Validators.Append(CoreAdapters.ToCore(validator))),
                 (Circuit.Core.ApprovalMode)ApprovalMode,
                 ApprovalPolicy is null ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(ApprovalPolicy),
                 CreateHandler(_inner)));
@@ -469,6 +469,13 @@ public sealed class ToolDefinition<TInput, TOutput>
     private static JsonSerializerOptions CreateDefaultJsonOptions()
     {
         var options = Circuit.Core.CircuitJson.createOptions();
+        options.MakeReadOnly();
+        return options;
+    }
+
+    private static JsonSerializerOptions CloneContractJsonOptions<TContract>(Circuit.Core.Contract<TContract> contract)
+    {
+        var options = new JsonSerializerOptions(contract.JsonSerializerOptions);
         options.MakeReadOnly();
         return options;
     }
