@@ -11,6 +11,8 @@
     <ContinuousIntegrationBuild Condition="'$(ContinuousIntegrationBuild)' == ''">true</ContinuousIntegrationBuild>
     <DebugType>portable</DebugType>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- F# emits target-framework source under obj/, which is not addressable in Git. -->
+    <EmbedAllSources Condition="'$(MSBuildProjectExtension)' == '.fsproj'">true</EmbedAllSources>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/skylarbpayne/circuitdotnet</RepositoryUrl>
