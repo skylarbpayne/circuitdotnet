@@ -141,6 +141,26 @@ type RunOptions
     /// Gets the ambient service provider available to resolvers, tools, and skills.
     member _.Services = services
 
+    /// Creates a copy that continues the supplied session.
+    /// <param name="session">The non-null session to continue.</param>
+    member _.WithSession(session: CircuitSession) =
+        if isNull (box session) then
+            nullArg "session"
+
+        RunOptions(ValueSome session, tenantId, userId, tags, structuredOutputPolicy, sensitiveDataMode, services)
+
+    /// Creates a copy with the supplied structured-output policy.
+    /// <param name="policy">The structured-output policy for the copy.</param>
+    /// <exception cref="T:System.ArgumentOutOfRangeException">
+    /// <paramref name="policy" /> is not a supported structured-output policy.
+    /// </exception>
+    member _.WithStructuredOutputPolicy(policy: StructuredOutputPolicy) =
+        match policy with
+        | StructuredOutputPolicy.NativeOnly
+        | StructuredOutputPolicy.AllowSecondaryModelRepair ->
+            RunOptions(session, tenantId, userId, tags, policy, sensitiveDataMode, services)
+        | _ -> raise (ArgumentOutOfRangeException("policy", policy, "Unsupported structured-output policy."))
+
     /// Gets the default run options.
     static member Default =
         RunOptions(

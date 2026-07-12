@@ -1,6 +1,7 @@
 namespace Circuit.Core
 
 open System
+open System.Buffers
 open System.Collections.Generic
 open System.Collections.ObjectModel
 open System.Security.Cryptography
@@ -526,17 +527,25 @@ type WorkflowCheckpoint<'Output>
         createdAt: DateTimeOffset,
         payload: JsonElement
     ) =
+    let createdAt = createdAt.ToUniversalTime()
+    let payload = payload.Clone()
+
     let envelopeJson =
-        let root = JsonObject()
-        root["formatVersion"] <- JsonValue.Create 1
-        root["definitionId"] <- JsonValue.Create definitionId.Value
-        root["definitionVersion"] <- JsonValue.Create(definitionVersion.ToString())
-        root["fingerprint"] <- JsonValue.Create fingerprint
-        root["sessionId"] <- JsonValue.Create sessionId
-        root["checkpointId"] <- JsonValue.Create checkpointId
-        root["createdAt"] <- JsonValue.Create createdAt
-        root["payload"] <- JsonNode.Parse(payload.GetRawText())
-        root.ToJsonString()
+        let buffer = ArrayBufferWriter<byte>()
+        use writer = new Utf8JsonWriter(buffer)
+        writer.WriteStartObject()
+        writer.WriteNumber("formatVersion", 1)
+        writer.WriteString("definitionId", definitionId.Value)
+        writer.WriteString("definitionVersion", definitionVersion.ToString())
+        writer.WriteString("fingerprint", fingerprint)
+        writer.WriteString("sessionId", sessionId)
+        writer.WriteString("checkpointId", checkpointId)
+        writer.WriteString("createdAt", createdAt)
+        writer.WritePropertyName("payload")
+        payload.WriteTo(writer)
+        writer.WriteEndObject()
+        writer.Flush()
+        Encoding.UTF8.GetString(buffer.WrittenSpan)
 
     /// Gets the workflow definition identifier the checkpoint was created for.
     member _.DefinitionId = definitionId
@@ -556,40 +565,103 @@ type WorkflowCheckpoint<'Output>
         use document = JsonDocument.Parse(envelopeJson)
         document.RootElement.Clone()
 
-    static member internal Deserialize(state: JsonElement) =
-        let expectProperty (name: string) =
-            let mutable property = Unchecked.defaultof<JsonElement>
+    /// Restores a checkpoint from a serialized JSON envelope.
+    /// <param name="state">The checkpoint envelope returned by <see cref="M:Circuit.Core.WorkflowCheckpoint`1.Serialize" />.</param>
+    /// <exception cref="T:System.ArgumentException"><paramref name="state" /> is not a valid checkpoint envelope.</exception>
+    /// <exception cref="T:System.ArgumentOutOfRangeException"><paramref name="state" /> uses an unsupported checkpoint format version.</exception>
+    static member Deserialize(state: JsonElement) =
+        let malformed message = invalidArg "state" message
 
-            if not (state.TryGetProperty(name, &property)) then
-                invalidArg "state" $"Checkpoint envelope is missing the '{name}' property."
+        let deserialize () =
+            if state.ValueKind <> JsonValueKind.Object then
+                malformed "Checkpoint state must be a JSON object."
 
-            property
+            let expectProperty (name: string) (kind: JsonValueKind) =
+                let mutable property = Unchecked.defaultof<JsonElement>
 
-        let formatVersion = (expectProperty "formatVersion").GetInt32()
+                if not (state.TryGetProperty(name, &property)) then
+                    malformed $"Checkpoint envelope is missing the '{name}' property."
 
-        if formatVersion <> 1 then
-            invalidArg "state" $"Unsupported checkpoint format version '{formatVersion}'."
+                if property.ValueKind <> kind then
+                    malformed
+                        $"Checkpoint envelope property '{name}' must be a JSON {kind.ToString().ToLowerInvariant()}."
 
-        let definitionId = DefinitionId.Create((expectProperty "definitionId").GetString())
+                property
 
-        let definitionVersion =
-            SemanticVersion.Parse((expectProperty "definitionVersion").GetString())
+            let formatProperty = expectProperty "formatVersion" JsonValueKind.Number
+            let mutable formatVersion = 0
 
-        let fingerprint = (expectProperty "fingerprint").GetString()
-        let sessionId = (expectProperty "sessionId").GetString()
-        let checkpointId = (expectProperty "checkpointId").GetString()
-        let createdAt = (expectProperty "createdAt").GetDateTimeOffset()
-        let payload = expectProperty "payload"
+            if not (formatProperty.TryGetInt32(&formatVersion)) then
+                malformed "Checkpoint envelope property 'formatVersion' must be a 32-bit integer."
 
-        WorkflowCheckpoint<'Output>(
-            definitionId,
-            definitionVersion,
-            fingerprint,
-            sessionId,
-            checkpointId,
-            createdAt,
-            payload.Clone()
-        )
+            if formatVersion <> 1 then
+                raise (
+                    ArgumentOutOfRangeException(
+                        "state",
+                        formatVersion,
+                        $"Unsupported checkpoint format version '{formatVersion}'."
+                    )
+                )
+
+            let expectString name =
+                (expectProperty name JsonValueKind.String).GetString()
+
+            let definitionIdValue = expectString "definitionId"
+            let mutable definitionId = Unchecked.defaultof<DefinitionId>
+
+            if not (DefinitionId.TryCreate(definitionIdValue, &definitionId)) then
+                malformed "Checkpoint envelope property 'definitionId' is not a valid definition identifier."
+
+            let definitionVersionValue = expectString "definitionVersion"
+            let mutable definitionVersion = Unchecked.defaultof<SemanticVersion>
+
+            if not (SemanticVersion.TryParse(definitionVersionValue, &definitionVersion)) then
+                malformed "Checkpoint envelope property 'definitionVersion' is not a valid semantic version."
+
+            let expectNonblankString name =
+                let value = expectString name
+
+                if String.IsNullOrWhiteSpace value then
+                    malformed $"Checkpoint envelope property '{name}' must not be blank."
+
+                value
+
+            let fingerprint = expectNonblankString "fingerprint"
+            let sessionId = expectNonblankString "sessionId"
+            let checkpointId = expectNonblankString "checkpointId"
+            let createdAtProperty = expectProperty "createdAt" JsonValueKind.String
+            let mutable createdAt = Unchecked.defaultof<DateTimeOffset>
+
+            if not (createdAtProperty.TryGetDateTimeOffset(&createdAt)) then
+                malformed "Checkpoint envelope property 'createdAt' is not a valid timestamp."
+
+            let payload = expectProperty "payload" JsonValueKind.Object
+
+            WorkflowCheckpoint<'Output>(
+                definitionId,
+                definitionVersion,
+                fingerprint,
+                sessionId,
+                checkpointId,
+                createdAt,
+                payload
+            )
+
+        try
+            deserialize ()
+        with
+        | :? ArgumentOutOfRangeException as ex when ex.ParamName = "state" -> reraise ()
+        | :? ArgumentException as ex when ex.ParamName = "state" -> reraise ()
+        | :? ObjectDisposedException as ex ->
+            raise (ArgumentException("Checkpoint state is not a valid JSON envelope.", "state", ex))
+        | :? JsonException as ex ->
+            raise (ArgumentException("Checkpoint state is not a valid JSON envelope.", "state", ex))
+        | :? InvalidOperationException as ex ->
+            raise (ArgumentException("Checkpoint state is not a valid JSON envelope.", "state", ex))
+        | :? FormatException as ex ->
+            raise (ArgumentException("Checkpoint state is not a valid JSON envelope.", "state", ex))
+        | :? NullReferenceException as ex ->
+            raise (ArgumentException("Checkpoint state is not a valid JSON envelope.", "state", ex))
 
 /// Represents a live workflow execution that may stream events, pause for approval, and emit checkpoints.
 [<Sealed>]

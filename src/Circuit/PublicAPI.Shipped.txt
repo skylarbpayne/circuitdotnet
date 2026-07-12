@@ -89,6 +89,7 @@ M:Circuit.WorkflowBuilder`2.Start(System.String,System.String,System.String,Circ
 M:Circuit.WorkflowBuilder`2.Start(System.String,System.String,System.String,System.Func{Circuit.WorkflowContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}})~Circuit.WorkflowBuilder{`0,``0}
 M:Circuit.WorkflowBuilder`2.Then(System.String,Circuit.AgentDefinition,Circuit.AgentSignature{`1,``0})~Circuit.WorkflowBuilder{`0,``0}
 M:Circuit.WorkflowBuilder`2.Then(System.String,System.Func{Circuit.WorkflowContext,`1,System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}})~Circuit.WorkflowBuilder{`0,``0}
+M:Circuit.WorkflowCheckpoint`1.Deserialize(System.Text.Json.JsonElement)~Circuit.WorkflowCheckpoint{`0}
 M:Circuit.WorkflowCheckpoint`1.Serialize()~System.Text.Json.JsonElement
 M:Circuit.WorkflowDefinition`2.Start(System.String,System.String,System.String,Circuit.AgentDefinition,Circuit.AgentSignature{`0,`1})~Circuit.WorkflowBuilder{`0,`1}
 M:Circuit.WorkflowDefinition`2.Start(System.String,System.String,System.String,System.Func{Circuit.WorkflowContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{`1}})~Circuit.WorkflowBuilder{`0,`1}

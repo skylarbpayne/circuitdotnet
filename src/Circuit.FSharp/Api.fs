@@ -159,6 +159,15 @@ module ToolDefinition =
 
         recreate definition definition.Input definition.Output approval approvalPolicy
 
+/// F# helpers for immutably refining run options.
+module RunOptions =
+    /// Creates a copy that continues the supplied non-null session.
+    let withSession (session: CircuitSession) (options: Circuit.Core.RunOptions) = options.WithSession(session)
+
+    /// Creates a copy with the supplied structured-output policy.
+    let withStructuredOutputPolicy (policy: StructuredOutputPolicy) (options: Circuit.Core.RunOptions) =
+        options.WithStructuredOutputPolicy(policy)
+
 /// F# helpers for running agents.
 module Agent =
     /// Runs an agent to completion with the supplied runtime and options.

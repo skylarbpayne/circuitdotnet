@@ -61,6 +61,8 @@ M:Circuit.Core.ResolvedTool.Create(Circuit.Core.ToolDefinition{``0,``1},System.C
 M:Circuit.Core.RunId.New()~Circuit.Core.RunId
 M:Circuit.Core.RunId.Parse(System.String)~Circuit.Core.RunId
 M:Circuit.Core.RunId.TryParse(System.String,Circuit.Core.RunId@)~System.Boolean
+M:Circuit.Core.RunOptions.WithSession(Circuit.Core.CircuitSession)~Circuit.Core.RunOptions
+M:Circuit.Core.RunOptions.WithStructuredOutputPolicy(Circuit.Core.StructuredOutputPolicy)~Circuit.Core.RunOptions
 M:Circuit.Core.SchemaDocument.ToJsonString()~System.String
 M:Circuit.Core.SemanticVersion.Parse(System.String)~Circuit.Core.SemanticVersion
 M:Circuit.Core.SemanticVersion.TryParse(System.String,Circuit.Core.SemanticVersion@)~System.Boolean
@@ -99,6 +101,7 @@ M:Circuit.Core.Workflow.run(Circuit.Core.IWorkflowRuntime,Circuit.Core.WorkflowD
 M:Circuit.Core.Workflow.start(Circuit.Core.IWorkflowRuntime,Circuit.Core.WorkflowDefinition{``0,``1},``0,Circuit.Core.WorkflowRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.WorkflowRun{``1}}
 M:Circuit.Core.Workflow.thenStep(Circuit.Core.WorkflowStep{``0,``1},Circuit.Core.WorkflowDefinition{``2,``0})~Circuit.Core.WorkflowDefinition{``2,``1}
 M:Circuit.Core.Workflow.validate(Circuit.Core.WorkflowDefinition{``0,``1})~System.Collections.Generic.IReadOnlyList{Circuit.Core.WorkflowValidationIssue}
+M:Circuit.Core.WorkflowCheckpoint`1.Deserialize(System.Text.Json.JsonElement)~Circuit.Core.WorkflowCheckpoint{`0}
 M:Circuit.Core.WorkflowCheckpoint`1.Serialize()~System.Text.Json.JsonElement
 M:Circuit.Core.WorkflowRun`1.CreateCheckpointAsync(System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{Circuit.Core.WorkflowCheckpoint{`0}}
 M:Circuit.Core.WorkflowRun`1.RespondAsync(Circuit.Core.ApprovalResponse,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask

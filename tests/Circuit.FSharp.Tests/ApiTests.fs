@@ -1,6 +1,7 @@
 namespace Circuit.FSharp.Tests
 
 open System
+open System.Collections.Generic
 open System.ComponentModel.DataAnnotations
 open System.Threading
 open System.Threading.Tasks
@@ -74,6 +75,25 @@ module ApiTests =
         Assert.Contains(outputIssues, fun issue -> issue.Message = "output")
 
     [<Fact>]
+    let ``run options helpers support pipeline syntax`` () =
+        let session =
+            CircuitSession(
+                "session-1",
+                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                ValueNone,
+                ValueNone,
+                ValueNone
+            )
+
+        let options =
+            Circuit.Core.RunOptions.Default
+            |> RunOptions.withStructuredOutputPolicy StructuredOutputPolicy.AllowSecondaryModelRepair
+            |> RunOptions.withSession session
+
+        Assert.Equal(ValueSome session, options.Session)
+        Assert.Equal(StructuredOutputPolicy.AllowSecondaryModelRepair, options.StructuredOutputPolicy)
+
+    [<Fact>]
     let ``agent module delegates to the runtime`` () =
         let expected = Output(Text = "ok")
         let runtime = RecordingRuntime(expected) :> ICircuitRuntime
@@ -86,7 +106,14 @@ module ApiTests =
             Signature.create<Input, Output> "signature.test" "1.0.0" "Description" "Instructions"
 
         let result =
-            (Agent.run runtime agent signature (Input(Name = "Ada")) RunOptions.Default CancellationToken.None).Result
+            (Agent.run
+                runtime
+                agent
+                signature
+                (Input(Name = "Ada"))
+                Circuit.Core.RunOptions.Default
+                CancellationToken.None)
+                .Result
 
         Assert.True(result.Result.IsSuccess)
         Assert.Equal("ok", result.Result.Value.Text)

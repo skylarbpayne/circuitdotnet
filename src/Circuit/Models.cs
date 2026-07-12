@@ -639,18 +639,25 @@ public sealed class WorkflowCheckpoint<T>
     public string DefinitionVersion { get; }
 
     /// <summary>
-    /// Gets the created at.
+    /// Gets the checkpoint creation time in UTC.
     /// </summary>
     public DateTimeOffset CreatedAt { get; }
 
     /// <summary>
-    /// Serializes serialize.
+    /// Serializes the checkpoint to an opaque JSON envelope.
     /// </summary>
     public JsonElement Serialize() => Inner.Serialize();
 
     internal static WorkflowCheckpoint<T> FromCore(Circuit.Core.WorkflowCheckpoint<T> checkpoint) => new(checkpoint);
 
-    internal static WorkflowCheckpoint<T> Deserialize(JsonElement state)
+    /// <summary>
+    /// Restores a checkpoint from a serialized JSON envelope.
+    /// </summary>
+    /// <param name="state">The checkpoint envelope returned by <see cref="Serialize"/>.</param>
+    /// <returns>The restored checkpoint.</returns>
+    /// <exception cref="ArgumentException"><paramref name="state"/> is not a valid checkpoint envelope.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="state"/> uses an unsupported checkpoint format version.</exception>
+    public static WorkflowCheckpoint<T> Deserialize(JsonElement state)
         => new(Circuit.Core.WorkflowCheckpoint<T>.Deserialize(state));
 }
 

@@ -133,6 +133,119 @@ module IdentifiersAndResultsTests =
         Assert.Equal("failure", nullFailure.ParamName)
 
     [<Fact>]
+    let ``default run options use documented defaults`` () =
+        let defaults = RunOptions.Default
+
+        Assert.Equal(ValueNone, defaults.Session)
+        Assert.Equal(ValueNone, defaults.TenantId)
+        Assert.Equal(ValueNone, defaults.UserId)
+        Assert.Empty(defaults.Tags)
+        Assert.Equal(StructuredOutputPolicy.NativeOnly, defaults.StructuredOutputPolicy)
+        Assert.Equal(SensitiveDataMode.Standard, defaults.SensitiveDataMode)
+        Assert.NotNull(defaults.Services)
+
+    [<Fact>]
+    let ``WithSession replaces the session and preserves every other property`` () =
+        let tags =
+            Dictionary<string, string>(seq { KeyValuePair("team", "core") }, StringComparer.Ordinal)
+            :> IReadOnlyDictionary<string, string>
+
+        let services =
+            { new IServiceProvider with
+                member _.GetService(_serviceType) = null }
+
+        let options =
+            RunOptions(
+                ValueNone,
+                ValueSome("tenant-1"),
+                ValueSome("user-1"),
+                tags,
+                StructuredOutputPolicy.AllowSecondaryModelRepair,
+                SensitiveDataMode.Redact,
+                services
+            )
+
+        let session =
+            CircuitSession(
+                "session-1",
+                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                ValueNone,
+                ValueNone,
+                ValueNone
+            )
+
+        let updated = options.WithSession(session)
+
+        Assert.NotSame(options, updated)
+        Assert.Equal(ValueSome session, updated.Session)
+        Assert.Equal(options.TenantId, updated.TenantId)
+        Assert.Equal(options.UserId, updated.UserId)
+        Assert.Same(options.Tags, updated.Tags)
+        Assert.Equal(options.StructuredOutputPolicy, updated.StructuredOutputPolicy)
+        Assert.Equal(options.SensitiveDataMode, updated.SensitiveDataMode)
+        Assert.Same(options.Services, updated.Services)
+
+        let nullSession =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                options.WithSession(Unchecked.defaultof<CircuitSession>) |> ignore)
+
+        Assert.Equal("session", nullSession.ParamName)
+
+    [<Fact>]
+    let ``WithStructuredOutputPolicy replaces the policy and preserves every other property`` () =
+        let tags =
+            Dictionary<string, string>(seq { KeyValuePair("team", "core") }, StringComparer.Ordinal)
+            :> IReadOnlyDictionary<string, string>
+
+        let services =
+            { new IServiceProvider with
+                member _.GetService(_serviceType) = null }
+
+        let session =
+            CircuitSession(
+                "session-1",
+                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                ValueNone,
+                ValueNone,
+                ValueNone
+            )
+
+        let options =
+            RunOptions(
+                ValueSome session,
+                ValueSome("tenant-1"),
+                ValueSome("user-1"),
+                tags,
+                StructuredOutputPolicy.AllowSecondaryModelRepair,
+                SensitiveDataMode.Redact,
+                services
+            )
+
+        let updated = options.WithStructuredOutputPolicy(StructuredOutputPolicy.NativeOnly)
+
+        Assert.NotSame(options, updated)
+        Assert.Equal(options.Session, updated.Session)
+        Assert.Equal(options.TenantId, updated.TenantId)
+        Assert.Equal(options.UserId, updated.UserId)
+        Assert.Same(options.Tags, updated.Tags)
+        Assert.Equal(StructuredOutputPolicy.NativeOnly, updated.StructuredOutputPolicy)
+        Assert.Equal(options.SensitiveDataMode, updated.SensitiveDataMode)
+        Assert.Same(options.Services, updated.Services)
+
+    [<Theory>]
+    [<InlineData(-1)>]
+    [<InlineData(2)>]
+    let ``WithStructuredOutputPolicy rejects values outside the defined enum range`` invalidValue =
+        let invalidPolicy = enum<StructuredOutputPolicy> invalidValue
+
+        let error =
+            Assert.Throws<ArgumentOutOfRangeException>(fun () ->
+                RunOptions.Default.WithStructuredOutputPolicy(invalidPolicy) |> ignore)
+
+        Assert.Equal("policy", error.ParamName)
+        Assert.Equal(invalidPolicy, unbox<StructuredOutputPolicy> error.ActualValue)
+
+    [<Fact>]
     let ``run options and approval requests validate constructor arguments`` () =
         let tags =
             Dictionary<string, string>(seq { KeyValuePair("team", "core") }, StringComparer.Ordinal)

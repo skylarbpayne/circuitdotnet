@@ -18,6 +18,8 @@ M:Circuit.FSharp.CircuitBuilder.TryFinally(Circuit.FSharp.CircuitProgram{``0},Mi
 M:Circuit.FSharp.CircuitBuilder.TryWith(Circuit.FSharp.CircuitProgram{``0},Microsoft.FSharp.Core.FSharpFunc{System.Exception,Circuit.FSharp.CircuitProgram{``0}})~Circuit.FSharp.CircuitProgram{``0}
 M:Circuit.FSharp.CircuitBuilder.Using(``0,Microsoft.FSharp.Core.FSharpFunc{``0,Circuit.FSharp.CircuitProgram{``1}})~Circuit.FSharp.CircuitProgram{``1}
 M:Circuit.FSharp.CircuitBuilder.Zero()~Circuit.FSharp.CircuitProgram{Microsoft.FSharp.Core.Unit}
+M:Circuit.FSharp.RunOptions.withSession(Circuit.Core.CircuitSession,Circuit.Core.RunOptions)~Circuit.Core.RunOptions
+M:Circuit.FSharp.RunOptions.withStructuredOutputPolicy(Circuit.Core.StructuredOutputPolicy,Circuit.Core.RunOptions)~Circuit.Core.RunOptions
 M:Circuit.FSharp.Signature.create(System.String,System.String,System.String,System.String)~Circuit.Core.Signature{``0,``1}
 M:Circuit.FSharp.Signature.withInputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``0,``1})~Circuit.Core.Signature{``0,``1}
 M:Circuit.FSharp.Signature.withOutputValidator(Circuit.Core.IContractValidator{``0},Circuit.Core.Signature{``1,``0})~Circuit.Core.Signature{``1,``0}
@@ -45,6 +47,7 @@ T:Circuit.FSharp.AgentDefinition
 T:Circuit.FSharp.Circuit
 T:Circuit.FSharp.CircuitBuilder
 T:Circuit.FSharp.CircuitProgram`1
+T:Circuit.FSharp.RunOptions
 T:Circuit.FSharp.Signature
 T:Circuit.FSharp.ToolDefinition
 T:Circuit.FSharp.Workflow
