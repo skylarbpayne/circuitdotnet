@@ -31,6 +31,7 @@ Circuit gives you:
 
 ## Start here
 
+- **[Run your first agent](docs/tutorial/01-first-agent.md)** — begin the progressive F# tutorial with a live typed support-ticket agent.
 - [Concepts: circuits](docs/concepts/circuits.md)
 - [Concepts: signatures and validation](docs/concepts/signatures-and-validation.md)
 - [Concepts: tools vs. skills](docs/concepts/tools-vs-skills.md)

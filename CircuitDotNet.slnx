@@ -3,6 +3,26 @@
     <Project Path="samples/TicketTriage.CSharp/TicketTriage.CSharp.csproj" />
     <Project Path="samples/TicketTriage.FSharp/TicketTriage.FSharp.fsproj" />
   </Folder>
+  <Folder Name="/tutorials/fsharp/">
+    <Project Path="tutorials/fsharp/01-first-agent/FirstAgent.fsproj" />
+    <Project Path="tutorials/fsharp/02-building-blocks/BuildingBlocks.fsproj" />
+    <Project Path="tutorials/fsharp/03-validation/Validation.fsproj" />
+    <Project Path="tutorials/fsharp/04-failures/Failures.fsproj" />
+    <Project Path="tutorials/fsharp/05-structured-output/StructuredOutput.fsproj" />
+    <Project Path="tutorials/fsharp/06-streaming/Streaming.fsproj" />
+    <Project Path="tutorials/fsharp/07-sessions/Sessions.fsproj" />
+    <Project Path="tutorials/fsharp/08-tools/Tools.fsproj" />
+    <Project Path="tutorials/fsharp/09-approvals/Approvals.fsproj" />
+    <Project Path="tutorials/fsharp/10-skills/Skills.fsproj" />
+    <Project Path="tutorials/fsharp/11-circuit-programs/CircuitPrograms.fsproj" />
+    <Project Path="tutorials/fsharp/12-parallel-programs/ParallelPrograms.fsproj" />
+    <Project Path="tutorials/fsharp/13-workflows/Workflows.fsproj" />
+    <Project Path="tutorials/fsharp/14-human-review/HumanReview.fsproj" />
+    <Project Path="tutorials/fsharp/15-checkpoints/Checkpoints.fsproj" />
+    <Project Path="tutorials/fsharp/16-testing/Testing.fsproj" />
+    <Project Path="tutorials/fsharp/17-telemetry/Telemetry.fsproj" />
+    <Project Path="tutorials/fsharp/18-switch-providers/SwitchProviders.fsproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Circuit.Core/Circuit.Core.fsproj" />
     <Project Path="src/Circuit.FSharp/Circuit.FSharp.fsproj" />

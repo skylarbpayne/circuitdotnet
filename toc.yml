@@ -1,5 +1,7 @@
 - name: Home
   href: README.md
+- name: Tutorial
+  href: docs/tutorial/toc.yml
 - name: Concepts
   href: docs/concepts/toc.yml
 - name: Getting started

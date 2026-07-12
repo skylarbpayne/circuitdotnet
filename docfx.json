@@ -39,7 +39,8 @@
         "files": [
           "tests/Circuit.Interop.Tests/DocumentationExamples/**",
           "tests/Circuit.FSharp.Tests/DocumentationExamples/**",
-          "samples/TicketTriage.Shared/**"
+          "samples/TicketTriage.Shared/**",
+          "tutorials/fsharp/**/*.fs"
         ]
       }
     ],
