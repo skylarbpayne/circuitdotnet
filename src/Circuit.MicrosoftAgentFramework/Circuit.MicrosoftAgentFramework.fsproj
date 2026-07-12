@@ -17,6 +17,7 @@
     <Compile Include="MafErrors.fs" />
     <Compile Include="MafRuntime.fs" />
     <Compile Include="MafStreaming.fs" />
+    <Compile Include="MafInteractive.fs" />
     <Compile Include="MafWorkflows.fs" />
     <Compile Include="CSharpFacade.fs" />
     <Compile Include="DependencyInjection.fs" />

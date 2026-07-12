@@ -149,7 +149,7 @@ module internal MafStreaming =
                 usage <- MafErrors.createUsage usageContent.Details
             | _ -> ()
 
-    let private repairAsync
+    let internal repairAsync
         (secondaryClient: IChatClient)
         (responseFormat: ChatResponseFormat)
         (text: string)

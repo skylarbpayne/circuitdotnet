@@ -28,6 +28,10 @@ You still own:
 - **Sessions and checkpoints** can carry sensitive model/runtime state.
 - **Observers** can leak payloads if you opt in to capture.
 
+## Checkpoint trust boundary
+
+`WorkflowCheckpoint.Deserialize` validates only the checkpoint envelope's structure and format compatibility. It does not authenticate the checkpoint or verify its integrity. Treat checkpoints as trusted sensitive state: enforce serialized-size limits before parsing, protect checkpoint storage with appropriate authentication and encryption, and never pass a client-supplied checkpoint envelope directly to `Deserialize`.
+
 ## Non-guarantees
 
 Circuit does not guarantee:

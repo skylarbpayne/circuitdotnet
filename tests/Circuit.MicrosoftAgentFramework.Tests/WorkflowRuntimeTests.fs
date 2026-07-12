@@ -1432,8 +1432,14 @@ module WorkflowRuntimeTests =
 
         let checkpoint = run.CreateCheckpointAsync(CancellationToken.None).AsTask().Result
 
+        let restoredCheckpoint =
+            let serialized = checkpoint.Serialize().GetRawText()
+            use freshDocument = JsonDocument.Parse(serialized)
+            WorkflowCheckpoint<bool>.Deserialize(freshDocument.RootElement)
+
         let resumed =
-            Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
+            Workflow.resume runtime definition restoredCheckpoint CancellationToken.None
+            |> _.Result
 
         let resumedFirstPass =
             collectUntil (fun event -> event.Kind = RunEventKind.ApprovalRequested) resumed
@@ -1470,7 +1476,8 @@ module WorkflowRuntimeTests =
 
         let assertCheckpointMismatch definition expectedMessage =
             let resumedMismatch =
-                Workflow.resume runtime definition checkpoint CancellationToken.None |> _.Result
+                Workflow.resume runtime definition restoredCheckpoint CancellationToken.None
+                |> _.Result
 
             let mismatchEvents = collectEvents resumedMismatch |> _.Result
 

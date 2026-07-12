@@ -228,6 +228,32 @@ type FakeChatClient
 
         member _.GetService(_serviceType, _serviceKey) = null
 
+type CancellationBlockingObserver() =
+    let entered =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    let mutable cancellations = 0
+
+    member _.Entered = entered.Task
+    member _.Cancellations = Volatile.Read(&cancellations)
+
+    interface Circuit.IRunObserver with
+        member _.OnEventAsync(event, cancellationToken) =
+            if event.Kind <> AgentRunEventKind.RunStarted then
+                ValueTask()
+            else
+                ValueTask(
+                    task {
+                        entered.TrySetResult() |> ignore
+
+                        try
+                            do! Task.Delay(Timeout.Infinite, cancellationToken)
+                        finally
+                            if cancellationToken.IsCancellationRequested then
+                                Interlocked.Increment(&cancellations) |> ignore
+                    }
+                )
+
 type RecordingObserver() =
     let events = ResizeArray<RunEventEnvelope>()
 
@@ -261,11 +287,12 @@ module internal Helpers =
                 null
             )
 
-    let createRunOptionsWith
+    let createRunOptionsWithSensitiveDataMode
         (session: CircuitSession option)
         (tenantId: string option)
         (userId: string option)
         (policy: StructuredOutputPolicy)
+        (sensitiveDataMode: SensitiveDataMode)
         =
         let tags =
             Dictionary<string, string>(StringComparer.Ordinal) :> IReadOnlyDictionary<string, string>
@@ -284,10 +311,13 @@ module internal Helpers =
                box userValue
                box tags
                box policy
-               box SensitiveDataMode.Standard
+               box sensitiveDataMode
                box (NullServiceProvider() :> IServiceProvider) |]
         )
         :?> RunOptions
+
+    let createRunOptionsWith session tenantId userId policy =
+        createRunOptionsWithSensitiveDataMode session tenantId userId policy SensitiveDataMode.Standard
 
     let createRunOptions (session: CircuitSession option) (policy: StructuredOutputPolicy) =
         createRunOptionsWith session None None policy
@@ -1807,6 +1837,1345 @@ module MafRuntimeTests =
 
         Assert.Equal("completed", finalResponse.Text)
         Assert.Equal(1, executions)
+
+    [<Fact>]
+    let ``structured agent supports raw approval and typed approve or reject continuation on the same session`` () =
+        let continueWithDecision approved =
+            let mutable executions = 0
+
+            let primary =
+                new FakeChatClient(
+                    (fun messages _options _ct ->
+                        match tryGetFunctionResult messages with
+                        | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                        | None ->
+                            let arguments = Dictionary<string, obj>()
+                            arguments["path"] <- "spike.txt"
+                            arguments["content"] <- "structured approval"
+                            Task.FromResult(functionCallResponse "spike-call" "tool_write_v1" arguments)),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                )
+
+            let runtime =
+                createMafRuntimeWith
+                    (fun options ->
+                        let writeTool =
+                            createResolvedTool
+                                (createWriteTool ApprovalMode.Always ValueNone (fun _ input ->
+                                    executions <- executions + 1
+                                    Task.FromResult(WriteToolOutput(Status = $"{input.Path}:{input.Content}"))))
+                                Seq.empty
+
+                        options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                    primary
+                    None
+                    Array.empty<Circuit.IRunObserver>
+
+            let agent = createAgent "Use tools when needed."
+            let signature = createSignature<TestOutput> ()
+            let runOptions = createRunOptions None StructuredOutputPolicy.NativeOnly
+            let runId = RunId.New()
+            let context = runtime.CreateRunContext(runId, agent, signature, runOptions)
+
+            let tools, skills =
+                match
+                    runtime.ResolveCapabilitiesAsync runId context agent CancellationToken.None
+                    |> _.Result
+                with
+                | Ok capabilities -> capabilities
+                | Error failure -> failwith failure.Message
+
+            use compiled =
+                MafAgentFactory.createAgent
+                    runtime.ChatClient
+                    runtime.RuntimeOptions
+                    context
+                    agent
+                    signature
+                    tools
+                    skills
+                    false
+
+            let session =
+                compiled.Agent.CreateSessionAsync(CancellationToken.None).AsTask().Result
+
+            let inputEnvelope =
+                runtime.CreateInputEnvelope(signature, TestInput(Token = "spike"))
+
+            let first =
+                compiled.Agent.RunAsync(inputEnvelope, session, null, CancellationToken.None).Result
+
+            let request =
+                Assert.IsType<ToolApprovalRequestContent>(tryGetApprovalRequest first.Messages |> Option.get)
+
+            let responseMessage =
+                ChatMessage(
+                    ChatRole.User,
+                    ResizeArray<AIContent>([ request.CreateResponse(approved, "operator decision") :> AIContent ])
+                    :> IList<AIContent>
+                )
+
+            let final =
+                compiled.Agent
+                    .RunAsync<TestOutput>(
+                        [ responseMessage ],
+                        session,
+                        signature.JsonSerializerOptions,
+                        null,
+                        CancellationToken.None
+                    )
+                    .Result
+
+            final.Result.Text, executions
+
+        let approvedText, approvedExecutions = continueWithDecision true
+        let rejectedText, rejectedExecutions = continueWithDecision false
+
+        Assert.Equal("completed", approvedText)
+        Assert.Equal(1, approvedExecutions)
+        Assert.Equal("completed", rejectedText)
+        Assert.Equal(0, rejectedExecutions)
+
+    [<Theory>]
+    [<InlineData(true, 1)>]
+    [<InlineData(false, 0)>]
+    let ``interactive MAF run resumes an approval exactly once on the same live event stream``
+        approved
+        expectedExecutions
+        =
+        let mutable executions = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                    | None ->
+                        let arguments = Dictionary<string, obj>()
+                        arguments["path"] <- "interactive.txt"
+                        arguments["content"] <- "approval"
+                        Task.FromResult(functionCallResponse "interactive-call" "tool_write_v1" arguments)),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ input ->
+                                executions <- executions + 1
+                                Task.FromResult(WriteToolOutput(Status = $"{input.Path}:{input.Content}"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Use tools when needed.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "interactive"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let first = run.Events.GetAsyncEnumerator(CancellationToken.None)
+        Assert.True(first.MoveNextAsync().AsTask().Result)
+        let started = first.Current
+        Assert.Equal(RunEventKind.RunStarted, started.Kind)
+        Assert.True(first.MoveNextAsync().AsTask().Result)
+        let approvalEvent = first.Current
+        Assert.Equal(RunEventKind.ApprovalRequested, approvalEvent.Kind)
+        first.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        Assert.Throws<InvalidOperationException>(fun () ->
+            run
+                .RespondAsync(ApprovalResponse("wrong-request", true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult())
+        |> ignore
+
+        let requestId = approvalEvent.Approval.Value.RequestId
+
+        let concurrentResponses =
+            [| for _ in 1..2 ->
+                   Task.Run(fun () ->
+                       try
+                           run
+                               .RespondAsync(
+                                   ApprovalResponse(requestId, approved, "operator decision"),
+                                   CancellationToken.None
+                               )
+                               .AsTask()
+                               .GetAwaiter()
+                               .GetResult()
+
+                           true
+                       with :? InvalidOperationException ->
+                           false) |]
+
+        Task.WaitAll(concurrentResponses |> Array.map (fun task -> task :> Task))
+        Assert.Equal(1, concurrentResponses |> Array.filter _.Result |> Array.length)
+
+        let remaining = collectStreamEvents run.Events
+        let allEvents = Array.append [| started; approvalEvent |] remaining
+
+        let terminal =
+            allEvents
+            |> Array.filter (fun event -> event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+
+        Assert.Single(terminal) |> ignore
+        Assert.Equal(RunEventKind.RunCompleted, terminal[0].Kind)
+        Assert.Equal("completed", terminal[0].Value.Value.Text)
+        Assert.Equal<int64[]>([| 0L .. int64 (allEvents.Length - 1) |], allEvents |> Array.map _.Sequence)
+        Assert.Equal(expectedExecutions, executions)
+
+        Assert.Throws<InvalidOperationException>(fun () ->
+            run
+                .RespondAsync(ApprovalResponse(requestId, approved, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult())
+        |> ignore
+
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF start validates required arguments`` () =
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver> :> IInteractiveCircuitRuntime
+
+        let agent = createAgent "Validate arguments."
+        let signature = createSignature<TestOutput> ()
+        let input = TestInput(Token = "validation")
+        let options = createRunOptions None StructuredOutputPolicy.NativeOnly
+
+        let nullAgent =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(
+                    Unchecked.defaultof<AgentDefinition>,
+                    signature,
+                    input,
+                    options,
+                    CancellationToken.None
+                )
+                |> ignore)
+
+        let nullSignature =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(
+                    agent,
+                    Unchecked.defaultof<Signature<TestInput, TestOutput>>,
+                    input,
+                    options,
+                    CancellationToken.None
+                )
+                |> ignore)
+
+        let nullOptions =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                runtime.StartAsync(agent, signature, input, Unchecked.defaultof<RunOptions>, CancellationToken.None)
+                |> ignore)
+
+        Assert.Equal("agent", nullAgent.ParamName)
+        Assert.Equal("signature", nullSignature.ParamName)
+        Assert.Equal("options", nullOptions.ParamName)
+        Assert.Equal(0, primary.ResponseCalls)
+
+    [<Fact>]
+    let ``interactive MAF rejects responses before the approval event is published`` () =
+        let releaseProvider =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                    | None ->
+                        task {
+                            do! releaseProvider.Task
+                            let arguments = Dictionary<string, obj>()
+                            arguments["path"] <- "prepublication.txt"
+                            arguments["content"] <- "approval"
+                            return functionCallResponse "prepublication-call" "tool_write_v1" arguments
+                        }),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                Task.FromResult(WriteToolOutput(Status = "written"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Request approval.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "prepublication"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let mutable rejected = false
+
+        MafInteractive.ApprovalPreparedForTesting <-
+            ValueSome(fun requestId ->
+                try
+                    run
+                        .RespondAsync(ApprovalResponse(requestId, true, null), CancellationToken.None)
+                        .AsTask()
+                        .GetAwaiter()
+                        .GetResult()
+                with :? InvalidOperationException ->
+                    rejected <- true)
+
+        try
+            releaseProvider.TrySetResult() |> ignore
+            let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+            let approval = enumerator.Current.Approval.Value
+            Assert.True(rejected)
+
+            run
+                .RespondAsync(ApprovalResponse(approval.RequestId, true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult()
+
+            while enumerator.MoveNextAsync().AsTask().Result do
+                ()
+
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+        finally
+            MafInteractive.ApprovalPreparedForTesting <- ValueNone
+            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF native rounds preserve object primitive and array response formats`` () =
+        let responses = Queue<string>([| "{\"text\":\"object\"}"; "7"; "[\"a\",\"b\"]" |])
+
+        let formats = ResizeArray<ChatResponseFormat>()
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages options _ct ->
+                    formats.Add options.ResponseFormat
+                    Task.FromResult(jsonResponse (responses.Dequeue()))),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver>
+
+        let agent = createAgent "Return structured output."
+        let options = createRunOptions None StructuredOutputPolicy.NativeOnly
+
+        let objectRun =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    agent,
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "object"),
+                    options,
+                    CancellationToken.None
+                )
+                .Result
+
+        let objectEvents = collectStreamEvents objectRun.Events
+
+        Assert.Equal(RunEventKind.RunCompleted, objectEvents[objectEvents.Length - 1].Kind)
+
+        Assert.Equal("object", objectEvents[objectEvents.Length - 1].Value.Value.Text)
+        (objectRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        let primitiveRun =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    agent,
+                    createSignature<int> (),
+                    TestInput(Token = "primitive"),
+                    options,
+                    CancellationToken.None
+                )
+                .Result
+
+        let primitiveEvents = collectStreamEvents primitiveRun.Events
+        Assert.Equal(RunEventKind.RunCompleted, primitiveEvents[primitiveEvents.Length - 1].Kind)
+        Assert.Equal(7, primitiveEvents[primitiveEvents.Length - 1].Value.Value)
+        (primitiveRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        let arrayRun =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    agent,
+                    createSignature<string[]> (),
+                    TestInput(Token = "array"),
+                    options,
+                    CancellationToken.None
+                )
+                .Result
+
+        let arrayEvents = collectStreamEvents arrayRun.Events
+        Assert.Equal(RunEventKind.RunCompleted, arrayEvents[arrayEvents.Length - 1].Kind)
+        Assert.Equal<string[]>([| "a"; "b" |], arrayEvents[arrayEvents.Length - 1].Value.Value)
+        (arrayRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        Assert.Equal(3, formats.Count)
+        Assert.All(formats, fun format -> Assert.NotNull format) |> ignore
+
+    [<Fact>]
+    let ``interactive MAF redacts approval arguments from events and observers`` () =
+        let secret = "interactive-approval-secret"
+
+        let runMode sensitiveDataMode =
+            let observer = RecordingObserver()
+
+            let primary =
+                new FakeChatClient(
+                    (fun messages _options _ct ->
+                        match tryGetFunctionResult messages with
+                        | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                        | None ->
+                            let arguments = Dictionary<string, obj>()
+                            arguments["path"] <- "redaction.txt"
+                            arguments["content"] <- secret
+                            Task.FromResult(functionCallResponse "redaction-call" "tool_write_v1" arguments)),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                )
+
+            let runtime =
+                createMafRuntimeWith
+                    (fun options ->
+                        let writeTool =
+                            createResolvedTool
+                                (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                    Task.FromResult(WriteToolOutput(Status = "unused"))))
+                                Seq.empty
+
+                        options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                    primary
+                    None
+                    [| observer :> Circuit.IRunObserver |]
+
+            let options =
+                createRunOptionsWithSensitiveDataMode None None None StructuredOutputPolicy.NativeOnly sensitiveDataMode
+
+            let run =
+                (runtime :> IInteractiveCircuitRuntime)
+                    .StartAsync(
+                        createAgent "Request approval.",
+                        createSignature<TestOutput> (),
+                        TestInput(Token = "redaction"),
+                        options,
+                        CancellationToken.None
+                    )
+                    .Result
+
+            let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+            let mutable approval = ValueNone
+
+            while approval.IsNone do
+                Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+
+                if enumerator.Current.Kind = RunEventKind.ApprovalRequested then
+                    approval <- ValueSome enumerator.Current.Approval.Value
+
+            run
+                .RespondAsync(ApprovalResponse(approval.Value.RequestId, false, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult()
+
+            while enumerator.MoveNextAsync().AsTask().Result do
+                ()
+
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+            let observed =
+                observer.Events
+                |> Seq.find (fun event -> event.Kind = AgentRunEventKind.ApprovalRequested)
+
+            approval.Value, observed.Approval
+
+        let standardEvent, standardObserved = runMode SensitiveDataMode.Standard
+        Assert.Contains(secret, standardEvent.ArgumentsJson.Value)
+        Assert.Contains(secret, standardObserved.ArgumentsJson)
+
+        let redactedEvent, redactedObserved = runMode SensitiveDataMode.Redact
+        Assert.True(redactedEvent.ArgumentsJson.IsNone)
+        Assert.Null(redactedObserved.ArgumentsJson)
+
+    [<Fact>]
+    let ``interactive MAF repairs only a final malformed response`` () =
+        let observer = RecordingObserver()
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages options _ct ->
+                    Assert.NotNull(options.ResponseFormat)
+                    Task.FromResult(jsonResponseWithUsage "not-json" (usageDetails 10 20))),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let secondary =
+            new FakeChatClient(
+                (fun _messages options _ct ->
+                    Assert.NotNull(options.ResponseFormat)
+                    Task.FromResult(jsonResponseWithUsage "{\"text\":\"repaired\"}" (usageDetails 2 3))),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary (Some secondary) [| observer :> Circuit.IRunObserver |]
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Return structured output.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "repair"),
+                    createRunOptions None StructuredOutputPolicy.AllowSecondaryModelRepair,
+                    CancellationToken.None
+                )
+                .Result
+
+        let events = collectStreamEvents run.Events
+        let terminal = events[events.Length - 1]
+        Assert.Equal(RunEventKind.RunCompleted, terminal.Kind)
+        Assert.Equal("repaired", terminal.Value.Value.Text)
+        Assert.Equal(1, primary.ResponseCalls)
+        Assert.Equal(1, secondary.ResponseCalls)
+        let observed = Assert.Single(observer.Observations)
+        Assert.True(observed.Repaired)
+        Assert.Equal("true", observed.DiagnosticMetadata["circuit.repaired"])
+        Assert.Equal("not-json", observed.DiagnosticMetadata["circuit.repair.originalResponse"])
+        Assert.Equal(12, observed.Usage.InputTokens)
+        Assert.Equal(23, observed.Usage.OutputTokens)
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF repairs only after an approval round reaches malformed final output`` () =
+        let mutable executions = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some _ -> Task.FromResult(jsonResponse "malformed-final")
+                    | None ->
+                        let arguments = Dictionary<string, obj>()
+                        arguments["path"] <- "repair.txt"
+                        arguments["content"] <- "approval"
+                        Task.FromResult(functionCallResponse "repair-call" "tool_write_v1" arguments)),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let secondary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"repaired-after-approval\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                executions <- executions + 1
+                                Task.FromResult(WriteToolOutput(Status = "written"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                (Some secondary)
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Use the tool.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "approval-repair"),
+                    createRunOptions None StructuredOutputPolicy.AllowSecondaryModelRepair,
+                    CancellationToken.None
+                )
+                .Result
+
+        let first = run.Events.GetAsyncEnumerator(CancellationToken.None)
+        Assert.True(first.MoveNextAsync().AsTask().Result)
+        Assert.True(first.MoveNextAsync().AsTask().Result)
+        let approval = first.Current.Approval.Value
+        first.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        run
+            .RespondAsync(ApprovalResponse(approval.RequestId, true, null), CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult()
+
+        let remaining = collectStreamEvents run.Events
+        let terminal = remaining[remaining.Length - 1]
+        Assert.Equal(RunEventKind.RunCompleted, terminal.Kind)
+        Assert.Equal("repaired-after-approval", terminal.Value.Value.Text)
+        Assert.Equal(1, executions)
+        Assert.Equal(1, secondary.ResponseCalls)
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF run cancelled before start emits one cancelled terminal`` () =
+        let mutable calls = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct ->
+                    calls <- calls + 1
+                    Task.FromResult(jsonResponse "{\"text\":\"unexpected\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver>
+
+        use cts = new CancellationTokenSource()
+        cts.Cancel()
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Follow directions.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "cancelled"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    cts.Token
+                )
+                .Result
+
+        let events = collectStreamEvents run.Events
+        Assert.Equal<RunEventKind[]>([| RunEventKind.RunStarted; RunEventKind.RunFailed |], events |> Array.map _.Kind)
+        Assert.Equal(CircuitFailureCode.Cancelled, events[1].Failure.Value.Code)
+        Assert.Equal(0, calls)
+        Assert.Equal<int64[]>([| 0L; 1L |], events |> Array.map _.Sequence)
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF active provider cancellation cleans up observers exactly once`` () =
+        let observer = RecordingObserver()
+
+        let entered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options ct ->
+                    task {
+                        entered.TrySetResult() |> ignore
+                        do! Task.Delay(Timeout.Infinite, ct)
+                        return jsonResponse "{\"text\":\"unexpected\"}"
+                    }),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None [| observer :> Circuit.IRunObserver |]
+
+        use cts = new CancellationTokenSource()
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Wait for the provider.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "active-cancel"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    cts.Token
+                )
+                .Result
+
+        Assert.True(entered.Task.Wait(1000), "provider call did not start")
+        cts.Cancel()
+        let events = collectStreamEvents run.Events
+
+        let terminals =
+            events
+            |> Array.filter (fun event -> event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+
+        Assert.Single(terminals) |> ignore
+        Assert.Equal(CircuitFailureCode.Cancelled, terminals[0].Failure.Value.Code)
+        Assert.True(primary.SawCancellation)
+        Assert.Single(observer.Observations) |> ignore
+        Assert.True(MafObserver.tryGetSession run.RunId |> ValueOption.isNone)
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+        Assert.Single(observer.Observations) |> ignore
+
+    [<Fact>]
+    let ``interactive MAF disposal cannot deadlock behind a full event buffer`` () =
+        let providerCalled =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct ->
+                    providerCalled.TrySetResult() |> ignore
+
+                    let contents =
+                        [| for index in 1..80 ->
+                               FunctionCallContent($"buffer-call-{index}", $"tool-{index}", null) :> AIContent |]
+
+                    Task.FromResult(
+                        ChatResponse(
+                            ChatMessage(ChatRole.Assistant, ResizeArray<AIContent>(contents) :> IList<AIContent>)
+                        )
+                    )),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver>
+
+        let backpressured =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        MafInteractive.EventBackpressureForTesting <- ValueSome(fun () -> backpressured.TrySetResult() |> ignore)
+
+        use _hookReset =
+            { new IDisposable with
+                member _.Dispose() =
+                    MafInteractive.EventBackpressureForTesting <- ValueNone }
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Fill the event buffer.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "full-buffer"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+        Assert.True(providerCalled.Task.Wait(1000), "provider call did not occur")
+        Assert.True(backpressured.Task.Wait(1000), "event buffer did not reach backpressure")
+        let disposal = (run :> IAsyncDisposable).DisposeAsync().AsTask()
+        assertCompletesWithin 1000 disposal "disposal should not wait for event buffer capacity"
+
+        let events = ResizeArray<RunEvent<TestOutput>>()
+        let mutable reading = true
+
+        while reading do
+            let moved = enumerator.MoveNextAsync().AsTask().Result
+
+            if moved then
+                events.Add enumerator.Current
+            else
+                reading <- false
+
+        let terminals =
+            events
+            |> Seq.filter (fun event -> event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+            |> Seq.toArray
+
+        Assert.Single(terminals) |> ignore
+        Assert.Equal(RunEventKind.RunFailed, terminals[0].Kind)
+        Assert.Equal(CircuitFailureCode.Cancelled, terminals[0].Failure.Value.Code)
+        Assert.NotEmpty(events)
+        enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF concurrent drain never loses the forced cancellation terminal`` () =
+        for iteration in 1..32 do
+            let providerCalled =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let primary =
+                new FakeChatClient(
+                    (fun _messages _options _ct ->
+                        providerCalled.TrySetResult() |> ignore
+
+                        let contents =
+                            [| for index in 1..80 ->
+                                   FunctionCallContent($"race-{iteration}-call-{index}", $"tool-{index}", null)
+                                   :> AIContent |]
+
+                        Task.FromResult(
+                            ChatResponse(
+                                ChatMessage(ChatRole.Assistant, ResizeArray<AIContent>(contents) :> IList<AIContent>)
+                            )
+                        )),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                )
+
+            let runtime =
+                createMafRuntimeWith ignore primary None Array.empty<Circuit.IRunObserver>
+
+            let backpressured =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            MafInteractive.EventBackpressureForTesting <- ValueSome(fun () -> backpressured.TrySetResult() |> ignore)
+
+            use _hookReset =
+                { new IDisposable with
+                    member _.Dispose() =
+                        MafInteractive.EventBackpressureForTesting <- ValueNone }
+
+            let run =
+                (runtime :> IInteractiveCircuitRuntime)
+                    .StartAsync(
+                        createAgent "Race cancellation with event draining.",
+                        createSignature<TestOutput> (),
+                        TestInput(Token = $"race-{iteration}"),
+                        createRunOptions None StructuredOutputPolicy.NativeOnly,
+                        CancellationToken.None
+                    )
+                    .Result
+
+            let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+            Assert.True(providerCalled.Task.Wait(1000), $"provider call {iteration} did not occur")
+            Assert.True(backpressured.Task.Wait(1000), $"iteration {iteration} did not reach backpressure")
+            let disposal = (run :> IAsyncDisposable).DisposeAsync().AsTask()
+
+            let drain =
+                Task.Run(fun () ->
+                    let events = ResizeArray<RunEvent<TestOutput>>()
+                    let mutable reading = true
+
+                    while reading do
+                        let moved = enumerator.MoveNextAsync().AsTask().Result
+
+                        if moved then
+                            events.Add enumerator.Current
+                        else
+                            reading <- false
+
+                    events.ToArray())
+
+            Assert.True(Task.WaitAll([| disposal; drain :> Task |], 2000), $"iteration {iteration} did not complete")
+
+            let terminals =
+                drain.Result
+                |> Array.filter (fun event ->
+                    event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed)
+
+            Assert.Single(terminals) |> ignore
+            Assert.Equal(RunEventKind.RunFailed, terminals[0].Kind)
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF disposal cancels a blocked observer and unregisters once`` () =
+        let observer = CancellationBlockingObserver()
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct -> Task.FromResult(jsonResponse "{\"text\":\"unused\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith ignore primary None [| observer :> Circuit.IRunObserver |]
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Wait for observer.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "observer-dispose"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        Assert.True(observer.Entered.Wait(1000), "observer did not receive RunStarted")
+        let disposal = (run :> IAsyncDisposable).DisposeAsync().AsTask()
+        assertCompletesWithin 1000 disposal "disposal should cancel the blocked observer"
+        Assert.Equal(1, observer.Cancellations)
+        Assert.True(MafObserver.tryGetSession run.RunId |> ValueOption.isNone)
+        Assert.Equal(0, primary.ResponseCalls)
+
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+        Assert.Equal(1, observer.Cancellations)
+
+    [<Fact>]
+    let ``interactive MAF continues through approvals serialized across rounds`` () =
+        let mutable executions = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun messages _options _ct ->
+                    match tryGetFunctionResult messages with
+                    | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                    | None ->
+                        let createCall callId path =
+                            let arguments = Dictionary<string, obj>()
+                            arguments["path"] <- path
+                            arguments["content"] <- "approval"
+                            FunctionCallContent(callId, "tool_write_v1", arguments) :> AIContent
+
+                        Task.FromResult(
+                            ChatResponse(
+                                ChatMessage(
+                                    ChatRole.Assistant,
+                                    ResizeArray<AIContent>(
+                                        [ createCall "multi-call-1" "one.txt"; createCall "multi-call-2" "two.txt" ]
+                                    )
+                                    :> IList<AIContent>
+                                )
+                            )
+                        )),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                executions <- executions + 1
+                                Task.FromResult(WriteToolOutput(Status = "written"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Use both tools.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "multiple"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+
+        try
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+
+            let readNextApproval () =
+                let mutable approval = ValueNone
+
+                while approval.IsNone do
+                    Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+
+                    if enumerator.Current.Kind = RunEventKind.ApprovalRequested then
+                        approval <- ValueSome enumerator.Current.Approval.Value
+                    elif
+                        enumerator.Current.Kind = RunEventKind.RunCompleted
+                        || enumerator.Current.Kind = RunEventKind.RunFailed
+                    then
+                        failwith "The run terminated before the next approval was emitted."
+
+                approval.Value
+
+            // MAF serializes the two tool approvals into separate rounds rather than exposing both at once.
+            let firstApproval = readNextApproval ()
+            Assert.Equal(1, primary.ResponseCalls)
+            Assert.Equal(0, executions)
+
+            run
+                .RespondAsync(ApprovalResponse(firstApproval.RequestId, true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult()
+
+            let secondApproval = readNextApproval ()
+            Assert.Equal(0, executions)
+            Assert.False(StringComparer.Ordinal.Equals(firstApproval.RequestId, secondApproval.RequestId))
+            Assert.False(String.IsNullOrWhiteSpace(secondApproval.RequestId))
+            Assert.Matches(Regex("^[0-9a-f]{32}$", RegexOptions.CultureInvariant), secondApproval.RequestId)
+
+            Assert.Throws<InvalidOperationException>(fun () ->
+                run
+                    .RespondAsync(ApprovalResponse(firstApproval.RequestId, true, null), CancellationToken.None)
+                    .AsTask()
+                    .GetAwaiter()
+                    .GetResult())
+            |> ignore
+
+            run
+                .RespondAsync(ApprovalResponse(secondApproval.RequestId, false, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult()
+
+            let mutable terminal = Unchecked.defaultof<RunEvent<TestOutput>>
+            let mutable reading = true
+
+            while reading do
+                let moved = enumerator.MoveNextAsync().AsTask().Result
+
+                if not moved then
+                    reading <- false
+                elif
+                    enumerator.Current.Kind = RunEventKind.RunCompleted
+                    || enumerator.Current.Kind = RunEventKind.RunFailed
+                then
+                    terminal <- enumerator.Current
+
+            Assert.Equal(RunEventKind.RunCompleted, terminal.Kind)
+            Assert.Equal(1, executions)
+            Assert.Equal(2, primary.ResponseCalls)
+        finally
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF bounds and rejects an over-limit approval response`` () =
+        let approvalContents =
+            [| for index in 1..17 ->
+                   let arguments = Dictionary<string, obj>()
+                   arguments["path"] <- $"approval-{index}.txt"
+                   arguments["content"] <- "approval"
+
+                   ToolApprovalRequestContent(
+                       $"provider-request-{index}",
+                       FunctionCallContent($"call-{index}", "tool_write_v1", arguments)
+                   )
+                   :> AIContent |]
+
+        let response =
+            AgentResponse(
+                [| ChatMessage(ChatRole.Assistant, ResizeArray<AIContent>(approvalContents) :> IList<AIContent>) |]
+                :> IList<ChatMessage>
+            )
+
+        let struct (approvals, overLimit) = MafInteractive.collectBoundedApprovals response
+
+        Assert.True(overLimit)
+        Assert.Equal(17, approvals.Length)
+        Assert.Equal("provider-request-1", approvals[0].RequestId)
+        Assert.Equal("provider-request-17", approvals[16].RequestId)
+
+    [<Fact>]
+    let ``interactive MAF fails safely after the bounded approval round limit`` () =
+        let mutable executions = 0
+        let mutable providerCalls = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct ->
+                    providerCalls <- providerCalls + 1
+                    let call = providerCalls
+                    let arguments = Dictionary<string, obj>()
+                    arguments["path"] <- $"round-{call}.txt"
+                    arguments["content"] <- "approval"
+
+                    Task.FromResult(
+                        ChatResponse(
+                            ChatMessage(
+                                ChatRole.Assistant,
+                                ResizeArray<AIContent>(
+                                    [ ToolApprovalRequestContent(
+                                          $"provider-request-{call}",
+                                          FunctionCallContent($"call-{call}", "tool_write_v1", arguments)
+                                      )
+                                      :> AIContent ]
+                                )
+                                :> IList<AIContent>
+                            )
+                        )
+                    )),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                executions <- executions + 1
+                                Task.FromResult(WriteToolOutput(Status = "unexpected"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Keep requesting approval.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "round-limit"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+        let mutable approvals = 0
+        let mutable terminal = ValueNone
+
+        while terminal.IsNone do
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+            let event = enumerator.Current
+
+            if event.Kind = RunEventKind.ApprovalRequested then
+                approvals <- approvals + 1
+
+                run
+                    .RespondAsync(ApprovalResponse(event.Approval.Value.RequestId, false, null), CancellationToken.None)
+                    .AsTask()
+                    .GetAwaiter()
+                    .GetResult()
+            elif event.Kind = RunEventKind.RunCompleted || event.Kind = RunEventKind.RunFailed then
+                terminal <- ValueSome event
+
+        Assert.Equal(16, approvals)
+        Assert.Equal(RunEventKind.RunFailed, terminal.Value.Kind)
+        Assert.Equal(CircuitFailureCode.Tool, terminal.Value.Failure.Value.Code)
+        Assert.Contains("maximum of 16 approval rounds", terminal.Value.Failure.Value.Message)
+        Assert.Equal(17, primary.ResponseCalls)
+        Assert.Equal(0, executions)
+        Assert.False(enumerator.MoveNextAsync().AsTask().Result)
+        enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF never accepts a reused provider approval id as a public response id`` () =
+        let mutable round = 0
+
+        let primary =
+            new FakeChatClient(
+                (fun _messages _options _ct ->
+                    round <- round + 1
+
+                    if round <= 2 then
+                        let arguments = Dictionary<string, obj>()
+                        arguments["path"] <- $"round-{round}.txt"
+                        arguments["content"] <- "approval"
+
+                        Task.FromResult(
+                            ChatResponse(
+                                ChatMessage(
+                                    ChatRole.Assistant,
+                                    ResizeArray<AIContent>(
+                                        [ ToolApprovalRequestContent(
+                                              "provider-request-reused",
+                                              FunctionCallContent($"call-{round}", "tool_write_v1", arguments)
+                                          )
+                                          :> AIContent ]
+                                    )
+                                    :> IList<AIContent>
+                                )
+                            )
+                        )
+                    else
+                        Task.FromResult(jsonResponse "{\"text\":\"completed\"}")),
+                (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+            )
+
+        let runtime =
+            createMafRuntimeWith
+                (fun options ->
+                    let writeTool =
+                        createResolvedTool
+                            (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                Task.FromResult(WriteToolOutput(Status = "unused"))))
+                            Seq.empty
+
+                    options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                primary
+                None
+                Array.empty<Circuit.IRunObserver>
+
+        let run =
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Request approval twice.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "provider-id"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    CancellationToken.None
+                )
+                .Result
+
+        let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+
+        let readApproval () =
+            let mutable found = ValueNone
+
+            while found.IsNone do
+                Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+
+                if enumerator.Current.Kind = RunEventKind.ApprovalRequested then
+                    found <- ValueSome enumerator.Current.Approval.Value
+
+            found.Value
+
+        let first = readApproval ()
+        Assert.False(StringComparer.Ordinal.Equals("provider-request-reused", first.RequestId))
+
+        Assert.Throws<InvalidOperationException>(fun () ->
+            run
+                .RespondAsync(ApprovalResponse("provider-request-reused", true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult())
+        |> ignore
+
+        run
+            .RespondAsync(ApprovalResponse(first.RequestId, true, null), CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult()
+
+        let second = readApproval ()
+        Assert.False(StringComparer.Ordinal.Equals(first.RequestId, second.RequestId))
+        Assert.False(StringComparer.Ordinal.Equals("provider-request-reused", second.RequestId))
+
+        Assert.Throws<InvalidOperationException>(fun () ->
+            run
+                .RespondAsync(ApprovalResponse(first.RequestId, true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult())
+        |> ignore
+
+        run
+            .RespondAsync(ApprovalResponse(second.RequestId, false, null), CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult()
+
+        let mutable terminal = ValueNone
+
+        while terminal.IsNone do
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+
+            if
+                enumerator.Current.Kind = RunEventKind.RunCompleted
+                || enumerator.Current.Kind = RunEventKind.RunFailed
+            then
+                terminal <- ValueSome enumerator.Current
+
+        Assert.Equal(RunEventKind.RunCompleted, terminal.Value.Kind)
+        enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+        (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    [<Fact>]
+    let ``interactive MAF paused run honors cancellation and handle disposal`` () =
+        let startPaused cancellationToken =
+            let primary =
+                new FakeChatClient(
+                    (fun messages _options _ct ->
+                        match tryGetFunctionResult messages with
+                        | Some _ -> Task.FromResult(jsonResponse "{\"text\":\"completed\"}")
+                        | None ->
+                            let arguments = Dictionary<string, obj>()
+                            arguments["path"] <- "paused.txt"
+                            arguments["content"] <- "approval"
+                            Task.FromResult(functionCallResponse "paused-call" "tool_write_v1" arguments)),
+                    (fun _messages _options _ct -> ArrayAsyncEnumerable(Array.empty))
+                )
+
+            let runtime =
+                createMafRuntimeWith
+                    (fun options ->
+                        let writeTool =
+                            createResolvedTool
+                                (createWriteTool ApprovalMode.Always ValueNone (fun _ _ ->
+                                    Task.FromResult(WriteToolOutput(Status = "unexpected"))))
+                                Seq.empty
+
+                        options.ToolResolvers <- [| StaticToolResolver([| writeTool |]) :> IToolResolver |])
+                    primary
+                    None
+                    Array.empty<Circuit.IRunObserver>
+
+            (runtime :> IInteractiveCircuitRuntime)
+                .StartAsync(
+                    createAgent "Use tools when needed.",
+                    createSignature<TestOutput> (),
+                    TestInput(Token = "paused"),
+                    createRunOptions None StructuredOutputPolicy.NativeOnly,
+                    cancellationToken
+                )
+                .Result
+
+        let readThroughApproval (run: AgentRun<TestOutput>) =
+            let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+            Assert.Equal(RunEventKind.RunStarted, enumerator.Current.Kind)
+            Assert.True(enumerator.MoveNextAsync().AsTask().Result)
+            Assert.Equal(RunEventKind.ApprovalRequested, enumerator.Current.Kind)
+            enumerator
+
+        use cts = new CancellationTokenSource()
+        let cancelledRun = startPaused cts.Token
+        let cancelledEvents = readThroughApproval cancelledRun
+        cts.Cancel()
+        Assert.True(cancelledEvents.MoveNextAsync().AsTask().Result)
+        Assert.Equal(RunEventKind.RunFailed, cancelledEvents.Current.Kind)
+        Assert.Equal(CircuitFailureCode.Cancelled, cancelledEvents.Current.Failure.Value.Code)
+        Assert.False(cancelledEvents.MoveNextAsync().AsTask().Result)
+        cancelledEvents.DisposeAsync().AsTask().GetAwaiter().GetResult()
+        (cancelledRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        let disposedRun = startPaused CancellationToken.None
+        let disposedEvents = readThroughApproval disposedRun
+        let disposedApprovalId = disposedEvents.Current.Approval.Value.RequestId
+        let otherRun = startPaused CancellationToken.None
+        let otherEvents = readThroughApproval otherRun
+        let otherApprovalId = otherEvents.Current.Approval.Value.RequestId
+        Assert.False(StringComparer.Ordinal.Equals(disposedApprovalId, otherApprovalId))
+
+        Assert.Throws<InvalidOperationException>(fun () ->
+            otherRun
+                .RespondAsync(ApprovalResponse(disposedApprovalId, true, null), CancellationToken.None)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult())
+        |> ignore
+
+        (otherRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+        Assert.True(otherEvents.MoveNextAsync().AsTask().Result)
+        Assert.Equal(RunEventKind.RunFailed, otherEvents.Current.Kind)
+        Assert.False(otherEvents.MoveNextAsync().AsTask().Result)
+        otherEvents.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        (disposedRun :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+        Assert.True(disposedEvents.MoveNextAsync().AsTask().Result)
+        Assert.Equal(RunEventKind.RunFailed, disposedEvents.Current.Kind)
+        Assert.Equal(CircuitFailureCode.Cancelled, disposedEvents.Current.Failure.Value.Code)
+        Assert.False(disposedEvents.MoveNextAsync().AsTask().Result)
+        disposedEvents.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+        Assert.Throws<ObjectDisposedException>(fun () -> disposedRun.Events |> ignore)
+        |> ignore
 
     [<Fact>]
     let ``write tool pauses for approval and executes only after an affirmative matching response`` () =

@@ -3,6 +3,8 @@ namespace Circuit.Core
 open System
 open System.Collections.Frozen
 open System.Collections.Generic
+open System.Threading
+open System.Threading.Tasks
 
 /// Controls how strictly a runtime must obtain native structured output from its provider.
 type StructuredOutputPolicy =
@@ -141,6 +143,26 @@ type RunOptions
     /// Gets the ambient service provider available to resolvers, tools, and skills.
     member _.Services = services
 
+    /// Creates a copy that continues the supplied session.
+    /// <param name="session">The non-null session to continue.</param>
+    member _.WithSession(session: CircuitSession) =
+        if isNull (box session) then
+            nullArg "session"
+
+        RunOptions(ValueSome session, tenantId, userId, tags, structuredOutputPolicy, sensitiveDataMode, services)
+
+    /// Creates a copy with the supplied structured-output policy.
+    /// <param name="policy">The structured-output policy for the copy.</param>
+    /// <exception cref="T:System.ArgumentOutOfRangeException">
+    /// <paramref name="policy" /> is not a supported structured-output policy.
+    /// </exception>
+    member _.WithStructuredOutputPolicy(policy: StructuredOutputPolicy) =
+        match policy with
+        | StructuredOutputPolicy.NativeOnly
+        | StructuredOutputPolicy.AllowSecondaryModelRepair ->
+            RunOptions(session, tenantId, userId, tags, policy, sensitiveDataMode, services)
+        | _ -> raise (ArgumentOutOfRangeException("policy", policy, "Unsupported structured-output policy."))
+
     /// Gets the default run options.
     static member Default =
         RunOptions(
@@ -205,6 +227,29 @@ type ApprovalRequest internal (requestId: string, toolName: string, argumentsJso
 
     /// Gets the serialized tool arguments when they are available.
     member _.ArgumentsJson = argumentsJson
+
+/// Represents the operator's response to an approval request.
+[<AllowNullLiteral; Sealed>]
+type ApprovalResponse(requestId: string, approved: bool, note: string) =
+    do
+        if String.IsNullOrWhiteSpace requestId then
+            invalidArg "requestId" "requestId cannot be blank."
+
+        if not (isNull note) && String.IsNullOrWhiteSpace note then
+            invalidArg "note" "note cannot be blank when provided."
+
+    /// Gets the approval request identifier being answered.
+    member _.RequestId = requestId
+
+    /// Gets whether the request was approved.
+    member _.Approved = approved
+
+    /// Gets the optional operator note.
+    member _.Note = note
+
+    /// Creates an approval response without a note.
+    static member Create(requestId: string, approved: bool) =
+        ApprovalResponse(requestId, approved, null)
 
 /// Identifies the kind of streaming event emitted during a run.
 type RunEventKind =
@@ -274,3 +319,102 @@ type RunEvent<'T>
 
     /// Gets the approval payload carried by approval-requested events.
     member _.Approval = approval
+
+/// Represents a live agent execution that may stream events and pause for approval.
+/// <remarks>
+/// This handle owns the lifetime of a paused run. Disposing an event enumerator does not dispose the run.
+/// The event stream supports one active consumer at a time. Replacing an enumerator sequentially continues with unread
+/// and future events; concurrent enumerators compete for events and are not a broadcast mechanism.
+/// Disposing the handle invokes its disposal delegate at most once; that delegate is responsible for cancelling
+/// or closing any event enumerators that were acquired before disposal. Accessing <see cref="P:Circuit.Core.AgentRun`1.Events" />
+/// or calling <see cref="M:Circuit.Core.AgentRun`1.RespondAsync(Circuit.Core.ApprovalResponse,System.Threading.CancellationToken)" />
+/// after disposal throws <see cref="T:System.ObjectDisposedException" />.
+/// </remarks>
+[<Sealed>]
+type AgentRun<'Output>
+    internal
+    (
+        runId: RunId,
+        events: IAsyncEnumerable<RunEvent<'Output>>,
+        respondAsync: ApprovalResponse * CancellationToken -> ValueTask,
+        disposeAsync: unit -> ValueTask
+    ) =
+    let mutable disposed = 0
+
+    do
+        if String.IsNullOrWhiteSpace runId.Value then
+            invalidArg "runId" "runId must be a valid run identifier."
+
+        if isNull (box events) then
+            nullArg "events"
+
+        if isNull (box respondAsync) then
+            nullArg "respondAsync"
+
+        if isNull (box disposeAsync) then
+            nullArg "disposeAsync"
+
+    let throwIfDisposed () =
+        if Volatile.Read(&disposed) <> 0 then
+            raise (ObjectDisposedException("AgentRun"))
+
+    /// Gets the run identifier.
+    member _.RunId = runId
+
+    /// Gets the event stream for the live agent run.
+    /// <remarks>
+    /// Disposing an event enumerator does not dispose the run handle. Use one active enumerator at a time; sequential
+    /// replacement continues with unread and future events, while concurrent enumerators compete for events.
+    /// Accessing this property after the handle is disposed throws <see cref="T:System.ObjectDisposedException" />.
+    /// </remarks>
+    member _.Events =
+        throwIfDisposed ()
+        events
+
+    /// Responds to a pending approval request whose identifier matches the response.
+    /// <remarks>
+    /// A response requires a pending matching request; otherwise the runtime fails the operation. Calling this method
+    /// after disposal throws <see cref="T:System.ObjectDisposedException" />.
+    /// </remarks>
+    /// <exception cref="T:System.ArgumentNullException"><paramref name="response" /> is null.</exception>
+    member _.RespondAsync(response: ApprovalResponse, cancellationToken) =
+        throwIfDisposed ()
+
+        if isNull response then
+            nullArg "response"
+
+        respondAsync (response, cancellationToken)
+
+    /// Creates a live agent run handle from runtime-provided delegates.
+    /// <param name="runId">The valid identifier assigned to the run.</param>
+    /// <param name="events">The non-null event stream owned by the runtime.</param>
+    /// <param name="respondAsync">The non-null delegate that forwards approval responses.</param>
+    /// <param name="disposeAsync">The non-null delegate that releases the live run.</param>
+    /// <exception cref="T:System.ArgumentException"><paramref name="runId" /> is not valid.</exception>
+    /// <exception cref="T:System.ArgumentNullException">A stream or delegate argument is null.</exception>
+    static member Create
+        (
+            runId: RunId,
+            events: IAsyncEnumerable<RunEvent<'Output>>,
+            respondAsync: Func<ApprovalResponse, CancellationToken, ValueTask>,
+            disposeAsync: Func<ValueTask>
+        ) =
+        if isNull respondAsync then
+            nullArg "respondAsync"
+
+        if isNull disposeAsync then
+            nullArg "disposeAsync"
+
+        AgentRun<'Output>(
+            runId,
+            events,
+            (fun (response, cancellationToken) -> respondAsync.Invoke(response, cancellationToken)),
+            (fun () -> disposeAsync.Invoke())
+        )
+
+    interface IAsyncDisposable with
+        member _.DisposeAsync() =
+            if Interlocked.CompareExchange(&disposed, 1, 0) = 0 then
+                disposeAsync ()
+            else
+                ValueTask()

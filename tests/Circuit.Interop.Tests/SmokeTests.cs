@@ -205,6 +205,44 @@ public sealed class SmokeTests
     }
 
     [Fact]
+    public async Task public_workflow_checkpoint_round_trips_and_preserves_metadata()
+    {
+        using var chatClient = new FakeChatClient(
+            onResponse: _ => "{\"message\":\"pong\"}",
+            onStreamingResponse: _ => ["{\"message\":\"pong\"}"]);
+        var client = new CircuitClientBuilder().UseMicrosoftAgentFramework(chatClient).Build();
+
+        var workflow = WorkflowDefinition<int, int>
+            .Start("interop.checkpoint", "1.0.0", "start", (_, input, _) => Task.FromResult(input))
+            .RequestApproval("approve", input => new ApprovalPrompt($"Approve {input}", "Continue?"))
+            .Build();
+
+        await using var run = await client.StartWorkflowAsync(workflow, 7);
+
+        await foreach (var @event in run.Events)
+        {
+            if (@event.Kind == AgentRunEventKind.ApprovalRequested)
+            {
+                break;
+            }
+        }
+
+        var checkpoint = await run.CreateCheckpointAsync();
+        var serialized = checkpoint.Serialize().GetRawText();
+
+        WorkflowCheckpoint<ApprovalResponse> restored;
+        using (var freshDocument = JsonDocument.Parse(serialized))
+        {
+            restored = WorkflowCheckpoint<ApprovalResponse>.Deserialize(freshDocument.RootElement);
+        }
+
+        Assert.Equal("interop.checkpoint", restored.DefinitionId);
+        Assert.Equal("1.0.0", restored.DefinitionVersion);
+        Assert.Equal(checkpoint.CreatedAt, restored.CreatedAt);
+        Assert.Equal(serialized, restored.Serialize().GetRawText());
+    }
+
+    [Fact]
     public async Task workflow_run_events_cancel_the_inner_stream_and_dispose_it()
     {
         var source = new BlockingRunEvents<int>();

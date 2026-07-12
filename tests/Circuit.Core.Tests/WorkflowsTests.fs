@@ -462,47 +462,155 @@ module WorkflowsTests =
         Assert.Equal("first", nullFirst.ParamName)
 
     [<Fact>]
-    let ``workflow checkpoints round trip and reject malformed envelopes`` () =
-        use payloadDocument = JsonDocument.Parse("{\"approved\":true}")
+    let ``workflow checkpoints deserialize a fresh envelope and clone its payload`` () =
+        let createdAt = DateTimeOffset.UtcNow
 
-        let checkpoint =
+        let serialized =
+            use payloadDocument = JsonDocument.Parse("{\"approved\":true}")
+
             WorkflowCheckpoint<bool>(
                 DefinitionId.Create("workflow.checkpoint"),
                 SemanticVersion.Parse("1.0.0"),
                 "fingerprint-1",
                 "session-1",
                 "checkpoint-1",
-                DateTimeOffset.UtcNow,
-                payloadDocument.RootElement.Clone()
+                createdAt,
+                payloadDocument.RootElement
             )
+                .Serialize()
 
-        let serialized = checkpoint.Serialize()
-        let deserialized = WorkflowCheckpoint<bool>.Deserialize(serialized)
+        let deserialized =
+            use freshDocument = JsonDocument.Parse(serialized.GetRawText())
+            WorkflowCheckpoint<bool>.Deserialize(freshDocument.RootElement)
 
-        Assert.Equal(checkpoint.DefinitionId, deserialized.DefinitionId)
-        Assert.Equal(checkpoint.DefinitionVersion, deserialized.DefinitionVersion)
-        Assert.True(deserialized.Payload.GetProperty("approved").GetBoolean())
+        Assert.Equal(DefinitionId.Create("workflow.checkpoint"), deserialized.DefinitionId)
+        Assert.Equal(SemanticVersion.Parse("1.0.0"), deserialized.DefinitionVersion)
+        Assert.Equal(createdAt, deserialized.CreatedAt)
+        Assert.True(deserialized.Serialize().GetProperty("payload").GetProperty("approved").GetBoolean())
 
-        let unsupportedJson = JsonNode.Parse(serialized.GetRawText()) :?> JsonObject
-        unsupportedJson["formatVersion"] <- JsonValue.Create(2)
-        use unsupportedDocument = JsonDocument.Parse(unsupportedJson.ToJsonString())
+        let offsetEnvelope = JsonNode.Parse(serialized.GetRawText()) :?> JsonObject
+        offsetEnvelope["createdAt"] <- JsonValue.Create("2026-07-12T12:00:00-07:00")
+        use offsetDocument = JsonDocument.Parse(offsetEnvelope.ToJsonString())
+
+        let offsetCheckpoint =
+            WorkflowCheckpoint<bool>.Deserialize(offsetDocument.RootElement)
+
+        Assert.Equal(TimeSpan.Zero, offsetCheckpoint.CreatedAt.Offset)
+        Assert.Equal(DateTimeOffset(2026, 7, 12, 19, 0, 0, TimeSpan.Zero), offsetCheckpoint.CreatedAt)
+
+    [<Fact>]
+    let ``workflow checkpoint deserialization normalizes disposed and excessive-depth state`` () =
+        let validEnvelope =
+            """{"formatVersion":1,"definitionId":"workflow.checkpoint","definitionVersion":"1.0.0","fingerprint":"fingerprint-1","sessionId":"session-1","checkpointId":"checkpoint-1","createdAt":"2026-07-12T12:00:00Z","payload":{"approved":true}}"""
+
+        let disposedDocument = JsonDocument.Parse(validEnvelope)
+        let disposedState = disposedDocument.RootElement
+        disposedDocument.Dispose()
+
+        let disposedException =
+            Assert.Throws<ArgumentException>(fun () -> WorkflowCheckpoint<bool>.Deserialize(disposedState) |> ignore)
+
+        Assert.Equal("state", disposedException.ParamName)
+
+        Assert.IsType<ObjectDisposedException>(disposedException.InnerException)
+        |> ignore
+
+        let nestedPayload =
+            String.replicate 1100 "{\"nested\":" + "true" + String.replicate 1100 "}"
+
+        let deepEnvelope =
+            $"""{{"formatVersion":1,"definitionId":"workflow.checkpoint","definitionVersion":"1.0.0","fingerprint":"fingerprint-1","sessionId":"session-1","checkpointId":"checkpoint-1","createdAt":"2026-07-12T12:00:00Z","payload":{nestedPayload}}}"""
+
+        let options = JsonDocumentOptions(MaxDepth = 2048)
+        use deepDocument = JsonDocument.Parse(deepEnvelope, options)
+
+        let deepException =
+            Assert.Throws<ArgumentException>(fun () ->
+                WorkflowCheckpoint<bool>.Deserialize(deepDocument.RootElement) |> ignore)
+
+        Assert.Equal("state", deepException.ParamName)
+        Assert.NotNull(deepException.InnerException)
+
+    [<Fact>]
+    let ``workflow checkpoint deserialization normalizes malformed envelopes`` () =
+        let validEnvelope =
+            """{"formatVersion":1,"definitionId":"workflow.checkpoint","definitionVersion":"1.0.0","fingerprint":"fingerprint-1","sessionId":"session-1","checkpointId":"checkpoint-1","createdAt":"2026-07-12T12:00:00Z","payload":{"approved":true}}"""
+
+        let assertMalformed (json: string) =
+            use document = JsonDocument.Parse(json)
+
+            let ex =
+                Assert.Throws<ArgumentException>(fun () ->
+                    WorkflowCheckpoint<bool>.Deserialize(document.RootElement) |> ignore)
+
+            Assert.Equal("state", ex.ParamName)
+
+        for json in [ "null"; "[]"; "1"; "\"checkpoint\"" ] do
+            assertMalformed json
+
+        let mutable undefined = Unchecked.defaultof<JsonElement>
+
+        let undefinedException =
+            Assert.Throws<ArgumentException>(fun () -> WorkflowCheckpoint<bool>.Deserialize(undefined) |> ignore)
+
+        Assert.Equal("state", undefinedException.ParamName)
+
+        let propertyNames =
+            [ "formatVersion"
+              "definitionId"
+              "definitionVersion"
+              "fingerprint"
+              "sessionId"
+              "checkpointId"
+              "createdAt"
+              "payload" ]
+
+        for propertyName in propertyNames do
+            let envelope = JsonNode.Parse(validEnvelope) :?> JsonObject
+            envelope.Remove(propertyName) |> ignore
+            assertMalformed (envelope.ToJsonString())
+
+        let wrongKinds =
+            [ "formatVersion", JsonValue.Create("1") :> JsonNode
+              "definitionId", JsonValue.Create(1) :> JsonNode
+              "definitionVersion", JsonValue.Create(true) :> JsonNode
+              "fingerprint", JsonValue.Create(1) :> JsonNode
+              "sessionId", JsonValue.Create(1) :> JsonNode
+              "checkpointId", JsonValue.Create(1) :> JsonNode
+              "createdAt", JsonValue.Create(1) :> JsonNode
+              "payload", JsonValue.Create("payload") :> JsonNode ]
+
+        for propertyName, value in wrongKinds do
+            let envelope = JsonNode.Parse(validEnvelope) :?> JsonObject
+            envelope[propertyName] <- value
+            assertMalformed (envelope.ToJsonString())
+
+        let invalidValues =
+            [ "definitionId", "INVALID"
+              "definitionVersion", "1.0"
+              "fingerprint", " "
+              "sessionId", "\t"
+              "checkpointId", ""
+              "createdAt", "not-a-timestamp" ]
+
+        for propertyName, value in invalidValues do
+            let envelope = JsonNode.Parse(validEnvelope) :?> JsonObject
+            envelope[propertyName] <- JsonValue.Create(value)
+            assertMalformed (envelope.ToJsonString())
+
+        let nonIntegerFormat = JsonNode.Parse(validEnvelope) :?> JsonObject
+        nonIntegerFormat["formatVersion"] <- JsonValue.Create(1.5)
+        assertMalformed (nonIntegerFormat.ToJsonString())
+
+        let unsupportedEnvelope = JsonNode.Parse(validEnvelope) :?> JsonObject
+        unsupportedEnvelope["formatVersion"] <- JsonValue.Create(2)
+        use unsupportedDocument = JsonDocument.Parse(unsupportedEnvelope.ToJsonString())
 
         let unsupported =
-            Assert.Throws<ArgumentException>(fun () ->
+            Assert.Throws<ArgumentOutOfRangeException>(fun () ->
                 WorkflowCheckpoint<bool>.Deserialize(unsupportedDocument.RootElement) |> ignore)
 
         Assert.Equal("state", unsupported.ParamName)
-
-        let missingPayloadJson = JsonNode.Parse(serialized.GetRawText()) :?> JsonObject
-        missingPayloadJson.Remove("payload") |> ignore
-        use missingPayloadDocument = JsonDocument.Parse(missingPayloadJson.ToJsonString())
-
-        let missingPayload =
-            Assert.Throws<ArgumentException>(fun () ->
-                WorkflowCheckpoint<bool>.Deserialize(missingPayloadDocument.RootElement)
-                |> ignore)
-
-        Assert.Equal("state", missingPayload.ParamName)
 
     [<Fact>]
     let ``workflow validation reports entry and terminal shape issues across node kinds`` () =

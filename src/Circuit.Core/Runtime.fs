@@ -32,6 +32,21 @@ type RunContext
     /// Gets the effective run options.
     member _.Options = options
 
+/// Starts interactive Circuit agent runs that may pause for approval.
+/// <remarks>
+/// This capability is separate from <see cref="T:Circuit.Core.ICircuitRuntime" /> so existing runtime
+/// implementations remain source and binary compatible.
+/// </remarks>
+type IInteractiveCircuitRuntime =
+    /// Starts an agent and returns a live handle for streaming events and approval responses.
+    abstract StartAsync<'Input, 'Output> :
+        agent: AgentDefinition *
+        signature: Signature<'Input, 'Output> *
+        input: 'Input *
+        options: RunOptions *
+        cancellationToken: CancellationToken ->
+            Task<AgentRun<'Output>>
+
 /// Executes Circuit agents against a concrete provider runtime.
 type ICircuitRuntime =
     /// Executes a run to completion and returns the final typed result.
