@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/TicketTriage.CSharp/TicketTriage.CSharp.csproj" />
+    <Project Path="samples/TicketTriage.FSharp/TicketTriage.FSharp.fsproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Circuit.Core/Circuit.Core.fsproj" />
+    <Project Path="src/Circuit.FSharp/Circuit.FSharp.fsproj" />
+    <Project Path="src/Circuit.MicrosoftAgentFramework/Circuit.MicrosoftAgentFramework.fsproj" />
+    <Project Path="src/Circuit.Testing/Circuit.Testing.fsproj" />
+    <Project Path="src/Circuit/Circuit.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Circuit.Core.Tests/Circuit.Core.Tests.fsproj" />
+    <Project Path="tests/Circuit.FSharp.Tests/Circuit.FSharp.Tests.fsproj" />
+    <Project Path="tests/Circuit.Interop.Tests/Circuit.Interop.Tests.csproj" />
+    <Project Path="tests/Circuit.MicrosoftAgentFramework.Tests/Circuit.MicrosoftAgentFramework.Tests.fsproj" />
+    <Project Path="tests/Circuit.Package.Tests/Circuit.Package.Tests.fsproj" />
+  </Folder>
+</Solution>

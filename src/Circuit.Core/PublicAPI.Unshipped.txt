@@ -1,0 +1,108 @@
+T:Circuit.Core.AgentDefinition
+M:Circuit.Core.AgentDefinition.Create(System.String,System.String,System.String,System.String,Microsoft.FSharp.Core.FSharpValueOption{System.String},System.Collections.Generic.IEnumerable{System.String},System.Collections.Generic.IEnumerable{Circuit.Core.SkillReference},System.Collections.Generic.IEnumerable{System.Collections.Generic.KeyValuePair{System.String,System.String}})~Circuit.Core.AgentDefinition
+P:Circuit.Core.AgentDefinition.Id~Circuit.Core.DefinitionId
+P:Circuit.Core.AgentDefinition.Instructions~System.String
+P:Circuit.Core.AgentDefinition.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
+P:Circuit.Core.AgentDefinition.ModelHint~Microsoft.FSharp.Core.FSharpValueOption{System.String}
+P:Circuit.Core.AgentDefinition.Name~System.String
+P:Circuit.Core.AgentDefinition.Skills~System.Collections.Generic.IReadOnlyList{Circuit.Core.SkillReference}
+P:Circuit.Core.AgentDefinition.ToolTags~System.Collections.Generic.IReadOnlySet{System.String}
+P:Circuit.Core.AgentDefinition.Version~Circuit.Core.SemanticVersion
+T:Circuit.Core.CircuitFailure
+P:Circuit.Core.CircuitFailure.Code~Circuit.Core.CircuitFailureCode
+P:Circuit.Core.CircuitFailure.Exception~Microsoft.FSharp.Core.FSharpValueOption{System.Exception}
+P:Circuit.Core.CircuitFailure.Message~System.String
+P:Circuit.Core.CircuitFailure.OperationId~Microsoft.FSharp.Core.FSharpValueOption{System.String}
+P:Circuit.Core.CircuitFailure.RequestId~Microsoft.FSharp.Core.FSharpValueOption{System.String}
+P:Circuit.Core.CircuitFailure.RunId~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.RunId}
+T:Circuit.Core.CircuitFailureCode
+F:Circuit.Core.CircuitFailureCode.Validation = 0
+F:Circuit.Core.CircuitFailureCode.StructuredOutputUnsupported = 1
+F:Circuit.Core.CircuitFailureCode.Decode = 2
+F:Circuit.Core.CircuitFailureCode.Provider = 3
+F:Circuit.Core.CircuitFailureCode.Tool = 4
+F:Circuit.Core.CircuitFailureCode.ApprovalRequired = 5
+F:Circuit.Core.CircuitFailureCode.Skill = 6
+F:Circuit.Core.CircuitFailureCode.Workflow = 7
+F:Circuit.Core.CircuitFailureCode.CheckpointMismatch = 8
+F:Circuit.Core.CircuitFailureCode.Cancelled = 9
+T:Circuit.Core.CircuitJson
+M:Circuit.Core.CircuitJson.createOptions~System.Text.Json.JsonSerializerOptions
+T:Circuit.Core.CircuitResult`1
+M:Circuit.Core.CircuitResult`1.Error(Circuit.Core.CircuitFailure)~Circuit.Core.CircuitResult{`0}
+M:Circuit.Core.CircuitResult`1.Success(`0)~Circuit.Core.CircuitResult{`0}
+M:Circuit.Core.CircuitResult`1.TryGetValue(`0@)~System.Boolean
+P:Circuit.Core.CircuitResult`1.Failure~Circuit.Core.CircuitFailure
+P:Circuit.Core.CircuitResult`1.IsSuccess~System.Boolean
+P:Circuit.Core.CircuitResult`1.Value~`0
+T:Circuit.Core.CircuitSession
+P:Circuit.Core.CircuitSession.Id~System.String
+P:Circuit.Core.CircuitSession.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
+T:Circuit.Core.Contract`1
+M:Circuit.Core.Contract`1.Create(System.Text.Json.JsonSerializerOptions,System.Collections.Generic.IEnumerable{Circuit.Core.IContractValidator{`0}})~Circuit.Core.Contract{`0}
+M:Circuit.Core.Contract`1.Validate(`0)~System.Collections.Generic.IReadOnlyList{Circuit.Core.ValidationIssue}
+P:Circuit.Core.Contract`1.Schema~Circuit.Core.SchemaDocument
+P:Circuit.Core.Contract`1.Validators~System.Collections.Generic.IReadOnlyList{Circuit.Core.IContractValidator{`0}}
+P:Circuit.Core.Contract`1.ValueType~System.Type
+T:Circuit.Core.DefinitionId
+M:Circuit.Core.DefinitionId.Create(System.String)~Circuit.Core.DefinitionId
+M:Circuit.Core.DefinitionId.TryCreate(System.String,Circuit.Core.DefinitionId@)~System.Boolean
+P:Circuit.Core.DefinitionId.Value~System.String
+T:Circuit.Core.IContractValidator`1
+M:Circuit.Core.IContractValidator`1.Validate(`0)~System.Collections.Generic.IReadOnlyList{Circuit.Core.ValidationIssue}
+T:Circuit.Core.RunId
+M:Circuit.Core.RunId.New~Circuit.Core.RunId
+M:Circuit.Core.RunId.Parse(System.String)~Circuit.Core.RunId
+M:Circuit.Core.RunId.TryParse(System.String,Circuit.Core.RunId@)~System.Boolean
+P:Circuit.Core.RunId.Value~System.String
+T:Circuit.Core.RunOptions
+P:Circuit.Core.RunOptions.Default~Circuit.Core.RunOptions
+P:Circuit.Core.RunOptions.SensitiveDataMode~Circuit.Core.SensitiveDataMode
+P:Circuit.Core.RunOptions.Services~System.IServiceProvider
+P:Circuit.Core.RunOptions.Session~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.CircuitSession}
+P:Circuit.Core.RunOptions.StructuredOutputPolicy~Circuit.Core.StructuredOutputPolicy
+P:Circuit.Core.RunOptions.Tags~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
+P:Circuit.Core.RunOptions.TenantId~Microsoft.FSharp.Core.FSharpValueOption{System.String}
+P:Circuit.Core.RunOptions.UserId~Microsoft.FSharp.Core.FSharpValueOption{System.String}
+T:Circuit.Core.RunResult`1
+P:Circuit.Core.RunResult`1.CompletedAt~System.DateTimeOffset
+P:Circuit.Core.RunResult`1.Result~Circuit.Core.CircuitResult{`0}
+P:Circuit.Core.RunResult`1.RunId~Circuit.Core.RunId
+P:Circuit.Core.RunResult`1.Session~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.CircuitSession}
+P:Circuit.Core.RunResult`1.StartedAt~System.DateTimeOffset
+P:Circuit.Core.RunResult`1.Usage~Circuit.Core.RunUsage
+T:Circuit.Core.RunUsage
+P:Circuit.Core.RunUsage.InputTokens~System.Int32
+P:Circuit.Core.RunUsage.OutputTokens~System.Int32
+P:Circuit.Core.RunUsage.TotalTokens~System.Int32
+T:Circuit.Core.SchemaDocument
+M:Circuit.Core.SchemaDocument.ToJsonString~System.String
+P:Circuit.Core.SchemaDocument.RootElement~System.Text.Json.JsonElement
+P:Circuit.Core.SchemaDocument.ValueType~System.Text.Json.JsonValueKind
+T:Circuit.Core.SemanticVersion
+M:Circuit.Core.SemanticVersion.Parse(System.String)~Circuit.Core.SemanticVersion
+M:Circuit.Core.SemanticVersion.ToString~System.String
+M:Circuit.Core.SemanticVersion.TryParse(System.String,Circuit.Core.SemanticVersion@)~System.Boolean
+P:Circuit.Core.SemanticVersion.Value~System.Version
+T:Circuit.Core.SensitiveDataMode
+F:Circuit.Core.SensitiveDataMode.Standard = 0
+F:Circuit.Core.SensitiveDataMode.Redact = 1
+T:Circuit.Core.Signature`2
+M:Circuit.Core.Signature`2.Create(System.String,System.String,System.String,System.String,System.Text.Json.JsonSerializerOptions,System.Collections.Generic.IEnumerable{Circuit.Core.IContractValidator{`0}},System.Collections.Generic.IEnumerable{Circuit.Core.IContractValidator{`1}})~Circuit.Core.Signature{`0,`1}
+P:Circuit.Core.Signature`2.Description~System.String
+P:Circuit.Core.Signature`2.Id~Circuit.Core.DefinitionId
+P:Circuit.Core.Signature`2.Input~Circuit.Core.Contract{`0}
+P:Circuit.Core.Signature`2.Instructions~System.String
+P:Circuit.Core.Signature`2.Output~Circuit.Core.Contract{`1}
+P:Circuit.Core.Signature`2.Version~Circuit.Core.SemanticVersion
+T:Circuit.Core.SkillReference
+M:Circuit.Core.SkillReference.Create(System.String,System.String)~Circuit.Core.SkillReference
+P:Circuit.Core.SkillReference.Id~Circuit.Core.DefinitionId
+P:Circuit.Core.SkillReference.Version~Circuit.Core.SemanticVersion
+T:Circuit.Core.StructuredOutputPolicy
+F:Circuit.Core.StructuredOutputPolicy.NativeOnly = 0
+F:Circuit.Core.StructuredOutputPolicy.AllowSecondaryModelRepair = 1
+T:Circuit.Core.ValidationIssue
+P:Circuit.Core.ValidationIssue.Code~System.String
+P:Circuit.Core.ValidationIssue.Message~System.String
+P:Circuit.Core.ValidationIssue.Path~System.String
