@@ -544,6 +544,12 @@ type WorkflowCheckpoint<'Output>
         document.RootElement.Clone()
 
     /// Restores a checkpoint from a serialized JSON envelope.
+    /// <remarks>
+    /// Deserialization validates envelope structure and format compatibility only; it does not establish integrity or
+    /// authenticity. Treat checkpoints as trusted sensitive state. Enforce serialized-size limits before parsing,
+    /// protect stored checkpoints with appropriate authentication and encryption, and never pass a client-supplied
+    /// envelope directly to this method.
+    /// </remarks>
     /// <param name="state">The checkpoint envelope returned by <see cref="M:Circuit.Core.WorkflowCheckpoint`1.Serialize" />.</param>
     /// <exception cref="T:System.ArgumentException"><paramref name="state" /> is not a valid checkpoint envelope.</exception>
     /// <exception cref="T:System.ArgumentOutOfRangeException"><paramref name="state" /> uses an unsupported checkpoint format version.</exception>

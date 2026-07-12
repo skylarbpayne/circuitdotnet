@@ -16,9 +16,18 @@ module internal MafInteractive =
     [<Literal>]
     let internal MaxApprovalRounds = 16
 
+    [<Literal>]
+    let internal MaxApprovalsPerRound = 16
+
+    let mutable internal ApprovalPreparedForTesting: (string -> unit) voption =
+        ValueNone
+
+    let mutable internal EventBackpressureForTesting: (unit -> unit) voption = ValueNone
+
     type private PendingApproval =
         { PublicId: string
           Request: ToolApprovalRequestContent
+          mutable Published: bool
           mutable Responded: bool }
 
     [<Sealed>]
@@ -58,6 +67,17 @@ module internal MafInteractive =
                     if not (isNull message.Contents) then
                         yield! message.Contents
         }
+
+    let internal collectBoundedApprovals (response: AgentResponse) =
+        let approvals =
+            contents response
+            |> Seq.choose (function
+                | :? ToolApprovalRequestContent as approval -> Some approval
+                | _ -> None)
+            |> Seq.truncate (MaxApprovalsPerRound + 1)
+            |> Seq.toArray
+
+        struct (approvals, approvals.Length > MaxApprovalsPerRound)
 
     let start<'Input, 'Output>
         (runtime: MafRuntime)
@@ -124,7 +144,7 @@ module internal MafInteractive =
             usageDetails <- MafErrors.combineUsageDetails usageDetails details
             usage <- MafErrors.createUsage usageDetails
 
-        let emit kind operationId value failure approval =
+        let emitCore kind operationId value failure approval onWrittenUnderGate =
             task {
                 let shouldWrite = lock gate (fun () -> not terminal)
 
@@ -147,29 +167,42 @@ module internal MafInteractive =
                             approval
                         )
 
+                    let tryWrite () =
+                        lock gate (fun () ->
+                            let written = channel.Writer.TryWrite(event)
+
+                            if written then
+                                onWrittenUnderGate ()
+
+                            written)
+
                     let forceCancellationTerminal () =
                         let mutable dropped = Unchecked.defaultof<RunEvent<'Output>>
-                        let mutable terminalWritten = channel.Writer.TryWrite(event)
+                        let mutable terminalWritten = tryWrite ()
 
                         while not terminalWritten && channel.Reader.TryRead(&dropped) do
-                            terminalWritten <- channel.Writer.TryWrite(event)
+                            terminalWritten <- tryWrite ()
 
                         if not terminalWritten then
                             // A competing consumer can create capacity after TryWrite fails but before TryRead.
-                            terminalWritten <- channel.Writer.TryWrite(event)
+                            terminalWritten <- tryWrite ()
 
                         terminalWritten
 
                     let! written =
                         task {
-                            if channel.Writer.TryWrite(event) then
+                            if tryWrite () then
                                 return true
                             elif kind = RunEventKind.RunFailed && lifetimeToken.IsCancellationRequested then
                                 return forceCancellationTerminal ()
                             else
+                                match EventBackpressureForTesting with
+                                | ValueSome backpressured -> backpressured ()
+                                | ValueNone -> ()
+
                                 try
-                                    do! channel.Writer.WriteAsync(event, lifetimeToken).AsTask()
-                                    return true
+                                    let! canWrite = channel.Writer.WaitToWriteAsync(lifetimeToken).AsTask()
+                                    return canWrite && tryWrite ()
                                 with :? OperationCanceledException when
                                     kind = RunEventKind.RunFailed && lifetimeToken.IsCancellationRequested ->
                                     return forceCancellationTerminal ()
@@ -213,12 +246,19 @@ module internal MafInteractive =
                         | _ -> ()
             }
 
+        let emit kind operationId value failure approval =
+            emitCore kind operationId value failure approval ignore
+
+        let emitApproval item operationId approval =
+            emitCore RunEventKind.ApprovalRequested operationId ValueNone ValueNone (ValueSome approval) (fun () ->
+                item.Published <- true)
+
         let fail failure =
             emit RunEventKind.RunFailed ValueNone ValueNone (ValueSome failure) ValueNone
 
         let mapResponse (response: AgentResponse) =
             task {
-                let approvals = ResizeArray<ToolApprovalRequestContent>()
+                let struct (approvals, overApprovalLimit) = collectBoundedApprovals response
 
                 for content in contents response do
                     match MafStreaming.StreamingMappedEvent.tryMapContent signature.JsonSerializerOptions content with
@@ -226,23 +266,23 @@ module internal MafInteractive =
                         do! emit RunEventKind.ToolStarted operationId ValueNone ValueNone ValueNone
                     | ValueSome(MafStreaming.StreamingMappedEvent.ToolCompleted operationId) ->
                         do! emit RunEventKind.ToolCompleted operationId ValueNone ValueNone ValueNone
-                    | ValueSome(MafStreaming.StreamingMappedEvent.ApprovalRequested(_operationId, _request)) ->
-                        approvals.Add(content :?> ToolApprovalRequestContent)
+                    | ValueSome(MafStreaming.StreamingMappedEvent.ApprovalRequested _)
                     | ValueNone -> ()
 
-                return approvals.ToArray()
+                return struct (approvals, overApprovalLimit)
             }
 
-        let awaitResponses round (requests: ToolApprovalRequestContent array) =
+        let awaitResponses (requests: ToolApprovalRequestContent array) =
             task {
                 let completion =
                     TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
                 let pendingRound =
                     requests
-                    |> Array.mapi (fun ordinal request ->
-                        { PublicId = $"{runId.Value}:approval:{round}:{ordinal}"
+                    |> Array.map (fun request ->
+                        { PublicId = Guid.NewGuid().ToString("N")
                           Request = request
+                          Published = false
                           Responded = false })
 
                 lock gate (fun () ->
@@ -258,19 +298,23 @@ module internal MafInteractive =
                     pendingCompletion <- completion)
 
                 for item in pendingRound do
+                    match ApprovalPreparedForTesting with
+                    | ValueSome prepared -> prepared item.PublicId
+                    | ValueNone -> ()
+
                     let providerApproval =
                         MafStreaming.createApprovalRequest signature.JsonSerializerOptions item.Request
 
-                    let approval =
-                        ApprovalRequest(item.PublicId, providerApproval.ToolName, providerApproval.ArgumentsJson)
+                    let argumentsJson =
+                        if runOptions.SensitiveDataMode = SensitiveDataMode.Standard then
+                            providerApproval.ArgumentsJson
+                        else
+                            ValueNone
 
-                    do!
-                        emit
-                            RunEventKind.ApprovalRequested
-                            (MafStreaming.tryGetOperationId item.Request.ToolCall)
-                            ValueNone
-                            ValueNone
-                            (ValueSome approval)
+                    let approval =
+                        ApprovalRequest(item.PublicId, providerApproval.ToolName, argumentsJson)
+
+                    do! emitApproval item (MafStreaming.tryGetOperationId item.Request.ToolCall) approval
 
                 do! completion.Task.WaitAsync(lifetimeToken)
 
@@ -417,9 +461,19 @@ module internal MafInteractive =
 
                                                 while not roundCompleted do
                                                     updateRoundMetadata response
-                                                    let! requests = mapResponse response
+                                                    let! struct (requests, overApprovalLimit) = mapResponse response
 
-                                                    if requests.Length > 0 then
+                                                    if overApprovalLimit then
+                                                        outputResult <-
+                                                            Error(
+                                                                MafErrors.toolFailure
+                                                                    runId
+                                                                    $"The provider returned more than {MaxApprovalsPerRound} approval requests in one round."
+                                                                    ValueNone
+                                                            )
+
+                                                        roundCompleted <- true
+                                                    elif requests.Length > 0 then
                                                         if round >= MaxApprovalRounds then
                                                             outputResult <-
                                                                 Error(
@@ -431,7 +485,7 @@ module internal MafInteractive =
 
                                                             roundCompleted <- true
                                                         else
-                                                            let! storedRequests = awaitResponses round requests
+                                                            let! storedRequests = awaitResponses requests
                                                             round <- round + 1
                                                             let responseMessage = createResponseMessage storedRequests
 
@@ -543,6 +597,8 @@ module internal MafInteractive =
                             match pending.TryGetValue response.RequestId with
                             | false, _ ->
                                 invalidOp "There is no pending approval request with the supplied identifier."
+                            | true, request when not request.Published ->
+                                invalidOp "The approval request is not accepting responses."
                             | true, request when request.Responded ->
                                 invalidOp "The approval request has already been answered."
                             | true, request ->

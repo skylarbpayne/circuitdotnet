@@ -653,6 +653,12 @@ public sealed class WorkflowCheckpoint<T>
     /// <summary>
     /// Restores a checkpoint from a serialized JSON envelope.
     /// </summary>
+    /// <remarks>
+    /// Deserialization validates envelope structure and format compatibility only; it does not establish integrity or
+    /// authenticity. Treat checkpoints as trusted sensitive state. Enforce serialized-size limits before parsing,
+    /// protect stored checkpoints with appropriate authentication and encryption, and never pass a client-supplied
+    /// envelope directly to this method.
+    /// </remarks>
     /// <param name="state">The checkpoint envelope returned by <see cref="Serialize"/>.</param>
     /// <returns>The restored checkpoint.</returns>
     /// <exception cref="ArgumentException"><paramref name="state"/> is not a valid checkpoint envelope.</exception>
