@@ -1,0 +1,38 @@
+- name: Overview
+  href: index.md
+- name: 1. Run your first agent
+  href: 01-first-agent.md
+- name: 2. Understand the four building blocks
+  href: 02-building-blocks.md
+- name: 3. Validate input and output
+  href: 03-validation.md
+- name: 4. Handle failures explicitly
+  href: 04-failures.md
+- name: 5. Control structured output
+  href: 05-structured-output.md
+- name: 6. Stream a response
+  href: 06-streaming.md
+- name: 7. Continue a session
+  href: 07-sessions.md
+- name: 8. Add a typed tool
+  href: 08-tools.md
+- name: 9. Require approval
+  href: 09-approvals.md
+- name: 10. Add a skill
+  href: 10-skills.md
+- name: 11. Build a circuit program
+  href: 11-circuit-programs.md
+- name: 12. Run independent work in parallel
+  href: 12-parallel-programs.md
+- name: 13. Build an explicit workflow
+  href: 13-workflows.md
+- name: 14. Pause for human review
+  href: 14-human-review.md
+- name: 15. Checkpoint and resume
+  href: 15-checkpoints.md
+- name: 16. Test without spending tokens
+  href: 16-testing.md
+- name: 17. Add telemetry safely
+  href: 17-telemetry.md
+- name: 18. Switch providers
+  href: 18-switch-providers.md

@@ -30,6 +30,8 @@ coverage-*/
 
 ## Local tools
 .mise.local.toml
+__pycache__/
+*.pyc
 
 ## Secrets / local provider config
 .env
