@@ -2,19 +2,38 @@
 
 ## What you will build
 
-Use bounded concurrency and deterministic result ordering. This project is a compiling chapter skeleton; its complete lesson will replace the placeholder in the next tutorial-writing pass.
+You will ask three live agents to analyze one ticket from sentiment, risk, and routing perspectives. At most two calls are active together, while the returned list remains in declaration order.
 
 ## The idea
 
-Each chapter changes one main idea while remaining an independent project.
+Independent work does not need to wait in a chain. `Circuit.``parallel`` 2` starts children subject to a maximum of two active operations:
+
+```text
+             +-> sentiment --+
+Ticket ------+-> risk -------+-> [sentiment; risk; routing]
+       bound +-> routing ----+
+              max active = 2
+```
+
+The list is returned in declaration order even when calls finish in another order. Runtime operation IDs reflect actual scheduling, not list position. If one child fails, Circuit cancels its siblings and drains started work before returning. Provider cancellation is cooperative and may arrive after a request was accepted, so cancellation does not guarantee zero charge. Unbounded fan-out can exhaust sockets, quotas, rate limits, and budgets.
 
 ## Create or open the project
 
-From the repository root, open `tutorials/fsharp/12-parallel-programs`. Live chapters will require explicit provider environment variables; chapter 16 remains offline.
+From a repository clone, open `tutorials/fsharp/12-parallel-programs`. Configure the live provider explicitly:
+
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY && echo
+export OPENAI_API_KEY
+export OPENAI_MODEL="a-model-you-have-access-to"
+```
+
+Choose a model with structured-output support. This run can make three provider calls and incur three calls' cost. Never commit credentials; production deployments should inject them from a secret store.
 
 ## Complete source
 
 [!code-fsharp](../../tutorials/fsharp/12-parallel-programs/Program.fs)
+
+Each list item is a real `Circuit.call` with a distinct agent definition and the same typed signature. The bound is `2`, not the number of children. `Circuit.run` owns cancellation and combines the children into one result.
 
 ## Run it
 
@@ -22,26 +41,35 @@ From the repository root, open `tutorials/fsharp/12-parallel-programs`. Live cha
 dotnet run --project tutorials/fsharp/12-parallel-programs
 ```
 
-Representative placeholder output (the completed live chapter's provider-generated values will be variable):
+Representative output (**findings are provider-variable**):
 
 ```text
-Chapter 12 will build on the support-ticket agent.
+Analyses (declaration order):
+1. Sentiment: The customer sounds concerned but patient.
+2. Risk: Verify the account address before changing credentials.
+3. Routing: Route to account access support.
 ```
+
+Completion timing can vary, but successful output positions are stable. Missing environment variables fail before client construction; provider and timeout failures are reported without exception details.
 
 ## What changed
 
-This skeleton reserves chapter 12's approved project and documentation boundary. The completed lesson will explain its single delta from chapter 11.
+Chapter 11 sequenced classification before drafting because the second call needed the first result. Chapter 12 identifies genuinely independent work and uses bounded parallel composition instead.
 
 ## Check your understanding
 
-1. Why should this chapter remain independently runnable?
-2. Which one boundary will this chapter introduce?
-3. Which values will be deterministic, and which will be provider-variable?
+1. Why can completion order differ from result order?
+2. What resources and costs does the bound protect?
+3. Why can a cancelled sibling still consume provider time or money?
 
 ## Try it yourself
 
-Build this project from the repository root and confirm that it does not depend on another tutorial project.
+Change the bound from `2` to `1` and run once. Confirm the three output positions remain the same even though the calls are now scheduled serially.
 
 ## Recap and next step
 
-The project, page, and complete-source include now have stable names. The next writing pass will replace this placeholder with the approved support-ticket lesson without changing that structure.
+- Parallelism is appropriate only when children do not depend on one another.
+- The maximum concurrency bound limits active work; it does not change declaration-order results.
+- Failure cancels siblings cooperatively, but cancellation timing cannot reverse provider work already accepted.
+
+Chapter 13 moves composition into a named, validated workflow when explicit topology becomes useful.
