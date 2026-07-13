@@ -1045,7 +1045,7 @@ public sealed class MicrosoftAgentFrameworkOptions
     private static JsonSerializerOptions CreateReadOnlyCopy(JsonSerializerOptions source)
     {
         var copy = new JsonSerializerOptions(source);
-        copy.MakeReadOnly();
+        copy.MakeReadOnly(populateMissingResolver: true);
         return copy;
     }
 }

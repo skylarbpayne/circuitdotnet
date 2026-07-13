@@ -32,7 +32,7 @@ module internal CSharpFacadeAdapters =
             | null -> ()
             | jsonOptions ->
                 let snapshot = JsonSerializerOptions(jsonOptions)
-                snapshot.MakeReadOnly()
+                snapshot.MakeReadOnly(populateMissingResolver = true)
                 runtimeOptions.JsonSerializerOptions <- snapshot
 
             runtimeOptions.SecondaryStructuredOutputClient <- toValueOption options.SecondaryStructuredOutputClient

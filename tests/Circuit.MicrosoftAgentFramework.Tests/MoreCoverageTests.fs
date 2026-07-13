@@ -1032,6 +1032,27 @@ module CSharpFacadeAndDependencyInjectionCoverageTests =
         Assert.Same(observer, Assert.Single(adapted.Observers))
 
     [<Fact>]
+    let ``C sharp facade accepts mutable web serializer options and freezes an independent snapshot`` () =
+        let source = JsonSerializerOptions(JsonSerializerDefaults.Web)
+        let options = Circuit.MicrosoftAgentFrameworkOptions()
+        options.JsonSerializerOptions <- source
+
+        let adapted =
+            CSharpFacadeAdapters.createRuntimeOptions
+                options
+                (Array.empty<Circuit.IToolResolver> :> IReadOnlyList<Circuit.IToolResolver>)
+                (Array.empty<Circuit.ISkillResolver> :> IReadOnlyList<Circuit.ISkillResolver>)
+                (Array.empty<Circuit.IRunObserver> :> IReadOnlyList<Circuit.IRunObserver>)
+
+        source.WriteIndented <- true
+
+        Assert.False(source.IsReadOnly)
+        Assert.True(adapted.JsonSerializerOptions.IsReadOnly)
+        Assert.NotSame(source, adapted.JsonSerializerOptions)
+        Assert.NotNull(adapted.JsonSerializerOptions.TypeInfoResolver)
+        Assert.False(adapted.JsonSerializerOptions.WriteIndented)
+
+    [<Fact>]
     let ``runtime factory validates collections and creates a client`` () =
         let client = createClient ()
 

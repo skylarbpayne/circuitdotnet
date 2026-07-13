@@ -651,7 +651,7 @@ type MafRuntimeOptions() =
             null
         else
             let snapshot = JsonSerializerOptions(options)
-            snapshot.MakeReadOnly()
+            snapshot.MakeReadOnly(populateMissingResolver = true)
             snapshot
 
     let snapshotResolvers (resolvers: IReadOnlyList<'T>) =
