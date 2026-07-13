@@ -1178,3 +1178,154 @@ let ``MAF session deserialization resolves capabilities from rebound resume serv
         do! enumerator.DisposeAsync().AsTask()
         do! (resumed :> IAsyncDisposable).DisposeAsync().AsTask()
     }
+
+[<Fact>]
+let ``OpenTelemetry captures redacted payloads and closes explicit operation completions`` () =
+    use telemetry = new UnifiedTelemetryHarness()
+    let options = OpenTelemetryRunObserverOptions()
+    options.CapturePrompt <- true
+    options.CaptureInput <- true
+    options.CaptureOutput <- true
+    options.CaptureToolArguments <- true
+    options.Redactor <- Func<string, string>(fun value -> "safe:" + value)
+    let observer = OpenTelemetryRunObserver(options) :> Circuit.IRunObserver
+    let runId = Guid.NewGuid().ToString("N")
+
+    let createEnvelope kind operationId operationName operationKind prompt input output toolArguments failure =
+        let methodInfo =
+            typeof<Circuit.RunEventEnvelope>.GetMethod("Create", BindingFlags.Static ||| BindingFlags.NonPublic)
+
+        methodInfo.Invoke(
+            null,
+            [| box runId
+               box DateTimeOffset.UtcNow
+               box kind
+               box "sensitive-otel"
+               box "1.0.0"
+               box "sensitive-agent"
+               box operationId
+               box operationName
+               box operationKind
+               box "model-safe"
+               null
+               box prompt
+               box input
+               box output
+               box toolArguments
+               box failure
+               null
+               box (Nullable<DateTimeOffset>())
+               box (Nullable<DateTimeOffset>())
+               box false
+               null
+               null
+               null |]
+        )
+        :?> Circuit.RunEventEnvelope
+
+    let publish kind operationId operationName operationKind prompt input output toolArguments failure =
+        observer
+            .OnEventAsync(
+                createEnvelope kind operationId operationName operationKind prompt input output toolArguments failure,
+                CancellationToken.None
+            )
+            .AsTask()
+            .GetAwaiter()
+            .GetResult()
+
+    publish
+        Circuit.AgentRunEventKind.RunStarted
+        runId
+        "sensitive.run"
+        Circuit.RunOperationKind.Run
+        "prompt"
+        "input"
+        null
+        null
+        null
+
+    publish
+        Circuit.AgentRunEventKind.ToolStarted
+        "tool-sensitive"
+        "sensitive.tool"
+        Circuit.RunOperationKind.Tool
+        null
+        null
+        null
+        "{\"secret\":true}"
+        null
+
+    publish
+        Circuit.AgentRunEventKind.ToolCompleted
+        "tool-sensitive"
+        "sensitive.tool"
+        Circuit.RunOperationKind.Tool
+        null
+        null
+        null
+        null
+        null
+
+    publish
+        Circuit.AgentRunEventKind.StepStarted
+        "step-cancelled"
+        "sensitive.step"
+        Circuit.RunOperationKind.Node
+        null
+        null
+        null
+        null
+        null
+
+    let cancelled =
+        createObservedFailure Circuit.AgentFailureCode.Cancelled runId "step-cancelled"
+
+    publish
+        Circuit.AgentRunEventKind.StepCompleted
+        "step-cancelled"
+        "sensitive.step"
+        Circuit.RunOperationKind.Node
+        null
+        null
+        null
+        null
+        cancelled
+
+    publish
+        Circuit.AgentRunEventKind.RunCompleted
+        runId
+        "sensitive.run"
+        Circuit.RunOperationKind.Run
+        null
+        null
+        "output"
+        null
+        null
+
+    telemetry.Flush()
+
+    let root =
+        Assert.Single(
+            telemetry.Spans
+            |> Array.filter (fun span -> span.OperationName = "sensitive.run")
+        )
+
+    let tool =
+        Assert.Single(
+            telemetry.Spans
+            |> Array.filter (fun span -> span.OperationName = "sensitive.tool")
+        )
+
+    let step =
+        Assert.Single(
+            telemetry.Spans
+            |> Array.filter (fun span -> span.OperationName = "sensitive.step")
+        )
+
+    Assert.Equal("safe:prompt", root.GetTagItem("circuit.prompt") :?> string)
+    Assert.Equal("safe:input", root.GetTagItem("circuit.input") :?> string)
+    Assert.Equal("safe:output", root.GetTagItem("circuit.output") :?> string)
+    Assert.Equal("safe:{\"secret\":true}", tool.GetTagItem("circuit.tool.arguments") :?> string)
+    Assert.Equal(ActivityStatusCode.Ok, tool.Status)
+    Assert.Equal(ActivityStatusCode.Error, step.Status)
+    Assert.Equal("Cancelled", step.GetTagItem("error.type") :?> string)

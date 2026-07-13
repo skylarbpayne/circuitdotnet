@@ -139,7 +139,7 @@ module private SchedulerFailure =
             failure.Exception
         )
 
-module private SchedulerInternals =
+module internal SchedulerInternals =
     exception ResourceLimitExceeded of string
     exception CheckpointFingerprintMismatch of string
 
@@ -1423,11 +1423,11 @@ module private SchedulerInternals =
             (dynamicDepth: int)
             (emit: ErasedResponse -> Task)
             : Task =
-            task {
-                linkedCts.Token.ThrowIfCancellationRequested()
+            linkedCts.Token.ThrowIfCancellationRequested()
 
-                match node with
-                | Then(previous, next) ->
+            match node with
+            | Then(previous, next) ->
+                task {
                     do!
                         eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
                             match response.Failure with
@@ -1442,7 +1442,9 @@ module private SchedulerInternals =
                                         response.Metadata.SourceOrder
 
                                 eval next (path + "/next") responseLane response.Value dynamicDepth emit)
-                | Dynamic(id, _, maximum, handler, previous) ->
+                }
+            | Dynamic(id, _, maximum, handler, previous) ->
+                task {
                     use semaphore = new SemaphoreSlim(maximum, maximum)
                     let work = ResizeArray<Task>()
 
@@ -1574,7 +1576,9 @@ module private SchedulerInternals =
                             })
 
                     do! Task.WhenAll(work.ToArray())
-                | Attempt(id, previous) ->
+                }
+            | Attempt(id, previous) ->
+                task {
                     do!
                         eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
                             task {
@@ -1600,7 +1604,9 @@ module private SchedulerInternals =
 
                                 do! emit wrapped
                             })
-                | Recover(id, _, handler, previous) ->
+                }
+            | Recover(id, _, handler, previous) ->
+                task {
                     do!
                         eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
                             task {
@@ -1656,7 +1662,9 @@ module private SchedulerInternals =
 
                                             do! emit failed
                             })
-                | Aggregate(id, _, handler, previous) ->
+                }
+            | Aggregate(id, _, handler, previous) ->
+                task {
                     let captured = ResizeArray<obj>()
 
                     do!
@@ -1732,7 +1740,9 @@ module private SchedulerInternals =
                                     ValueNone
 
                             do! emit response
-                | Items(id, _, handler) ->
+                }
+            | Items(id, _, handler) ->
+                task {
                     let stagePath = path + "/" + id
                     let sourcePath = scopedSourcePath path id lane
                     let stageSemaphore = admissionSemaphore stagePath
@@ -1817,16 +1827,13 @@ module private SchedulerInternals =
                         tasks.Add(runItem itemValue key itemLane)
 
                     do! Task.WhenAll(tasks.ToArray())
-                | AsyncSource(id, _, handler) ->
+                }
+            | AsyncSource(id, _, handler) ->
+                task {
                     let stagePath = path + "/" + id
                     let sourcePath = scopedSourcePath path id lane
                     let stageSemaphore = admissionSemaphore stagePath
-                    let source = handler.Invoke(inputValue)
-                    let getEnumerator = source.GetType().GetMethod("GetAsyncEnumerator")
-                    let enumerator = getEnumerator.Invoke(source, [| box linkedCts.Token |])
-                    let moveNext = enumerator.GetType().GetMethod("MoveNextAsync")
-                    let current = enumerator.GetType().GetProperty("Current")
-                    let dispose = enumerator.GetType().GetMethod("DisposeAsync")
+                    let enumerator = handler.GetAsyncEnumerator(inputValue, linkedCts.Token)
                     let tasks = ResizeArray<Task>()
                     let mutable ordinal = 0L
                     let mutable more = true
@@ -1836,16 +1843,11 @@ module private SchedulerInternals =
                             // Reserve stage capacity before pulling so async sources cannot run
                             // ahead of admitted lanes.
                             do! stageSemaphore.WaitAsync(linkedCts.Token)
-                            let pending = moveNext.Invoke(enumerator, [||])
-
-                            let asTask =
-                                pending.GetType().GetMethod("AsTask").Invoke(pending, [||]) :?> Task<bool>
-
-                            let! hasValue = asTask
+                            let! hasValue = enumerator.MoveNextAsync()
                             more <- hasValue
 
                             if hasValue then
-                                let value = current.GetValue(enumerator)
+                                let value = enumerator.Current
                                 let itemLane = childLane lane (string ordinal) ordinal
 
                                 let itemOrdinal = ordinal
@@ -1879,15 +1881,13 @@ module private SchedulerInternals =
 
                         do! Task.WhenAll(tasks.ToArray())
                     with ex ->
-                        let pending = dispose.Invoke(enumerator, [||])
-                        let asTask = pending.GetType().GetMethod("AsTask").Invoke(pending, [||]) :?> Task
-                        do! asTask
+                        do! enumerator.DisposeAsync()
                         return raise ex
 
-                    let pending = dispose.Invoke(enumerator, [||])
-                    let asTask = pending.GetType().GetMethod("AsTask").Invoke(pending, [||]) :?> Task
-                    do! asTask
-                | ResumableSource(id, _, handler) ->
+                    do! enumerator.DisposeAsync()
+                }
+            | ResumableSource(id, _, handler) ->
+                task {
                     let stagePath = path + "/" + id
                     let sourcePath = scopedSourcePath path id lane
                     let stageSemaphore = admissionSemaphore stagePath
@@ -2059,7 +2059,9 @@ module private SchedulerInternals =
 
                                 resumeState.SourcePendingCursors.Remove sourcePath |> ignore
                                 resumeState.SourcePendingCompleted.Remove sourcePath |> ignore)
-                | Branch(id, _, handler) ->
+                }
+            | Branch(id, _, handler) ->
+                task {
                     let selectedPath = path + "/" + id
 
                     try
@@ -2112,7 +2114,9 @@ module private SchedulerInternals =
                                 ValueNone
 
                         do! emit response
-                | Merge(id, _, maximum, branches) ->
+                }
+            | Merge(id, _, maximum, branches) ->
+                task {
                     use semaphore = new SemaphoreSlim(maximum, maximum)
 
                     let tasks =
@@ -2129,7 +2133,9 @@ module private SchedulerInternals =
 
                     let! _ = Task.WhenAll tasks
                     ()
-                | Loop(id, _, maximum, handler) ->
+                }
+            | Loop(id, _, maximum, handler) ->
+                task {
                     let loopPath = path + "/" + id
                     let mutable value = inputValue
                     let mutable response = Unchecked.defaultof<ErasedResponse>
@@ -2201,7 +2207,9 @@ module private SchedulerInternals =
                             do! emit finalResponse
                     else
                         do! emit response
-                | Approval(id, _, handler) ->
+                }
+            | Approval(id, _, handler) ->
+                task {
                     let approvalPath = path + "/" + id
 
                     match restore approvalPath lane typeof<ApprovalResponse> with
@@ -2256,8 +2264,10 @@ module private SchedulerInternals =
                                     ValueNone
 
                             do! emit response
-                | Named(id, child) -> do! eval child (path + "/" + id) lane inputValue dynamicDepth emit
-                | Agent(id, _, handler) ->
+                }
+            | Named(id, child) -> task { do! eval child (path + "/" + id) lane inputValue dynamicDepth emit }
+            | Agent(id, _, handler) ->
+                task {
                     let nodePath = path + "/" + id
                     let sessionKey = journalKey nodePath lane
 
@@ -2401,7 +2411,9 @@ module private SchedulerInternals =
                         match sessionPermit with
                         | ValueSome permit -> permit.Release() |> ignore
                         | ValueNone -> ()
-                | Code(id, _, handler) ->
+                }
+            | Code(id, _, handler) ->
+                task {
                     let nodePath = path + "/" + id
 
                     match restore nodePath lane handler.OutputType with
@@ -2474,7 +2486,9 @@ module private SchedulerInternals =
                                     ValueNone
 
                             do! emit response
-                | Value(id, outputType, serializedValue) ->
+                }
+            | Value(id, outputType, serializedValue) ->
+                task {
                     let nodePath = path + "/" + id
 
                     match restore nodePath lane outputType with
@@ -2484,7 +2498,7 @@ module private SchedulerInternals =
                         let value = JsonSerializer.Deserialize(serializedValue, outputType)
                         let! response = finishNode node nodePath lane started value ValueNone (RunUsage(0, 0)) ValueNone
                         do! emit response
-            }
+                }
 
         let writeTerminal () =
             task {

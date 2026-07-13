@@ -431,16 +431,30 @@ module internal CircuitGraph =
                 | ValueSome stable -> CircuitValidation.nonBlank "key" stable
                 | ValueNone -> string ordinal
 
+    type IAsyncSourceEnumerator =
+        abstract Current: obj
+        abstract MoveNextAsync: unit -> Task<bool>
+        abstract DisposeAsync: unit -> Task
+
+    type AsyncSourceEnumerator<'Item>(enumerator: IAsyncEnumerator<'Item>) =
+        interface IAsyncSourceEnumerator with
+            member _.Current = box enumerator.Current
+            member _.MoveNextAsync() = enumerator.MoveNextAsync().AsTask()
+            member _.DisposeAsync() = enumerator.DisposeAsync().AsTask()
+
     type IAsyncSourceHandler =
         abstract InputType: Type
         abstract ItemType: Type
-        abstract Invoke: obj -> obj
+        abstract GetAsyncEnumerator: obj * CancellationToken -> IAsyncSourceEnumerator
 
     type AsyncSourceHandler<'Input, 'Item>(source: 'Input -> IAsyncEnumerable<'Item>) =
         interface IAsyncSourceHandler with
             member _.InputType = typeof<'Input>
             member _.ItemType = typeof<'Item>
-            member _.Invoke(value) = box (source (unbox<'Input> value))
+
+            member _.GetAsyncEnumerator(value, cancellationToken) =
+                let values = source (unbox<'Input> value)
+                AsyncSourceEnumerator(values.GetAsyncEnumerator(cancellationToken))
 
     type IResumableSourceHandler =
         abstract InputType: Type

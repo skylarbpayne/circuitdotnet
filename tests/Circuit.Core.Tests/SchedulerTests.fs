@@ -3,6 +3,7 @@ module Circuit.Core.Tests.SchedulerTests
 open System
 open System.Collections.Generic
 open System.Text.Json
+open System.Text.Json.Nodes
 open System.Threading
 open System.Threading.Tasks
 open Circuit.Core
@@ -1974,3 +1975,754 @@ let ``Circuit graph descriptor exposes immutable topology cardinality and bounds
     Assert.All(graph.Nodes, fun node -> Assert.False(String.IsNullOrWhiteSpace node.Path))
     let nodes = graph.Nodes :?> System.Collections.IList
     Assert.True(nodes.IsReadOnly)
+
+[<Fact>]
+let ``recovery preserves successful lanes and replaces or reports failed lanes`` () =
+    task {
+        let providerFailure =
+            CircuitFailure.Create(CircuitFailureCode.Provider, "provider failed")
+
+        let successful =
+            Circuit.code "recover-success-input" "1.0.0" (fun context value -> Helpers.success context value)
+            |> Circuit.recover "recover-success" "1.0.0" (fun _ -> -1)
+
+        let! success = Circuit.run Helpers.runtime successful 7 Helpers.options CancellationToken.None
+        Assert.True(success.IsSuccess)
+        Assert.Equal(7, success.Value)
+
+        let failed: Circuit<int, int> =
+            Circuit.code "recover-failed-input" "1.0.0" (fun context _ ->
+                Response.fail context providerFailure |> Task.FromResult)
+
+        let recovered =
+            failed
+            |> Circuit.recover "recover-value" "1.0.0" (fun failure -> int failure.Code)
+
+        let! recovery = Circuit.run Helpers.runtime recovered 0 Helpers.options CancellationToken.None
+        Assert.True(recovery.IsSuccess)
+        Assert.Equal(int CircuitFailureCode.Provider, recovery.Value)
+
+        let throwing =
+            failed
+            |> Circuit.recover "recover-throws" "1.0.0" (fun _ -> raise (InvalidOperationException("recovery failed")))
+
+        let! reported = Circuit.run Helpers.runtime throwing 0 Helpers.options CancellationToken.None
+        Assert.False(reported.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, reported.Failure.Code)
+        Assert.Contains("recovery handler failed", reported.Failure.Message, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``aggregate reports successful failed and throwing handler outcomes`` () =
+    task {
+        let source =
+            Circuit.items "aggregate-items" "1.0.0" (fun (_: unit) -> Helpers.toArray [ 1; 2; 3 ])
+
+        let summed =
+            source
+            |> Circuit.aggregate "sum" "1.0.0" (fun context responses _ ->
+                responses |> Seq.sumBy _.Value |> Response.succeed context |> Task.FromResult)
+
+        let! sum = Circuit.run Helpers.runtime summed () Helpers.options CancellationToken.None
+        Assert.True(sum.IsSuccess)
+        Assert.Equal(6, sum.Value)
+
+        let controlledFailure =
+            CircuitFailure.Create(CircuitFailureCode.Validation, "aggregate rejected")
+
+        let rejected =
+            source
+            |> Circuit.aggregate "reject" "1.0.0" (fun context _ _ ->
+                Response.fail context controlledFailure |> Task.FromResult)
+
+        let! rejection = Circuit.run Helpers.runtime rejected () Helpers.options CancellationToken.None
+        Assert.False(rejection.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Validation, rejection.Failure.Code)
+
+        let throwing =
+            source
+            |> Circuit.aggregate "throw" "1.0.0" (fun _ _ _ ->
+                Task.FromException<Response<int>>(InvalidOperationException("aggregate failed")))
+
+        let! reported = Circuit.run Helpers.runtime throwing () Helpers.options CancellationToken.None
+        Assert.False(reported.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, reported.Failure.Code)
+        Assert.Contains("aggregate handler failed", reported.Failure.Message, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``branch selects exact and default cases and reports selector failures or missing cases`` () =
+    task {
+        let cases = Dictionary<string, Circuit<int, string>>(StringComparer.Ordinal)
+
+        cases.Add("even", Circuit.value "matched")
+
+        let withDefault =
+            Circuit.branch
+                "parity"
+                "1.0.0"
+                (fun value -> if value % 2 = 0 then "even" else "odd")
+                cases
+                (ValueSome(Circuit.value "defaulted"))
+
+        let! exact = Circuit.run Helpers.runtime withDefault 2 Helpers.options CancellationToken.None
+        let! fallback = Circuit.run Helpers.runtime withDefault 3 Helpers.options CancellationToken.None
+        Assert.Equal("matched", exact.Value)
+        Assert.Equal("defaulted", fallback.Value)
+
+        let withoutDefault =
+            Circuit.branch "required-case" "1.0.0" (fun _ -> "missing") cases ValueNone
+
+        let! missing = Circuit.run Helpers.runtime withoutDefault 1 Helpers.options CancellationToken.None
+        Assert.False(missing.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, missing.Failure.Code)
+        Assert.Contains("No branch matched", missing.Failure.Message)
+
+        let throwingSelector =
+            Circuit.branch
+                "throwing-selector"
+                "1.0.0"
+                (fun _ -> raise (InvalidOperationException("selector failed")))
+                cases
+                ValueNone
+
+        let! selectorFailure = Circuit.run Helpers.runtime throwingSelector 1 Helpers.options CancellationToken.None
+
+        Assert.False(selectorFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, selectorFailure.Failure.Code)
+        Assert.Contains("branch selector failed", selectorFailure.Failure.Message, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``async source collection emits admitted items and reports enumerator failures`` () =
+    task {
+        let source (values: int array) (failure: exn option) =
+            { new IAsyncEnumerable<int> with
+                member _.GetAsyncEnumerator(_cancellationToken) =
+                    let mutable index = -1
+
+                    { new IAsyncEnumerator<int> with
+                        member _.Current = values[index]
+
+                        member _.MoveNextAsync() =
+                            index <- index + 1
+
+                            if index < values.Length then
+                                ValueTask<bool>(true)
+                            else
+                                match failure with
+                                | Some ex -> ValueTask<bool>(Task.FromException<bool>(ex))
+                                | None -> ValueTask<bool>(false)
+
+                        member _.DisposeAsync() = ValueTask() } }
+
+        let complete =
+            Circuit.asyncSource "async-complete" "1.0.0" (fun (_: unit) -> source [| 4; 5; 6 |] None)
+
+        let! collected = Circuit.collect Helpers.runtime complete () Helpers.options CancellationToken.None
+        Assert.True(collected.IsSuccess)
+        Assert.Equal<int list>([ 4; 5; 6 ], collected.Value |> Seq.map _.Value |> Seq.toList)
+
+        let broken =
+            Circuit.asyncSource "async-broken" "1.0.0" (fun (_: unit) ->
+                source [| 9 |] (Some(InvalidOperationException("enumeration failed"))))
+
+        let! reported = Circuit.collect Helpers.runtime broken () Helpers.options CancellationToken.None
+        Assert.False(reported.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, reported.Failure.Code)
+        Assert.Contains("enumeration failed", string reported.Failure.Exception.Value)
+    }
+
+[<Fact>]
+let ``scheduler graph decisions count validate and type every node shape`` () =
+    let leaf = Circuit.value 1
+
+    let items =
+        Circuit.items "decision-items" "1.0.0" (fun (_: unit) -> Helpers.toArray [ 1 ])
+
+    let asyncItems =
+        Circuit.asyncSource "decision-async" "1.0.0" (fun (_: unit) ->
+            { new IAsyncEnumerable<int> with
+                member _.GetAsyncEnumerator(_cancellationToken) =
+                    { new IAsyncEnumerator<int> with
+                        member _.Current = 1
+                        member _.MoveNextAsync() = ValueTask<bool>(false)
+                        member _.DisposeAsync() = ValueTask() } })
+
+    let resumable =
+        { new IResumableCircuitSource<unit, int> with
+            member _.ReadAsync(_, _, _) =
+                ValueTask<CircuitSourcePage<int>>(CircuitSourcePage(Helpers.toArray [ 1 ], ValueNone, true)) }
+        |> Circuit.source "decision-source" "1.0.0"
+
+    let code =
+        Circuit.code "decision-code" "1.0.0" (fun context value -> Helpers.success context value)
+
+    let thenNode = leaf |> Circuit.thenStep code
+
+    let dynamic =
+        leaf |> Circuit.thenDynamic "decision-dynamic" "1.0.0" string 1 Circuit.value
+
+    let attempted = code |> Circuit.attempt
+    let recovered = code |> Circuit.recover "decision-recover" "1.0.0" (fun _ -> 0)
+    let named = code |> Circuit.named "decision-named"
+
+    let approval =
+        Circuit.approval "decision-approval" "1.0.0" (fun (_: unit) -> ApprovalPrompt.Create("Review", "Approve"))
+
+    let aggregate =
+        items
+        |> Circuit.aggregate "decision-aggregate" "1.0.0" (fun context values _ ->
+            Response.succeed context values.Count |> Task.FromResult)
+
+    let cases = Dictionary<string, Circuit<int, int>>()
+    cases["one"] <- Circuit.value 1
+
+    let branch =
+        Circuit.branch "decision-branch" "1.0.0" string cases (ValueSome(Circuit.value 0))
+
+    let merge = Circuit.merge "decision-merge" "1.0.0" 1 (Helpers.toArray [ code ])
+    let loop = Circuit.loop "decision-loop" "1.0.0" 2 (fun value -> value < 1) code
+
+    let nodes =
+        [ leaf.Node
+          items.Node
+          asyncItems.Node
+          resumable.Node
+          code.Node
+          thenNode.Node
+          dynamic.Node
+          attempted.Node
+          recovered.Node
+          named.Node
+          approval.Node
+          aggregate.Node
+          branch.Node
+          merge.Node
+          loop.Node ]
+
+    for node in nodes do
+        Assert.True(SchedulerInternals.nodeCount node >= 1)
+        Assert.NotNull(SchedulerInternals.outputType node)
+        SchedulerInternals.validateGeneratedNode node
+
+    Assert.Equal(2, SchedulerInternals.nodeCount thenNode.Node)
+    Assert.Equal(2, SchedulerInternals.nodeCount attempted.Node)
+    Assert.Equal(3, SchedulerInternals.nodeCount branch.Node)
+    Assert.Equal(2, SchedulerInternals.nodeCount merge.Node)
+    Assert.Equal(2, SchedulerInternals.nodeCount loop.Node)
+
+    let invalidDynamic =
+        match dynamic.Node with
+        | CircuitGraph.Dynamic(id, version, _, handler, previous) ->
+            CircuitGraph.Dynamic(id, version, 0, handler, previous)
+        | _ -> failwith "Expected dynamic node."
+
+    let invalidMerge =
+        match merge.Node with
+        | CircuitGraph.Merge(id, version, _, branches) -> CircuitGraph.Merge(id, version, 0, branches)
+        | _ -> failwith "Expected merge node."
+
+    let invalidLoop =
+        match loop.Node with
+        | CircuitGraph.Loop(id, version, _, handler) -> CircuitGraph.Loop(id, version, 0, handler)
+        | _ -> failwith "Expected loop node."
+
+    Assert.Throws<InvalidOperationException>(fun () -> SchedulerInternals.validateGeneratedNode invalidDynamic)
+    |> ignore
+
+    Assert.Throws<InvalidOperationException>(fun () -> SchedulerInternals.validateGeneratedNode invalidMerge)
+    |> ignore
+
+    Assert.Throws<InvalidOperationException>(fun () -> SchedulerInternals.validateGeneratedNode invalidLoop)
+    |> ignore
+
+[<Fact>]
+let ``scheduler agent discovery traverses static graph containers`` () =
+    let agent =
+        AgentDefinition.Create(
+            "decision.agent",
+            "1.0.0",
+            "Decision agent",
+            "Echo input.",
+            ValueNone,
+            Seq.empty,
+            Seq.empty,
+            Seq.empty
+        )
+
+    let signature =
+        Signature<int, int>
+            .Create(
+                "decision.signature",
+                "1.0.0",
+                "Decision",
+                "Echo",
+                CircuitJson.createOptions (),
+                Seq.empty,
+                Seq.empty
+            )
+
+    let agentCircuit = Circuit.agent agent signature
+    let cases = Dictionary<string, Circuit<int, int>>()
+    cases["agent"] <- agentCircuit
+
+    let branch =
+        Circuit.branch
+            "agent-branch"
+            "1.0.0"
+            (fun _ -> "agent")
+            cases
+            (ValueSome(agentCircuit |> Circuit.named "fallback-agent"))
+
+    let merged =
+        Circuit.merge
+            "agent-merge"
+            "1.0.0"
+            2
+            (Helpers.toArray [ branch; Circuit.loop "agent-loop" "1.0.0" 1 (fun _ -> false) agentCircuit ])
+
+    let ids = SchedulerInternals.agentIds merged.Node |> Seq.toArray
+    Assert.Equal(3, ids.Length)
+    Assert.All(ids, fun value -> Assert.Equal("decision.agent@1.0.0", value))
+
+[<Fact>]
+let ``checkpoint resume state round trips every durable collection`` () =
+    let state = SchedulerInternals.emptyResumeState ()
+    let now = DateTimeOffset.UtcNow
+
+    state.Responses["success"] <-
+        { Success = true
+          ValueJson = "42"
+          FailureCode = 0
+          FailureMessage = null
+          FailureOperationId = null
+          FailureRequestId = null
+          InputTokens = 1
+          OutputTokens = 2
+          Attempt = 1
+          StartedAt = now
+          CompletedAt = now
+          IdempotencyKey = "success-key"
+          SourceOrder = [| 1L; 2L |] }
+
+    state.Responses["failure"] <-
+        { Success = false
+          ValueJson = null
+          FailureCode = int CircuitFailureCode.Provider
+          FailureMessage = "failed"
+          FailureOperationId = "operation"
+          FailureRequestId = "request"
+          InputTokens = 3
+          OutputTokens = 4
+          Attempt = 2
+          StartedAt = now
+          CompletedAt = now
+          IdempotencyKey = "failure-key"
+          SourceOrder = Array.empty }
+
+    state.DynamicFingerprints["dynamic"] <- "fingerprint"
+    state.DynamicInputs["dynamic"] <- "1"
+    state.SourceCursors["source"] <- "cursor"
+    state.SourceCounts["source"] <- 2L
+    state.SourcePageCounts["source"] <- 1
+    state.SourceSnapshots["source"] <- [| "1"; "2" |]
+    state.SourcePendingCursors["pending-null"] <- null
+    state.SourcePendingCursors["pending-value"] <- "next"
+    state.SourcePendingCompleted.Add("pending-value") |> ignore
+    state.PendingApprovalIds.Add("approval") |> ignore
+
+    state.PendingApprovalRequests["approval"] <-
+        ApprovalRequest(
+            "approval",
+            "tool.one",
+            ValueSome "{}",
+            ValueSome(ApprovalPrompt("Review", "Approve", seq [ KeyValuePair("risk", "low") ]))
+        )
+
+    state.PendingApprovalRequests["approval-null"] <- ApprovalRequest("approval-null", "tool.two", ValueNone, ValueNone)
+
+    state.AcceptedApprovals["accepted"] <- { Approved = true; Note = "approved" }
+    state.AcceptedApprovals["accepted-null"] <- { Approved = false; Note = null }
+    state.GeneratedNodeCount <- 1
+    state.ApprovalRoundCount <- 2
+    state.SessionAliases["leaf"] <- "group"
+    use adapterDocument = JsonDocument.Parse("{\"provider\":true}")
+    state.SerializedSessions["group"] <- struct ("agent@1.0.0", adapterDocument.RootElement.Clone())
+
+    let payload =
+        SchedulerInternals.writeResumeState state typeof<int> (box 7) Helpers.options
+
+    let parsed = SchedulerInternals.parseResumeState payload
+
+    let parsedOptions =
+        SchedulerInternals.parseRunOptions payload Helpers.options.Services
+
+    Assert.Equal(2, parsed.Responses.Count)
+    Assert.True(parsed.Responses["success"].Success)
+    Assert.False(parsed.Responses["failure"].Success)
+    Assert.Equal("operation", parsed.Responses["failure"].FailureOperationId)
+    Assert.Equal<int64[]>([| 1L; 2L |], parsed.Responses["success"].SourceOrder)
+    Assert.Equal("fingerprint", parsed.DynamicFingerprints["dynamic"])
+    Assert.Equal(2L, parsed.SourceCounts["source"])
+    Assert.Null(parsed.SourcePendingCursors["pending-null"])
+    Assert.True(parsed.SourcePendingCompleted.Contains("pending-value"))
+    Assert.True(parsed.PendingApprovalRequests["approval"].Prompt.IsSome)
+    Assert.True(parsed.PendingApprovalRequests["approval-null"].Prompt.IsNone)
+    Assert.Equal("approved", parsed.AcceptedApprovals["accepted"].Note)
+    Assert.Null(parsed.AcceptedApprovals["accepted-null"].Note)
+    Assert.Equal(1, parsed.GeneratedNodeCount)
+    Assert.Equal(2, parsed.ApprovalRoundCount)
+    Assert.Equal("group", parsed.SessionAliases["leaf"])
+    Assert.Equal(Helpers.options.MaxConcurrency, parsedOptions.MaxConcurrency)
+    Assert.Same(Helpers.options.Services, parsedOptions.Services)
+
+[<Fact>]
+let ``checkpoint resume parser rejects malformed durable collection shapes`` () =
+    let valid =
+        SchedulerInternals.writeResumeState (SchedulerInternals.emptyResumeState ()) typeof<int> (box 7) Helpers.options
+
+    let expectInvalid mutate expected =
+        let root = JsonNode.Parse(valid.GetRawText()).AsObject()
+        mutate root
+        use document = JsonDocument.Parse(root.ToJsonString())
+
+        let ex =
+            Assert.Throws<JsonException>(fun () -> SchedulerInternals.parseResumeState document.RootElement |> ignore)
+
+        Assert.Contains(expected, ex.Message)
+
+    expectInvalid (fun root -> root["responses"] <- JsonValue.Create("wrong")) "responses"
+
+    expectInvalid
+        (fun root -> root["responses"] <- JsonArray(JsonNode.Parse("{\"key\":\"x\",\"success\":\"yes\"}")))
+        "success"
+
+    expectInvalid (fun root -> root["sourceCursors"].AsObject()["source"] <- JsonValue.Create(1)) "non-string"
+
+    expectInvalid
+        (fun root -> root["sourcePending"].AsObject()["source"] <- JsonValue.Create("wrong"))
+        "pending source page"
+
+    expectInvalid
+        (fun root -> root["sourcePending"].AsObject()["source"] <- JsonNode.Parse("{\"completed\":true}"))
+        "missing its cursor"
+
+    expectInvalid
+        (fun root -> root["sourcePending"].AsObject()["source"] <- JsonNode.Parse("{\"cursor\":1,\"completed\":true}"))
+        "cursor must be"
+
+    expectInvalid
+        (fun root ->
+            root["sourcePending"].AsObject()["source"] <- JsonNode.Parse("{\"cursor\":null,\"completed\":\"yes\"}"))
+        "completed flag"
+
+    expectInvalid
+        (fun root -> root["sourceSnapshots"].AsObject()["source"] <- JsonValue.Create(1))
+        "snapshots must be arrays"
+
+    expectInvalid (fun root -> root["sourceCounts"].AsObject()["source"] <- JsonValue.Create(-1)) "cannot be negative"
+
+    expectInvalid
+        (fun root -> root["sourcePageCounts"].AsObject()["source"] <- JsonValue.Create(-1))
+        "cannot be negative"
+
+    expectInvalid
+        (fun root -> root["pendingApprovalIds"] <- JsonArray(JsonValue.Create(1)))
+        "identifiers must be strings"
+
+    expectInvalid
+        (fun root -> root["pendingApprovalRequests"].AsObject()["request"] <- JsonValue.Create("wrong"))
+        "requests must be objects"
+
+    expectInvalid
+        (fun root -> root["acceptedApprovals"].AsObject()["request"] <- JsonValue.Create("wrong"))
+        "decisions must be objects"
+
+    expectInvalid (fun root -> root["generatedNodeCount"] <- JsonValue.Create(-1)) "counters cannot be negative"
+
+    expectInvalid
+        (fun root -> root["sessionAliases"].AsObject()["leaf"] <- JsonValue.Create(1))
+        "aliases must be strings"
+
+    expectInvalid
+        (fun root -> root["sessions"].AsObject()["group"] <- JsonValue.Create("wrong"))
+        "sessions must be objects"
+
+    expectInvalid
+        (fun root -> root["sessions"].AsObject()["group"] <- JsonNode.Parse("{\"agentId\":\"agent@1.0.0\"}"))
+        "missing its adapter state"
+
+[<Fact>]
+let ``loop reports predicate cardinality and body failure edge cases`` () =
+    task {
+        let identity =
+            Circuit.code "loop-edge-identity" "1.0.0" (fun context value -> Helpers.success context value)
+
+        let throwingPredicate =
+            Circuit.loop
+                "loop-throwing-predicate"
+                "1.0.0"
+                2
+                (fun _ -> raise (InvalidOperationException("predicate failed")))
+                identity
+
+        let! predicateFailure = Circuit.run Helpers.runtime throwingPredicate 0 Helpers.options CancellationToken.None
+
+        Assert.False(predicateFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, predicateFailure.Failure.Code)
+        Assert.Contains("predicate failed", string predicateFailure.Failure.Exception.Value)
+
+        let manyBody =
+            Circuit.items "loop-many-body" "1.0.0" (fun value -> Helpers.toArray [ value; value + 1 ])
+
+        let manyLoop = Circuit.loop "loop-many" "1.0.0" 2 (fun _ -> true) manyBody
+        let! cardinalityFailure = Circuit.run Helpers.runtime manyLoop 0 Helpers.options CancellationToken.None
+        Assert.False(cardinalityFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, cardinalityFailure.Failure.Code)
+        Assert.Contains("exactly one", string cardinalityFailure.Failure.Exception.Value)
+
+        let controlled =
+            CircuitFailure.Create(CircuitFailureCode.Validation, "body rejected")
+
+        let failingBody =
+            Circuit.code "loop-failed-body" "1.0.0" (fun context (_: int) ->
+                Response.fail context controlled |> Task.FromResult)
+
+        let failedLoop = Circuit.loop "loop-failed" "1.0.0" 2 (fun _ -> true) failingBody
+        let! bodyFailure = Circuit.run Helpers.runtime failedLoop 0 Helpers.options CancellationToken.None
+        Assert.False(bodyFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Validation, bodyFailure.Failure.Code)
+
+        let noIterations = Circuit.loop "loop-stop" "1.0.0" 2 (fun _ -> false) identity
+        let! stopped = Circuit.run Helpers.runtime noIterations 9 Helpers.options CancellationToken.None
+        Assert.True(stopped.IsSuccess)
+        Assert.Equal(9, stopped.Value)
+    }
+
+[<Fact>]
+let ``resumable source reports page limit size completion and provider failures`` () =
+    task {
+        let pageLimitSource =
+            { new IResumableCircuitSource<unit, int> with
+                member _.ReadAsync(_, cursor, _) =
+                    let next =
+                        cursor
+                        |> ValueOption.map (fun value -> value + "x")
+                        |> ValueOption.defaultValue "x"
+
+                    ValueTask<CircuitSourcePage<int>>(CircuitSourcePage(Helpers.toArray [ 1 ], ValueSome next, false)) }
+
+        let strictPages =
+            Helpers.options.WithLimits(
+                Helpers.options.MaxDynamicDepth,
+                Helpers.options.MaxDynamicNodes,
+                Helpers.options.MaxApprovalRounds,
+                Helpers.options.MaxSourcePageSize,
+                1
+            )
+
+        let! pageLimit =
+            Circuit.collect
+                Helpers.runtime
+                (Circuit.source "source-page-limit" "1.0.0" pageLimitSource)
+                ()
+                strictPages
+                CancellationToken.None
+
+        Assert.False(pageLimit.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ResourceLimit, pageLimit.Failure.Code)
+        Assert.Contains("page limit", pageLimit.Failure.Message)
+
+        let oversizedSource =
+            { new IResumableCircuitSource<unit, int> with
+                member _.ReadAsync(_, _, _) =
+                    ValueTask<CircuitSourcePage<int>>(CircuitSourcePage(Helpers.toArray [ 1; 2 ], ValueNone, true)) }
+
+        let strictSize =
+            Helpers.options.WithLimits(
+                Helpers.options.MaxDynamicDepth,
+                Helpers.options.MaxDynamicNodes,
+                Helpers.options.MaxApprovalRounds,
+                1,
+                Helpers.options.MaxSourcePages
+            )
+
+        let! oversized =
+            Circuit.collect
+                Helpers.runtime
+                (Circuit.source "source-page-size" "1.0.0" oversizedSource)
+                ()
+                strictSize
+                CancellationToken.None
+
+        Assert.False(oversized.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ResourceLimit, oversized.Failure.Code)
+        Assert.Contains("2 items", oversized.Failure.Message)
+
+        let emptySource =
+            { new IResumableCircuitSource<unit, int> with
+                member _.ReadAsync(_, _, _) =
+                    ValueTask<CircuitSourcePage<int>>(CircuitSourcePage(Helpers.toArray [], ValueNone, true)) }
+
+        let! empty =
+            Circuit.collect
+                Helpers.runtime
+                (Circuit.source "source-empty" "1.0.0" emptySource)
+                ()
+                Helpers.options
+                CancellationToken.None
+
+        Assert.True(empty.IsSuccess)
+        Assert.Empty(empty.Value)
+
+        let throwingSource =
+            { new IResumableCircuitSource<unit, int> with
+                member _.ReadAsync(_, _, _) =
+                    raise (InvalidOperationException("source provider failed")) }
+
+        let! thrown =
+            Circuit.collect
+                Helpers.runtime
+                (Circuit.source "source-throws" "1.0.0" throwingSource)
+                ()
+                Helpers.options
+                CancellationToken.None
+
+        Assert.False(thrown.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, thrown.Failure.Code)
+        Assert.Contains("source provider failed", string thrown.Failure.Exception.Value)
+    }
+
+[<Fact>]
+let ``checkpoint run options reject malformed persisted values`` () =
+    let valid =
+        SchedulerInternals.writeResumeState (SchedulerInternals.emptyResumeState ()) typeof<int> (box 7) Helpers.options
+
+    let expectInvalid mutate =
+        let root = JsonNode.Parse(valid.GetRawText()).AsObject()
+        mutate (root["options"].AsObject())
+        use document = JsonDocument.Parse(root.ToJsonString())
+
+        Assert.ThrowsAny<Exception>(fun () ->
+            SchedulerInternals.parseRunOptions document.RootElement Helpers.options.Services
+            |> ignore)
+        |> ignore
+
+    expectInvalid (fun options -> options.Remove("tenantId") |> ignore)
+    expectInvalid (fun options -> options["tenantId"] <- JsonValue.Create(1))
+    expectInvalid (fun options -> options["userId"] <- JsonValue.Create(true))
+    expectInvalid (fun options -> options["tags"] <- JsonArray())
+    expectInvalid (fun options -> options["tags"].AsObject()["invalid"] <- JsonValue.Create(1))
+    expectInvalid (fun options -> options["structuredOutputPolicy"] <- JsonValue.Create("native"))
+    expectInvalid (fun options -> options["sensitiveDataMode"] <- JsonValue.Create("standard"))
+    expectInvalid (fun options -> options["maxConcurrency"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["eventBufferCapacity"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxDynamicDepth"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxDynamicNodes"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxApprovalRounds"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxSourcePageSize"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxSourcePages"] <- JsonValue.Create(0))
+    expectInvalid (fun options -> options["maxCheckpointBytes"] <- JsonValue.Create(100))
+    expectInvalid (fun options -> options["disposalDrainMilliseconds"] <- JsonValue.Create(-2.0))
+
+[<Fact>]
+let ``checkpoint writer rejects aliases without serialized session boundaries`` () =
+    let state = SchedulerInternals.emptyResumeState ()
+    state.SessionAliases["leaf"] <- "missing-group"
+
+    let ex =
+        Assert.Throws<InvalidOperationException>(fun () ->
+            SchedulerInternals.writeResumeState state typeof<int> (box 7) Helpers.options
+            |> ignore)
+
+    Assert.Contains("checkpoint-safe adapter boundary", ex.Message)
+
+[<Fact>]
+let ``checkpoint response parser rejects malformed and duplicate response entries`` () =
+    let valid =
+        SchedulerInternals.writeResumeState (SchedulerInternals.emptyResumeState ()) typeof<int> (box 7) Helpers.options
+
+    let successJson =
+        """{"key":"entry","success":true,"value":42,"inputTokens":1,"outputTokens":2,"attempt":1,"startedAt":"2026-01-01T00:00:00+00:00","completedAt":"2026-01-01T00:00:01+00:00","idempotencyKey":"key","sourceOrder":[1]}"""
+
+    let failureJson =
+        """{"key":"entry","success":false,"failureCode":2,"failureMessage":"failed","inputTokens":1,"outputTokens":2,"attempt":1,"startedAt":"2026-01-01T00:00:00+00:00","completedAt":"2026-01-01T00:00:01+00:00","idempotencyKey":"key","sourceOrder":[]}"""
+
+    let expectInvalid (entries: JsonArray) expected =
+        let root = JsonNode.Parse(valid.GetRawText()).AsObject()
+        root["responses"] <- entries
+        use document = JsonDocument.Parse(root.ToJsonString())
+
+        let ex =
+            Assert.Throws<JsonException>(fun () -> SchedulerInternals.parseResumeState document.RootElement |> ignore)
+
+        Assert.Contains(expected, ex.Message)
+
+    let mutate (json: string) change =
+        let entry = JsonNode.Parse(json).AsObject()
+        change entry
+        JsonArray(entry)
+
+    expectInvalid (mutate successJson (fun entry -> entry.Remove("value") |> ignore)) "missing its value"
+
+    expectInvalid
+        (mutate successJson (fun entry -> entry["sourceOrder"] <- JsonArray(JsonValue.Create("wrong"))))
+        "must be numbers"
+
+    expectInvalid (mutate successJson (fun entry -> entry["inputTokens"] <- JsonValue.Create("one"))) "inputTokens"
+    expectInvalid (mutate successJson (fun entry -> entry["outputTokens"] <- JsonValue.Create("two"))) "outputTokens"
+    expectInvalid (mutate successJson (fun entry -> entry["attempt"] <- JsonValue.Create("one"))) "attempt"
+    expectInvalid (mutate successJson (fun entry -> entry["startedAt"] <- JsonValue.Create(1))) "startedAt"
+    expectInvalid (mutate successJson (fun entry -> entry["completedAt"] <- JsonValue.Create(1))) "completedAt"
+    expectInvalid (mutate successJson (fun entry -> entry["idempotencyKey"] <- JsonValue.Create(1))) "idempotencyKey"
+    expectInvalid (mutate failureJson (fun entry -> entry.Remove("failureCode") |> ignore)) "failureCode"
+    expectInvalid (mutate failureJson (fun entry -> entry.Remove("failureMessage") |> ignore)) "failureMessage"
+
+    expectInvalid (JsonArray(JsonNode.Parse(successJson), JsonNode.Parse(successJson))) "duplicated"
+
+[<Fact>]
+let ``checkpoint approval parser rejects malformed request and prompt fields`` () =
+    let valid =
+        SchedulerInternals.writeResumeState (SchedulerInternals.emptyResumeState ()) typeof<int> (box 7) Helpers.options
+
+    let requestJson =
+        """{"toolName":"tool.one","argumentsJson":"{}","prompt":{"title":"Review","message":"Approve","metadata":{"risk":"low"}}}"""
+
+    let expectInvalid change expected =
+        let root = JsonNode.Parse(valid.GetRawText()).AsObject()
+        let request = JsonNode.Parse(requestJson).AsObject()
+        change request
+        root["pendingApprovalRequests"].AsObject()["request"] <- request
+        use document = JsonDocument.Parse(root.ToJsonString())
+
+        let ex =
+            Assert.ThrowsAny<Exception>(fun () -> SchedulerInternals.parseResumeState document.RootElement |> ignore)
+
+        Assert.Contains(expected, ex.Message)
+
+    expectInvalid (fun request -> request["toolName"] <- JsonValue.Create(1)) "toolName"
+    expectInvalid (fun request -> request.Remove("argumentsJson") |> ignore) "missing argumentsJson"
+    expectInvalid (fun request -> request["argumentsJson"] <- JsonValue.Create(1)) "string or null"
+    expectInvalid (fun request -> request.Remove("prompt") |> ignore) "missing its prompt"
+    expectInvalid (fun request -> request["prompt"] <- JsonValue.Create("wrong")) "object or null"
+
+    expectInvalid (fun request -> request["prompt"].AsObject()["title"] <- JsonValue.Create(1)) "title"
+
+    expectInvalid (fun request -> request["prompt"].AsObject()["message"] <- JsonValue.Create(1)) "message"
+
+    expectInvalid (fun request -> request["prompt"].AsObject()["metadata"] <- JsonArray()) "metadata"
+
+    expectInvalid
+        (fun request ->
+            let prompt = request["prompt"].AsObject()
+            let metadata = prompt["metadata"].AsObject()
+            metadata["risk"] <- JsonValue.Create(1))
+        "metadata values"
+
+    use scalar = JsonDocument.Parse("1")
+
+    let scalarEx =
+        Assert.Throws<JsonException>(fun () -> SchedulerInternals.parseResumeState scalar.RootElement |> ignore)
+
+    Assert.Contains("must be an object", scalarEx.Message)
