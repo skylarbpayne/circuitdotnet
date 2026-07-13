@@ -1,52 +1,27 @@
-# Workflows, checkpoints, and HITL
+# Pipelines, checkpoints, and human review
 
-Workflows add explicit step graphs, approval pauses, resume, and checkpoints.
+Circuit composition replaces the former separate workflow surface. The Core scheduler runs agent leaves, host code, pipelines, approvals, and resumed checkpoints through one `ICircuitRuntime`.
 
-Use a workflow when you need:
+## Build one graph
 
-- ordered or parallel step execution;
-- explicit human-in-the-loop approval;
-- pause/resume with a checkpoint envelope;
-- versioned workflow topology validation.
-
-## F# example
+Use `Circuit.thenStep` for static continuation and `Circuit.thenDynamic` when each item selects a different child graph. Dynamic factories require stable IDs, semantic versions, deterministic keys, and bounded concurrency. Circuit freezes and fingerprints every generated child before execution.
 
 [!code-fsharp[F#](../../tests/Circuit.FSharp.Tests/DocumentationExamples/Workflows.fs)]
 
-## C# example
-
 [!code-csharp[C#](../../tests/Circuit.Interop.Tests/DocumentationExamples/Workflows.cs)]
 
-## Failure behavior
+## Handle lane failures
 
-- Invalid graphs report `WorkflowValidationIssue` entries.
-- Approval responses must match the pending request token.
-- Resuming with a changed definition version or fingerprint fails with checkpoint mismatch behavior.
-- Parallel workflow branches cancel siblings on failure.
+Ordinary continuation propagates a failed response without invoking downstream nodes. `Circuit.attempt` exposes the response as a successful value for explicit routing. `Circuit.recover` maps an expected failure to a replacement value. Unrelated lanes continue unless the graph explicitly cancels them.
 
-## Checkpoint versioning rule
+## Human approval
 
-Workflow checkpoints are only safe when **both** of these remain compatible:
+`Circuit.approval` pauses only the affected lane. Use `Circuit.start` to observe `ApprovalRequested`, then call `CircuitRun.RespondAsync` with the matching request ID. Responses are single-use. The host remains responsible for operator identity, authorization, policy, auditing, and timeout behavior.
 
-- the workflow definition semantic version; and
-- the workflow graph fingerprint.
+## Checkpoint and resume
 
-The fingerprint covers topology and declared metadata only. It intentionally does **not** hash runtime delegates or objects such as code-step handlers, branch selectors, approval prompt builders, parallel aggregates, or loop predicates.
+Call `CircuitRun.CreateCheckpointAsync` at a host-selected barrier. The response can fail with `NotCheckpointable` when a graph contains a plain asynchronous source or when an admitted value cannot be encoded by the checkpoint codec.
 
-That means you must bump the workflow definition semantic version whenever any of those behaviors change, even if the graph shape stays the same.
+Resume by supplying the same Circuit definition to `ICircuitRuntime.ResumeAsync`. Circuit verifies the root fingerprint, rebuilds dynamic children from saved item snapshots, compares child fingerprints, restores committed node responses, and replays in-flight leaves. Root output delivery remains at-least-once and retains stable item keys.
 
-## Cancellation behavior
-
-Workflow cancellation stops active steps, drains the event stream, and emits one cancelled terminal event/result.
-
-## Security notes
-
-- Approval tokens are single-use and run-scoped.
-- Checkpoints should be treated as sensitive state snapshots.
-- Human approval is an application boundary; Circuit does not supply identity or authorization policy.
-
-## What Circuit does not guarantee
-
-- migration of checkpoints across incompatible topology changes;
-- durable storage, replication, or retention of checkpoints;
-- compensation for already-executed side effects.
+Always dispose abandoned `CircuitRun` handles so active provider work and bounded channels are cancelled and drained.

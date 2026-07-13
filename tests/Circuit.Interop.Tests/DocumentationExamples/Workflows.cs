@@ -1,17 +1,13 @@
 using Circuit;
 
-namespace Circuit.Interop.Tests.DocumentationExamples;
+namespace DocumentationExamples;
 
-internal static class WorkflowExample
+internal static class Workflows
 {
-    public static WorkflowDefinition<int, bool> Build(AgentDefinition agent, AgentSignature<int, bool> signature)
-        => WorkflowDefinition<int, bool>
-            .Start("approval.workflow", "1.0.0", "classify", agent, signature)
-            .RequestApproval(
-                "manager.approval",
-                approved => new ApprovalPrompt($"Approve {approved}", "A human must approve before completion."))
-            .Then(
-                "decision",
-                (context, response, cancellationToken) => Task.FromResult(response.Approved))
-            .Build();
+    internal static CircuitDefinition<string, string> Create()
+    {
+        var agent = new AgentDefinition("docs-agent", "1.0.0", "Docs", "Return output.");
+        var signature = new AgentSignature<string, string>("docs-signature", "1.0.0", "Docs", "Return output.");
+        return CircuitDefinition<string, string>.FromAgent(agent, signature).Define("docs-workflows", "1.0.0");
+    }
 }

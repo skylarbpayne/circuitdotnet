@@ -3,6 +3,7 @@ namespace Circuit.Core
 open System
 open System.Collections.Frozen
 open System.Collections.Generic
+open System.Collections.ObjectModel
 open System.Threading
 open System.Threading.Tasks
 
@@ -43,8 +44,11 @@ type CircuitSession
     /// Gets caller-visible session metadata.
     member _.Metadata = metadata
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.AdapterId = adapterId
+    /// <summary>Gets the internal value.</summary>
     member internal _.DefinitionFingerprint = definitionFingerprint
+    /// <summary>Gets the internal value.</summary>
     member internal _.ProviderSession = providerSession
 
 /// Reports provider token usage for a completed run.
@@ -113,7 +117,16 @@ type RunOptions
         tags: IReadOnlyDictionary<string, string>,
         structuredOutputPolicy: StructuredOutputPolicy,
         sensitiveDataMode: SensitiveDataMode,
-        services: IServiceProvider
+        services: IServiceProvider,
+        maxConcurrency: int,
+        eventBufferCapacity: int,
+        maxDynamicDepth: int,
+        maxDynamicNodes: int,
+        maxApprovalRounds: int,
+        maxSourcePageSize: int,
+        maxSourcePages: int,
+        maxCheckpointBytes: int,
+        disposalDrainTimeout: TimeSpan
     ) =
     do
         if isNull services then
@@ -122,48 +135,180 @@ type RunOptions
         if isNull tags then
             nullArg "tags"
 
-    /// Gets the session to continue, if any.
+        if maxConcurrency < 1 then
+            invalidArg "maxConcurrency" "maxConcurrency must be at least 1."
+
+        if eventBufferCapacity < 1 then
+            invalidArg "eventBufferCapacity" "eventBufferCapacity must be at least 1."
+
+        if maxDynamicDepth < 1 then
+            invalidArg "maxDynamicDepth" "maxDynamicDepth must be at least 1."
+
+        if maxDynamicNodes < 1 then
+            invalidArg "maxDynamicNodes" "maxDynamicNodes must be at least 1."
+
+        if maxApprovalRounds < 1 then
+            invalidArg "maxApprovalRounds" "maxApprovalRounds must be at least 1."
+
+        if maxSourcePageSize < 1 then
+            invalidArg "maxSourcePageSize" "maxSourcePageSize must be at least 1."
+
+        if maxSourcePages < 1 then
+            invalidArg "maxSourcePages" "maxSourcePages must be at least 1."
+
+        if maxCheckpointBytes < 1024 then
+            invalidArg "maxCheckpointBytes" "maxCheckpointBytes must be at least 1024."
+
+        if
+            disposalDrainTimeout < TimeSpan.Zero
+            && disposalDrainTimeout <> Timeout.InfiniteTimeSpan
+        then
+            invalidArg "disposalDrainTimeout" "disposalDrainTimeout must be non-negative or infinite."
+
+    new(session, tenantId, userId, tags, structuredOutputPolicy, sensitiveDataMode, services) =
+        RunOptions(
+            session,
+            tenantId,
+            userId,
+            tags,
+            structuredOutputPolicy,
+            sensitiveDataMode,
+            services,
+            8,
+            128,
+            16,
+            1024,
+            16,
+            256,
+            1024,
+            4 * 1024 * 1024,
+            TimeSpan.FromSeconds 5.0
+        )
+
+    /// <summary>Gets the session value.</summary>
     member _.Session = session
-
-    /// Gets the tenant identifier associated with the run, if any.
+    /// <summary>Gets the tenant id value.</summary>
     member _.TenantId = tenantId
-
-    /// Gets the user identifier associated with the run, if any.
+    /// <summary>Gets the user id value.</summary>
     member _.UserId = userId
-
-    /// Gets arbitrary caller-supplied tags.
+    /// <summary>Gets the tags value.</summary>
     member _.Tags = tags
-
-    /// Gets the structured-output policy requested for the run.
+    /// <summary>Gets the structured output policy value.</summary>
     member _.StructuredOutputPolicy = structuredOutputPolicy
-
-    /// Gets the sensitive-data handling preference for observers.
+    /// <summary>Gets the sensitive data mode value.</summary>
     member _.SensitiveDataMode = sensitiveDataMode
-
-    /// Gets the ambient service provider available to resolvers, tools, and skills.
+    /// <summary>Gets the services value.</summary>
     member _.Services = services
+    /// <summary>Gets the max concurrency value.</summary>
+    member _.MaxConcurrency = maxConcurrency
+    /// <summary>Gets the event buffer capacity value.</summary>
+    member _.EventBufferCapacity = eventBufferCapacity
+    /// <summary>Gets the max dynamic depth value.</summary>
+    member _.MaxDynamicDepth = maxDynamicDepth
+    /// <summary>Gets the max dynamic nodes value.</summary>
+    member _.MaxDynamicNodes = maxDynamicNodes
+    /// <summary>Gets the max approval rounds value.</summary>
+    member _.MaxApprovalRounds = maxApprovalRounds
+    /// <summary>Gets the max source page size value.</summary>
+    member _.MaxSourcePageSize = maxSourcePageSize
+    /// Gets the maximum number of pages a resumable source may read across one checkpoint lineage.
+    member _.MaxSourcePages = maxSourcePages
+    /// <summary>Gets the max checkpoint bytes value.</summary>
+    member _.MaxCheckpointBytes = maxCheckpointBytes
+    /// <summary>Gets the disposal drain timeout value.</summary>
+    member _.DisposalDrainTimeout = disposalDrainTimeout
 
-    /// Creates a copy that continues the supplied session.
-    /// <param name="session">The non-null session to continue.</param>
-    member _.WithSession(session: CircuitSession) =
-        if isNull (box session) then
+    /// <summary>Gets the private value.</summary>
+    member private _.Copy
+        (
+            ?newSession,
+            ?policy,
+            ?concurrency,
+            ?eventCapacity,
+            ?dynamicDepth,
+            ?dynamicNodes,
+            ?approvalRounds,
+            ?sourcePageSize,
+            ?sourcePages,
+            ?checkpointBytes,
+            ?drainTimeout
+        ) =
+        RunOptions(
+            defaultArg newSession session,
+            tenantId,
+            userId,
+            tags,
+            defaultArg policy structuredOutputPolicy,
+            sensitiveDataMode,
+            services,
+            defaultArg concurrency maxConcurrency,
+            defaultArg eventCapacity eventBufferCapacity,
+            defaultArg dynamicDepth maxDynamicDepth,
+            defaultArg dynamicNodes maxDynamicNodes,
+            defaultArg approvalRounds maxApprovalRounds,
+            defaultArg sourcePageSize maxSourcePageSize,
+            defaultArg sourcePages maxSourcePages,
+            defaultArg checkpointBytes maxCheckpointBytes,
+            defaultArg drainTimeout disposalDrainTimeout
+        )
+
+    /// <summary>Gets the with session value.</summary>
+    member this.WithSession(value: CircuitSession) =
+        if isNull (box value) then
             nullArg "session"
 
-        RunOptions(ValueSome session, tenantId, userId, tags, structuredOutputPolicy, sensitiveDataMode, services)
+        this.Copy(newSession = ValueSome value)
 
-    /// Creates a copy with the supplied structured-output policy.
-    /// <param name="policy">The structured-output policy for the copy.</param>
-    /// <exception cref="T:System.ArgumentOutOfRangeException">
-    /// <paramref name="policy" /> is not a supported structured-output policy.
-    /// </exception>
-    member _.WithStructuredOutputPolicy(policy: StructuredOutputPolicy) =
-        match policy with
+    /// <summary>Gets the with structured output policy value.</summary>
+    member this.WithStructuredOutputPolicy(value: StructuredOutputPolicy) =
+        match value with
         | StructuredOutputPolicy.NativeOnly
-        | StructuredOutputPolicy.AllowSecondaryModelRepair ->
-            RunOptions(session, tenantId, userId, tags, policy, sensitiveDataMode, services)
-        | _ -> raise (ArgumentOutOfRangeException("policy", policy, "Unsupported structured-output policy."))
+        | StructuredOutputPolicy.AllowSecondaryModelRepair -> this.Copy(policy = value)
+        | _ -> raise (ArgumentOutOfRangeException("policy", value, "Unsupported structured-output policy."))
 
-    /// Gets the default run options.
+    /// <summary>Gets the with max concurrency value.</summary>
+    member this.WithMaxConcurrency(value: int) = this.Copy(concurrency = value)
+    /// <summary>Gets the with event buffer capacity value.</summary>
+    member this.WithEventBufferCapacity(value: int) = this.Copy(eventCapacity = value)
+
+    /// <summary>Gets the with limits value.</summary>
+    member this.WithLimits(maximumDynamicNodes: int, maximumApprovalRounds: int) =
+        this.Copy(dynamicNodes = maximumDynamicNodes, approvalRounds = maximumApprovalRounds)
+
+    /// <summary>Gets the with limits value.</summary>
+    member this.WithLimits
+        (maximumDynamicDepth: int, maximumDynamicNodes: int, maximumApprovalRounds: int, maximumSourcePageSize: int)
+        =
+        this.Copy(
+            dynamicDepth = maximumDynamicDepth,
+            dynamicNodes = maximumDynamicNodes,
+            approvalRounds = maximumApprovalRounds,
+            sourcePageSize = maximumSourcePageSize
+        )
+
+    /// Creates a copy with all dynamic, approval, and resumable-source bounds replaced.
+    member this.WithLimits
+        (
+            maximumDynamicDepth: int,
+            maximumDynamicNodes: int,
+            maximumApprovalRounds: int,
+            maximumSourcePageSize: int,
+            maximumSourcePages: int
+        ) =
+        this.Copy(
+            dynamicDepth = maximumDynamicDepth,
+            dynamicNodes = maximumDynamicNodes,
+            approvalRounds = maximumApprovalRounds,
+            sourcePageSize = maximumSourcePageSize,
+            sourcePages = maximumSourcePages
+        )
+
+    /// <summary>Gets the with max checkpoint bytes value.</summary>
+    member this.WithMaxCheckpointBytes(value: int) = this.Copy(checkpointBytes = value)
+    /// <summary>Gets the with disposal drain timeout value.</summary>
+    member this.WithDisposalDrainTimeout(value: TimeSpan) = this.Copy(drainTimeout = value)
+
+    /// <summary>Gets the default value.</summary>
     static member Default =
         RunOptions(
             ValueNone,
@@ -172,8 +317,31 @@ type RunOptions
             RunValidation.copyTags Array.empty<KeyValuePair<string, string>>,
             StructuredOutputPolicy.NativeOnly,
             SensitiveDataMode.Standard,
-            EmptyServiceProvider.Instance
+            EmptyServiceProvider.Instance,
+            8,
+            128,
+            16,
+            1024,
+            16,
+            256,
+            1024,
+            4 * 1024 * 1024,
+            TimeSpan.FromSeconds 5.0
         )
+
+/// Supplies process-local dependencies when resuming a serialized checkpoint.
+/// <remarks>Services are never serialized; the receiving process must explicitly rebind them.</remarks>
+[<Sealed>]
+type ResumeOptions(services: IServiceProvider) =
+    do
+        if isNull services then
+            nullArg "services"
+
+    /// Gets the process-local service provider used by resumed code and tool nodes.
+    member _.Services = services
+
+    /// Creates resume options with an empty service provider.
+    static member Default = ResumeOptions(EmptyServiceProvider.Instance)
 
 /// Captures the final outcome of a completed run.
 [<Sealed>]
@@ -205,13 +373,55 @@ type RunResult<'T>
     /// Gets the run completion time in UTC.
     member _.CompletedAt = completedAt
 
+/// Describes a graph approval prompt and its immutable host-routing metadata.
+[<AllowNullLiteral; Sealed>]
+type ApprovalPrompt(title: string, message: string, metadata: IEnumerable<KeyValuePair<string, string>>) =
+    let frozen =
+        if isNull metadata then
+            nullArg "metadata"
+
+        let values = Dictionary<string, string>(StringComparer.Ordinal)
+
+        for item in metadata do
+            if String.IsNullOrWhiteSpace item.Key then
+                invalidArg "metadata" "Metadata keys cannot be blank."
+
+            if isNull item.Value then
+                nullArg "metadata"
+
+            if not (values.TryAdd(item.Key, item.Value)) then
+                invalidArg "metadata" "Duplicate metadata keys are not allowed."
+
+        ReadOnlyDictionary(values) :> IReadOnlyDictionary<string, string>
+
+    do
+        if String.IsNullOrWhiteSpace title then
+            invalidArg "title" "title cannot be blank."
+
+        if isNull message then
+            nullArg "message"
+
+    /// Gets the approval title shown to the host.
+    member _.Title = title
+
+    /// Gets the approval message shown to the host.
+    member _.Message = message
+
+    /// Gets immutable authorization, audit, or routing metadata.
+    member _.Metadata = frozen
+
+    /// Creates an approval prompt without routing metadata.
+    static member Create(title, message) =
+        ApprovalPrompt(title, message, Seq.empty)
+
 /// Describes a pending approval request emitted by a run.
 /// <remarks>
 /// <see cref="P:Circuit.Core.ApprovalRequest.ArgumentsJson" /> may be omitted when the runtime cannot safely serialize
 /// arguments or intentionally withholds them from observers.
 /// </remarks>
 [<Sealed>]
-type ApprovalRequest internal (requestId: string, toolName: string, argumentsJson: string voption) =
+type ApprovalRequest
+    internal (requestId: string, toolName: string, argumentsJson: string voption, prompt: ApprovalPrompt voption) =
     do
         if String.IsNullOrWhiteSpace requestId then
             invalidArg "requestId" "requestId cannot be blank."
@@ -219,14 +429,19 @@ type ApprovalRequest internal (requestId: string, toolName: string, argumentsJso
         if String.IsNullOrWhiteSpace toolName then
             invalidArg "toolName" "toolName cannot be blank."
 
+    internal new(requestId, toolName, argumentsJson) = ApprovalRequest(requestId, toolName, argumentsJson, ValueNone)
+
     /// Gets the runtime-generated approval request identifier.
     member _.RequestId = requestId
 
     /// Gets the tool name that triggered the approval.
     member _.ToolName = toolName
 
-    /// Gets the serialized tool arguments when they are available.
+    /// Gets the serialized tool arguments when this is a provider-tool approval.
     member _.ArgumentsJson = argumentsJson
+
+    /// Gets the complete graph approval prompt, including immutable metadata, when applicable.
+    member _.Prompt = prompt
 
 /// Represents the operator's response to an approval request.
 [<AllowNullLiteral; Sealed>]
@@ -252,7 +467,7 @@ type ApprovalResponse(requestId: string, approved: bool, note: string) =
         ApprovalResponse(requestId, approved, null)
 
 /// Identifies the kind of streaming event emitted during a run.
-type RunEventKind =
+type internal RunEventKind =
     /// The run has been accepted and assigned an identifier.
     | RunStarted = 0
     /// A text delta was emitted for the current output.
@@ -280,7 +495,7 @@ type RunEventKind =
 /// Exactly one terminal event is expected for a well-formed stream.
 /// </remarks>
 [<Sealed>]
-type RunEvent<'T>
+type internal RunEvent<'T>
     internal
     (
         sequence: int64,
@@ -320,6 +535,11 @@ type RunEvent<'T>
     /// Gets the approval payload carried by approval-requested events.
     member _.Approval = approval
 
+    /// <summary>Gets the val value.</summary>
+    member val internal RuntimeUsage = RunUsage(0, 0) with get, set
+    /// <summary>Gets the val value.</summary>
+    member val internal RuntimeSession: CircuitSession voption = ValueNone with get, set
+
 /// Represents a live agent execution that may stream events and pause for approval.
 /// <remarks>
 /// This handle owns the lifetime of a paused run. Disposing an event enumerator does not dispose the run.
@@ -331,7 +551,7 @@ type RunEvent<'T>
 /// after disposal throws <see cref="T:System.ObjectDisposedException" />.
 /// </remarks>
 [<Sealed>]
-type AgentRun<'Output>
+type internal AgentRun<'Output>
     internal
     (
         runId: RunId,

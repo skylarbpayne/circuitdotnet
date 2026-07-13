@@ -4,7 +4,14 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="DocumentationExamples/*.cs" />
+    <Compile Include="UnifiedInteropTests.cs" />
+    <Compile Include="SampleSmokeTests.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Circuit/Circuit.csproj" />

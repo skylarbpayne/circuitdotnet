@@ -228,7 +228,6 @@
           "CircuitDotNet.Core": "[0.1.0-alpha.1, )",
           "FSharp.Core": "[10.1.301, )",
           "Microsoft.Agents.AI": "[1.13.0, )",
-          "Microsoft.Agents.AI.Workflows": "[1.13.0, )",
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[10.0.9, )"
         }
       },
@@ -262,26 +261,6 @@
           "Microsoft.Extensions.Logging.Abstractions": "10.0.9",
           "Microsoft.Extensions.VectorData.Abstractions": "9.7.0",
           "Microsoft.ML.Tokenizers": "2.0.0"
-        }
-      },
-      "Microsoft.Agents.AI.Workflows": {
-        "type": "CentralTransitive",
-        "requested": "[1.13.0, )",
-        "resolved": "1.13.0",
-        "contentHash": "Tor3pjedKR5lnbQUUkfkfNb5nMCYFfldJBRpxxBJfrn3WWHsnOUCvmX1OENTVqGBhreDkIDsMzdnNleU06Vb4A==",
-        "dependencies": {
-          "Microsoft.Agents.AI": "1.13.0",
-          "Microsoft.Agents.AI.Abstractions": "1.13.0",
-          "Microsoft.Extensions.AI": "10.6.0",
-          "Microsoft.Extensions.AI.Abstractions": "10.6.0",
-          "Microsoft.Extensions.AI.Evaluation": "10.6.0",
-          "Microsoft.Extensions.Compliance.Abstractions": "10.5.0",
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.9",
-          "Microsoft.Extensions.FileSystemGlobbing": "10.0.6",
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.9",
-          "Microsoft.Extensions.VectorData.Abstractions": "9.7.0",
-          "Microsoft.ML.Tokenizers": "2.0.0",
-          "OpenTelemetry.Api": "1.15.3"
         }
       },
       "Microsoft.Extensions.AI": {

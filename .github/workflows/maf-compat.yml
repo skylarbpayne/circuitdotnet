@@ -36,7 +36,6 @@ jobs:
 
           packages = {
               'microsoft.agents.ai': 'maf_version',
-              'microsoft.agents.ai.workflows': 'maf_workflows_version',
           }
 
           for package, output_name in packages.items():
@@ -53,7 +52,6 @@ jobs:
         run: >-
           dotnet restore CircuitDotNet.slnx --force-evaluate
           -p:MicrosoftAgentsAIVersion=${{ steps.versions.outputs.maf_version }}
-          -p:MicrosoftAgentsAIWorkflowsVersion=${{ steps.versions.outputs.maf_workflows_version }}
 
       - name: Run MAF adapter compatibility tests
         id: tests
@@ -64,7 +62,6 @@ jobs:
           --no-restore
           --logger "trx;LogFileName=maf-compat.trx"
           -p:MicrosoftAgentsAIVersion=${{ steps.versions.outputs.maf_version }}
-          -p:MicrosoftAgentsAIWorkflowsVersion=${{ steps.versions.outputs.maf_workflows_version }}
 
       - name: Write compatibility report
         if: always()
@@ -77,7 +74,6 @@ jobs:
           # MAF compatibility report
 
           - Microsoft.Agents.AI: `${{ steps.versions.outputs.maf_version }}`
-          - Microsoft.Agents.AI.Workflows: `${{ steps.versions.outputs.maf_workflows_version }}`
           - Test project: `tests/Circuit.MicrosoftAgentFramework.Tests/Circuit.MicrosoftAgentFramework.Tests.fsproj`
           - Result: `${status}`
 

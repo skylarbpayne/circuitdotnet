@@ -35,10 +35,16 @@ let printFailure (failure: CircuitFailure) =
     | CircuitFailureCode.Tool -> "A tool could not be resolved or completed safely."
     | CircuitFailureCode.ApprovalRequired -> "The run requires an approval response."
     | CircuitFailureCode.Skill -> "A requested skill could not be loaded or applied."
-    | CircuitFailureCode.Workflow -> "A workflow operation could not complete."
-    | CircuitFailureCode.CheckpointMismatch -> "Saved workflow state does not match the current definition."
+    | CircuitFailureCode.Engine -> "A Circuit operation could not complete."
+    | CircuitFailureCode.CheckpointMismatch -> "Saved Circuit state does not match the current definition."
     | CircuitFailureCode.Cancelled -> "The request was cancelled before completion."
-    | _ -> "The request failed for an unrecognized reason."
+    | CircuitFailureCode.NotCheckpointable -> "This Circuit contains work that cannot be checkpointed."
+    | CircuitFailureCode.Cardinality -> "The selected projection received an unexpected number of outputs."
+    | CircuitFailureCode.DuplicateItemKey -> "A source produced a duplicate stable item key."
+    | CircuitFailureCode.ResourceLimit -> "The run exceeded a configured resource limit."
+    | CircuitFailureCode.GeneratedGraphIntegrity -> "A dynamic Circuit child failed integrity validation."
+    | CircuitFailureCode.InvalidApprovalResponse -> "The approval response was unknown or already consumed."
+    | _ -> "The request failed with a failure code this application does not recognize."
     |> eprintfn "%s"
 
 let runAsync (runtime: ICircuitRuntime) mode timeoutToken =
@@ -75,15 +81,15 @@ let runAsync (runtime: ICircuitRuntime) mode timeoutToken =
             else
                 timeoutToken
 
-        let! runResult = Agent.run runtime agent signature ticket RunOptions.Default cancellationToken
+        let! runResult = Circuit.run runtime (Circuit.agent agent signature) ticket RunOptions.Default cancellationToken
 
-        if runResult.Result.IsSuccess then
-            let output = runResult.Result.Value
+        if runResult.IsSuccess then
+            let output = runResult.Value
             printfn "Category: %s" output.Category
             printfn "Suggested reply: %s" output.SuggestedReply
             return 0
         else
-            printFailure runResult.Result.Failure
+            printFailure runResult.Failure
             return 1
     }
 

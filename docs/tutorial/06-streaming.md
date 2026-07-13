@@ -2,17 +2,17 @@
 
 ## What you will build
 
-Run the support agent as a live stream and show progress without printing provider deltas. The program checks event ordering and accepts exactly one successful or failed terminal event.
+Run the support Circuit as a live stream and show progress without printing provider deltas. The program consumes the structural protocol and accepts exactly one terminal event.
 
 ## The idea
 
-`RunStreamingAsync` returns events rather than waiting for one final value:
+`Circuit.start` returns a `CircuitRun<'T>` whose `Events` stream exposes the full live protocol:
 
 ```text
-RunStarted -> OutputDelta ... -> RunCompleted | RunFailed
+RunStarted -> NodeStarted -> OutputDelta ... -> OutputProduced -> NodeCompleted -> RunCompleted
 ```
 
-Sequences must increase monotonically, and a well-formed stream has exactly one terminal event. Deltas are provider-variable and can contain customer data, so this chapter counts their characters instead of logging them. Cancellation is passed both to the runtime and the manually managed async enumerator.
+A well-formed stream has exactly one `RunCompleted` event. Lane failures appear in typed output responses, while a run-scoped failure appears in the terminal response. Deltas are provider-variable and can contain customer data, so this chapter counts their characters instead of logging them. Cancellation is passed both to the runtime and the manually managed async enumerator.
 
 ## Create or open the project
 
@@ -30,7 +30,7 @@ The program embeds no default model and exits before client construction when ei
 
 [!code-fsharp](../../tutorials/fsharp/06-streaming/Program.fs)
 
-The explicit `GetAsyncEnumerator`, `MoveNextAsync`, and `DisposeAsync` calls make stream ownership visible. Only the members appropriate to each `RunEventKind` are read.
+The explicit `GetAsyncEnumerator`, `MoveNextAsync`, and `DisposeAsync` calls make stream ownership visible. Pattern matching reads only the payload carried by each `CircuitEvent<'T>` case.
 
 ## Run it
 
@@ -51,12 +51,12 @@ The 30-second timeout can instead produce the fixed cancellation message. No fak
 
 ## What changed
 
-Chapter 5 waited for a final structured result. This chapter consumes a live event protocol, treats deltas as sensitive, and still trusts only the single typed terminal value.
+Chapter 5 waited for a final structured result. This chapter consumes the unified live event protocol, treats deltas as sensitive, and trusts `OutputProduced` plus the single terminal response.
 
 ## Check your understanding
 
 1. Why is an output delta not the final typed result?
-2. What two invariants does the consumer check?
+2. Which event carries a lane's typed response, and which event terminates the run?
 3. Why does the sample avoid printing delta text?
 
 ## Try it yourself
@@ -66,7 +66,7 @@ Replace each progress `.` with a count printed every 100 characters. Confirm tha
 ## Recap and next step
 
 - Streaming exposes progress before completion.
-- Sequence and terminal-event checks defend the consumer boundary.
+- Structural output and the sole terminal event defend the consumer boundary.
 - Cancellation and async-enumerator disposal remain application responsibilities.
 
 Next, carry adapter-owned conversation state from one request to another.

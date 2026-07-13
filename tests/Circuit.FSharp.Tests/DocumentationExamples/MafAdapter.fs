@@ -1,12 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.MafAdapter
 
-open Circuit
-open Circuit.MicrosoftAgentFramework
-open Microsoft.Extensions.AI
+open System.Threading
+open Circuit.Core
+open Circuit.FSharp
 
-module MafAdapterExample =
-    let createRuntime (chatClient: IChatClient) =
-        let options = MafRuntimeOptions()
-        options.DefaultModelId <- ValueSome "gpt-4.1-mini"
-        options.Observers <- [| OpenTelemetryRunObserver() :> Circuit.IRunObserver |]
-        MafRuntime(chatClient, options)
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-mafadapter" "1.0.0"
+
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

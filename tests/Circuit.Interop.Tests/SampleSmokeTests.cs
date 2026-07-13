@@ -12,7 +12,7 @@ public sealed class SampleSmokeTests
     [Trait("Category", "Package")]
     [InlineData("samples/TicketTriage.CSharp/TicketTriage.CSharp.csproj")]
     [InlineData("samples/TicketTriage.FSharp/TicketTriage.FSharp.fsproj")]
-    public async Task offline_ticket_triage_samples_exit_zero(string projectPath)
+    public async Task Offline_ticket_triage_samples_exit_zero(string projectPath)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
@@ -23,14 +23,10 @@ public sealed class SampleSmokeTests
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-
         process.Start();
         var stdout = await process.StandardOutput.ReadToEndAsync();
         var stderr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
-
-        Assert.True(
-            process.ExitCode == 0,
-            $"Sample '{projectPath}' exited {process.ExitCode}.{Environment.NewLine}STDOUT:{Environment.NewLine}{stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{stderr}");
+        Assert.True(process.ExitCode == 0, $"{projectPath} failed.\n{stdout}\n{stderr}");
     }
 }

@@ -121,7 +121,7 @@ module IdentifiersAndResultsTests =
 
         let blankFailure =
             Assert.Throws<ArgumentException>(fun () ->
-                CircuitFailure(CircuitFailureCode.Workflow, " ", ValueNone, ValueNone, ValueNone, ValueNone)
+                CircuitFailure(CircuitFailureCode.Engine, " ", ValueNone, ValueNone, ValueNone, ValueNone)
                 |> ignore)
 
         Assert.Equal("message", blankFailure.ParamName)

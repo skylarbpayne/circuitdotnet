@@ -83,7 +83,7 @@ public enum AgentFailureCode
     /// <summary>
     /// Workflow execution failed.
     /// </summary>
-    Workflow = (int)CircuitFailureCode.Workflow,
+    Engine = (int)CircuitFailureCode.Engine,
 
     /// <summary>
     /// The supplied checkpoint does not match the current workflow definition.
@@ -93,7 +93,20 @@ public enum AgentFailureCode
     /// <summary>
     /// The operation was cancelled.
     /// </summary>
-    Cancelled = (int)CircuitFailureCode.Cancelled,
+    Cancelled = (int)Circuit.Core.CircuitFailureCode.Cancelled,
+
+    /// <summary>The Circuit cannot be checkpointed.</summary>
+    NotCheckpointable = (int)Circuit.Core.CircuitFailureCode.NotCheckpointable,
+    /// <summary>The projection observed an invalid root cardinality.</summary>
+    Cardinality = (int)Circuit.Core.CircuitFailureCode.Cardinality,
+    /// <summary>A source emitted a duplicate stable item key.</summary>
+    DuplicateItemKey = (int)Circuit.Core.CircuitFailureCode.DuplicateItemKey,
+    /// <summary>A hard scheduler limit was exhausted.</summary>
+    ResourceLimit = (int)Circuit.Core.CircuitFailureCode.ResourceLimit,
+    /// <summary>A generated graph failed validation.</summary>
+    GeneratedGraphIntegrity = (int)Circuit.Core.CircuitFailureCode.GeneratedGraphIntegrity,
+    /// <summary>An approval response was invalid or already consumed.</summary>
+    InvalidApprovalResponse = (int)Circuit.Core.CircuitFailureCode.InvalidApprovalResponse,
 }
 
 /// <summary>
@@ -241,6 +254,9 @@ public sealed class ToolContext
     /// Gets the cancellation token.
     /// </summary>
     public CancellationToken CancellationToken => Inner.CancellationToken;
+
+    /// <summary>Gets the stable replay-safe operation idempotency key.</summary>
+    public string IdempotencyKey => Inner.IdempotencyKey;
 }
 
 /// <summary>
@@ -489,34 +505,6 @@ public sealed class ValidationIssue
 }
 
 /// <summary>
-/// Represents the workflow validation issue.
-/// </summary>
-public sealed class WorkflowValidationIssue
-{
-    internal WorkflowValidationIssue(Circuit.Core.WorkflowValidationIssue inner)
-    {
-        NodeId = inner.NodeId;
-        Code = inner.Code;
-        Message = inner.Message;
-    }
-
-    /// <summary>
-    /// Gets the node id.
-    /// </summary>
-    public string? NodeId { get; }
-
-    /// <summary>
-    /// Gets the code.
-    /// </summary>
-    public string Code { get; }
-
-    /// <summary>
-    /// Gets the message.
-    /// </summary>
-    public string Message { get; }
-}
-
-/// <summary>
 /// Represents the run context.
 /// </summary>
 public sealed class RunContext
@@ -725,7 +713,7 @@ public enum RunOperationKind
     /// <summary>
     /// A workflow step operation.
     /// </summary>
-    WorkflowStep = 2,
+    Node = 2,
 
     /// <summary>
     /// An approval operation.

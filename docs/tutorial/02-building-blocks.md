@@ -70,7 +70,7 @@ Chapter 1 already used all four objects. This chapter gives each one a visible n
 
 1. Which building block can be replaced to connect a different provider?
 2. What is the difference between an agent definition and a typed signature?
-3. Why does `Agent.run` accept `ICircuitRuntime` rather than constructing OpenAI itself?
+3. Why does `Circuit.run over Circuit.agent` accept `ICircuitRuntime` rather than constructing OpenAI itself?
 
 ## Try it yourself
 

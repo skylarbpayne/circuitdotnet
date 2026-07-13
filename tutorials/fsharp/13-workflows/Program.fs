@@ -1,134 +1,150 @@
-module Circuit.Tutorial.Workflows
+module Tutorial
 
 open System
-open System.ComponentModel.DataAnnotations
+open System.Collections.Generic
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Circuit.Core
 open Circuit.FSharp
-open Circuit.MicrosoftAgentFramework
-open Microsoft.Extensions.AI
-open OpenAI.Chat
 
-[<AllowNullLiteral>]
-type TicketInput() =
-    [<property: Required; StringLength(120, MinimumLength = 3)>]
-    member val Subject = "" with get, set
+type Ticket =
+    { Id: string
+      Kind: string
+      DelayMs: int }
 
-    [<property: Required; StringLength(2000, MinimumLength = 10)>]
-    member val Message = "" with get, set
+type CodeOnlyRuntime() =
+    inherit CircuitRuntime()
 
-[<AllowNullLiteral>]
-type Classification() =
-    [<property: Required; StringLength(40, MinimumLength = 3)>]
-    member val Category = "" with get, set
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            _runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input: 'Input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) : Task<RunResult<'Output>> =
+        Task.FromException<RunResult<'Output>>(
+            InvalidOperationException("This offline tutorial uses code leaves only.")
+        )
 
-    [<property: Range(1, 5)>]
-    member val Urgency = 1 with get, set
+    override _.SerializeSessionCoreAsync(_agent, _session, _runOptions, _cancellationToken) = ValueTask<JsonElement>()
 
-[<AllowNullLiteral>]
-type DraftInput() =
-    [<property: Required; StringLength(40, MinimumLength = 3)>]
-    member val Category = "" with get, set
+    override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>()
 
-    [<property: Range(1, 5)>]
-    member val Urgency = 1 with get, set
+let tickets: IReadOnlyList<Ticket> =
+    [| { Id = "ticket-1"
+         Kind = "billing"
+         DelayMs = 80 }
+       { Id = "ticket-2"
+         Kind = "controlled-failure"
+         DelayMs = 10 }
+       { Id = "ticket-3"
+         Kind = "security"
+         DelayMs = 20 } |]
 
-[<AllowNullLiteral>]
-type DraftOutput() =
-    [<property: Required; StringLength(500, MinimumLength = 10)>]
-    member val SuggestedReply = "" with get, set
+let source =
+    Circuit.keyedItems "tickets" "1.0.0" (fun ticket -> ticket.Id) (fun (_: unit) -> tickets)
 
-let runAsync (runtime: IWorkflowRuntime) cancellationToken =
-    task {
-        let classifier =
-            AgentDefinition.create
-                "support.classifier"
-                "1.0.0"
-                "Ticket classifier"
-                "Classify the support ticket and assign urgency from 1 to 5."
+let processTicket (ticket: Ticket) =
+    Circuit.code ($"process-{ticket.Kind}") "1.0.0" (fun context value ->
+        task {
+            do! Task.Delay(value.DelayMs, context.CancellationToken)
 
-        let classificationSignature =
-            Signature.create<TicketInput, Classification>
-                "support.classification"
-                "1.0.0"
-                "Ticket classification"
-                "Return category and urgency as structured output."
-
-        let drafter =
-            AgentDefinition.create
-                "support.drafter"
-                "1.0.0"
-                "Response drafter"
-                "Draft a concise support response appropriate to the classification."
-
-        let draftSignature =
-            Signature.create<DraftInput, DraftOutput>
-                "support.workflow-draft"
-                "1.0.0"
-                "Workflow response draft"
-                "Return one suggestedReply as structured output."
-
-        let classificationStep =
-            Workflow.agent "classify.ticket" classifier classificationSignature
-
-        let adaptStep =
-            Workflow.code "prepare.draft-input" (fun _ (classification: Classification) ->
-                Task.FromResult(DraftInput(Category = classification.Category, Urgency = classification.Urgency)))
-
-        let draftStep = Workflow.agent "draft.response" drafter draftSignature
-
-        let definition =
-            Workflow.define "support.response-workflow" "1.0.0" classificationStep
-            |> Workflow.thenStep adaptStep
-            |> Workflow.thenStep draftStep
-
-        let issues = Workflow.validate definition
-
-        if not (Seq.isEmpty issues) then
-            for issue in issues do
-                eprintfn "Workflow validation failed at %s (%s): %s" issue.NodeId issue.Code issue.Message
-
-            return 1
-        else
-            printfn "Workflow validated: classify.ticket -> prepare.draft-input -> draft.response"
-
-            let ticket =
-                TicketInput(
-                    Subject = "Password reset email never arrived",
-                    Message = "I requested a password reset twice, but no email has arrived. What should I try next?"
-                )
-
-            let! result = Workflow.run runtime definition ticket WorkflowRunOptions.Default cancellationToken
-
-            if result.Result.IsSuccess then
-                printfn "Draft: %s" result.Result.Value.SuggestedReply
-                return 0
+            if value.Kind = "controlled-failure" then
+                return
+                    Response.fail
+                        context
+                        (CircuitFailure.Create(CircuitFailureCode.Provider, "controlled tutorial failure"))
             else
-                let failure = result.Result.Failure
-                eprintfn "Workflow failed (%O): %s" failure.Code failure.Message
-                return 1
-    }
+                return Response.succeed context ($"{value.Id}:{value.Kind}:ok")
+        })
+
+let buildChild (ticket: Ticket) =
+    match ticket.Kind with
+    | "security" ->
+        processTicket ticket
+        |> Circuit.thenStep (
+            Circuit.code "security-audit" "1.0.0" (fun context value ->
+                Task.FromResult(Response.succeed context (value + ":audited")))
+        )
+    | "controlled-failure" ->
+        processTicket ticket
+        |> Circuit.recover "recover-provider" "1.0.0" (fun failure -> $"{ticket.Id}:recovered:{failure.Code}")
+        |> Circuit.thenStep (Circuit.value $"{ticket.Id}:recovery-complete")
+    | _ -> processTicket ticket
+
+let pipeline =
+    source
+    |> Circuit.thenDynamic "route-ticket" "1.0.0" (fun ticket -> ticket.Id) 2 buildChild
+    |> Circuit.define "support-ticket-pipeline" "1.0.0"
 
 [<EntryPoint>]
 let main _ =
-    let apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-    let model = Environment.GetEnvironmentVariable("OPENAI_MODEL")
+    task {
+        let runtime = new CodeOnlyRuntime() :> ICircuitRuntime
+        let options = RunOptions.Default.WithMaxConcurrency(2)
 
-    if String.IsNullOrWhiteSpace(apiKey) || String.IsNullOrWhiteSpace(model) then
-        eprintfn "Set OPENAI_API_KEY and OPENAI_MODEL before running this chapter."
-        2
-    else
-        try
-            let openAiClient = ChatClient(model, apiKey)
-            use chatClient = openAiClient.AsIChatClient()
-            let runtime = MafRuntime(chatClient, MafRuntimeOptions()) :> IWorkflowRuntime
-            use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60.0))
-            runAsync runtime timeout.Token |> fun work -> work.GetAwaiter().GetResult()
-        with
-        | :? OperationCanceledException ->
-            eprintfn "The workflow timed out or was cancelled."
-            1
-        | _ ->
-            eprintfn "Configuration or provider request failed. See your provider and account diagnostics."
-            1
+        let! collected = Circuit.collect runtime pipeline () options CancellationToken.None
+
+        match collected.Outcome with
+        | Failed failure ->
+            eprintfn "Pipeline failed: %s" failure.Message
+            return 1
+        | Succeeded responses ->
+            printfn "collect (completion order):"
+            responses |> Seq.iter (fun response -> printfn "  %s" response.Value)
+
+            let! ordered = Circuit.collectSourceOrder runtime pipeline () options CancellationToken.None
+            printfn "collectSourceOrder: %s" (ordered.Value |> Seq.map _.Value |> String.concat ", ")
+
+            printfn "stream:"
+            let stream = Circuit.stream runtime pipeline () options CancellationToken.None
+            let streamEnumerator = stream.GetAsyncEnumerator()
+
+            try
+                let mutable reading = true
+
+                while reading do
+                    let! more = streamEnumerator.MoveNextAsync().AsTask()
+                    reading <- more
+
+                    if more then
+                        printfn "  %s" streamEnumerator.Current.Value
+            finally
+                streamEnumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+            let! exactlyOne = Circuit.run runtime pipeline () options CancellationToken.None
+            printfn "run enforces cardinality: %O" exactlyOne.Failure.Code
+
+            let! live = Circuit.start runtime pipeline () options CancellationToken.None
+            let events = live.Events.GetAsyncEnumerator()
+            let mutable produced = 0
+
+            try
+                let mutable reading = true
+
+                while reading do
+                    let! more = events.MoveNextAsync().AsTask()
+                    reading <- more
+
+                    if more then
+                        match events.Current with
+                        | OutputProduced _ -> produced <- produced + 1
+                        | RunCompleted _ -> reading <- false
+                        | _ -> ()
+            finally
+                events.DisposeAsync().AsTask().GetAwaiter().GetResult()
+                (live :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+            printfn "start observed %d structural outputs" produced
+            return 0
+    }
+    |> fun work -> work.GetAwaiter().GetResult()

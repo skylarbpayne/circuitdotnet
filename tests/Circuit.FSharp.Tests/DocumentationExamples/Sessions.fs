@@ -1,12 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.Sessions
 
-open System.Text.Json
-open System.Threading.Tasks
+open System.Threading
 open Circuit.Core
+open Circuit.FSharp
 
-module SessionsExample =
-    let roundTrip (runtime: ICircuitRuntime) (agent: AgentDefinition) (session: CircuitSession) =
-        task {
-            let! state = runtime.SerializeSessionAsync(agent, session, System.Threading.CancellationToken.None).AsTask()
-            return! runtime.DeserializeSessionAsync(agent, state, System.Threading.CancellationToken.None).AsTask()
-        }
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-sessions" "1.0.0"
+
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

@@ -57,6 +57,7 @@ type ToolContext
     internal
     (
         runId: RunId,
+        idempotencyKey: string,
         tenantId: string voption,
         userId: string voption,
         services: IServiceProvider,
@@ -66,8 +67,14 @@ type ToolContext
         if isNull services then
             nullArg "services"
 
+    new(runId, tenantId, userId, services, cancellationToken) =
+        ToolContext(runId, runId.Value, tenantId, userId, services, cancellationToken)
+
     /// Gets the owning run identifier.
     member _.RunId = runId
+
+    /// Gets the stable operation idempotency key for checkpoint replay.
+    member _.IdempotencyKey = idempotencyKey
 
     /// Gets the tenant identifier for the run, if any.
     member _.TenantId = tenantId
@@ -280,8 +287,11 @@ type ResolvedTool
     /// Gets the output JSON Schema.
     member _.OutputSchema = executor.OutputSchema
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.ValidateInput(value: obj) = executor.ValidateInput value
+    /// <summary>Gets the internal value.</summary>
     member internal _.ValidateOutput(value: obj) = executor.ValidateOutput value
+    /// <summary>Gets the internal value.</summary>
     member internal _.InvokeAsync(context: ToolContext, value: obj) = executor.InvokeAsync(context, value)
 
     /// Creates a resolved tool from a typed definition and explicit tags.

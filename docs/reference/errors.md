@@ -1,30 +1,32 @@
 # Errors
 
-Public C# runs surface failures through `AgentFailure` and `AgentFailureCode`. Core F# APIs surface the same categories through `CircuitFailure` and `CircuitFailureCode`.
+Unified F# and C# executions report expected failures through `Response<'T>` / `CircuitResponse<T>` and classify them with `CircuitFailureCode`. The full event protocol carries the same failure object in node and terminal responses. Exceptions remain available only as trusted diagnostics; applications should branch on the code rather than parse messages.
 
 ## Error codes
 
 | Code | Meaning | Typical trigger |
 | --- | --- | --- |
-| `Validation` | Contract validation failed. | Missing required input, custom validator rejection, tool output validation failure. |
-| `StructuredOutputUnsupported` | The selected runtime or policy cannot provide the requested structured-output behavior. | Repair requested without a repair client, provider/runtime limitation. |
-| `Decode` | Circuit could not decode the provider or tool payload into the declared output type. | Malformed JSON, null where not allowed, wrapper-shape mismatch. |
-| `Provider` | The provider call failed. | Client exception, transport failure, provider-side rejection. |
-| `Tool` | Tool resolution or execution failed. | Handler exception, invalid tool configuration, tool contract mismatch. |
-| `ApprovalRequired` | Execution paused for approval or approval handling failed. | HITL step or tool approval gate. |
-| `Skill` | Skill resolution or script execution failed. | Missing skill content, resolver failure, script-runner error. |
-| `Workflow` | Workflow execution failed. | Invalid branch selection, step exception, aggregate failure. |
-| `CheckpointMismatch` | A checkpoint does not match the current workflow definition. | Version or topology drift on resume. |
-| `Cancelled` | The caller cancelled the operation. | Cancellation token requested before or during execution. |
+| `Validation` | A declared input or output contract was rejected. | Missing required input or custom validator rejection. |
+| `StructuredOutputUnsupported` | The requested structured-output policy is unavailable. | Repair requested without a repair client or provider limitation. |
+| `Decode` | A provider or tool payload could not be decoded into its declared type. | Malformed JSON, null output, or wrapper-shape mismatch. |
+| `Provider` | The provider request failed. | Transport failure, client exception, or provider rejection. |
+| `Tool` | Tool resolution, validation, or execution failed. | Resolver failure, handler exception, or invalid tool output. |
+| `ApprovalRequired` | A projection encountered work that requires interactive approval. | Calling `run` or `collect` for an approval-bearing Circuit. |
+| `Skill` | Skill resolution or execution failed. | Missing skill content, resolver failure, or script error. |
+| `Engine` | Trusted Circuit scheduling or code execution failed. | Code-node exception or invalid branch selection. |
+| `CheckpointMismatch` | Durable state does not match the exact Circuit definition. | Definition, version, fingerprint, session, or generated-child drift. |
+| `Cancelled` | The run was cancelled. | Caller cancellation or run disposal. |
+| `NotCheckpointable` | The active graph cannot produce a durable checkpoint. | A plain asynchronous source is present. |
+| `Cardinality` | A projection received the wrong number of root outputs. | `Circuit.run` observed zero or multiple outputs. |
+| `DuplicateItemKey` | One source produced a duplicate stable lane key. | A keyed source returned the same key twice. |
+| `ResourceLimit` | A configured hard bound was exceeded. | Too many pages, generated nodes, approvals, or loop iterations. |
+| `GeneratedGraphIntegrity` | A dynamic child could not be safely built or validated. | Invalid generated graph or factory exception. |
+| `InvalidApprovalResponse` | An approval response was unknown, mismatched, or already consumed. | Cross-run response, wrong request ID, or replay. |
 
 ## Message design
 
-Circuit intentionally sanitizes public error messages at adapter boundaries. The goal is to preserve the failure category without leaking raw provider payloads, secret file paths, or internal exception text.
+Circuit sanitizes public adapter-boundary messages to preserve classification without leaking provider payloads, secret paths, or internal exception text. Codes do not imply retry safety; retries and recovery remain application decisions.
 
 ## Non-guarantees
 
-Circuit does not guarantee:
-
-- provider-specific subcodes on the public failure object;
-- stable internal exception text for programmatic parsing;
-- recoverability from a given error without application-specific retry logic.
+Circuit does not guarantee provider-specific subcodes, stable exception text, automatic retry safety, or compatibility with unknown future numeric enum values.

@@ -11,11 +11,9 @@
     <Compile Include="AgentRunsTests.fs" />
     <Compile Include="ContractsTests.fs" />
     <Compile Include="IdentifiersAndResultsTests.fs" />
-    <Compile Include="ProgramsTests.fs" />
     <Compile Include="ToolsTests.fs" />
     <Compile Include="SkillsTests.fs" />
-    <Compile Include="WorkflowDefinitionTests.fs" />
-    <Compile Include="WorkflowsTests.fs" />
+    <Compile Include="SchedulerTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

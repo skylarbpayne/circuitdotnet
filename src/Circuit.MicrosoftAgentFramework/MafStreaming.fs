@@ -89,8 +89,41 @@ module internal MafStreaming =
         if isNull arguments then
             ValueNone
         else
+            let rec normalizeElement (element: JsonElement) =
+                match element.ValueKind with
+                | JsonValueKind.Object ->
+                    let value = JsonObject()
+
+                    for property in element.EnumerateObject() do
+                        let name =
+                            if
+                                isNull jsonOptions.PropertyNamingPolicy
+                                || property.Name.EndsWith("_runtime", StringComparison.Ordinal)
+                            then
+                                property.Name
+                            else
+                                jsonOptions.PropertyNamingPolicy.ConvertName(property.Name)
+
+                        value[name] <- normalizeElement property.Value
+
+                    value :> JsonNode
+                | JsonValueKind.Array ->
+                    let value = JsonArray()
+
+                    for item in element.EnumerateArray() do
+                        value.Add(normalizeElement item)
+
+                    value :> JsonNode
+                | _ -> JsonNode.Parse(element.GetRawText())
+
             try
-                ValueSome(JsonSerializer.Serialize(arguments, jsonOptions))
+                let root = JsonObject()
+
+                for argument in arguments do
+                    let serialized = JsonSerializer.SerializeToElement(argument.Value, jsonOptions)
+                    root[argument.Key] <- normalizeElement serialized
+
+                ValueSome(root.ToJsonString(jsonOptions))
             with _ ->
                 ValueNone
 
@@ -264,11 +297,15 @@ module internal MafStreaming =
     type private StreamingRunEnumerable<'Input, 'Output>
         (
             runtime: MafRuntime,
+            schedulerRunId: RunId,
+            nodePath: string,
+            idempotencyKey: string,
             agent: AgentDefinition,
             signature: Signature<'Input, 'Output>,
             input: 'Input,
             runOptions: RunOptions,
             jsonOptions: JsonSerializerOptions,
+            onSession: CircuitSession -> Task,
             cancellationToken: CancellationToken
         ) =
         interface IAsyncEnumerable<RunEvent<'Output>> with
@@ -285,19 +322,14 @@ module internal MafStreaming =
                 let deliveryToken = abandonmentCts.Token
                 let providerToken = providerCts.Token
                 let channel = createBoundedChannel<RunEvent<'Output>> ()
-                let runId = RunId.New()
+                let runId = schedulerRunId
                 let startedAt = DateTimeOffset.UtcNow
-                let runContext = runtime.CreateRunContext(runId, agent, signature, runOptions)
 
-                let observerSession =
-                    MafObserver.createAgentRunSession
-                        runtime.RuntimeOptions.Observers
-                        runId
-                        agent.Name
-                        signature.Id
-                        signature.Version
-                        (runtime.ResolveRequestModel agent)
-                        runOptions.Services
+                let runContext =
+                    runtime.CreateScheduledRunContext(runId, nodePath, idempotencyKey, agent, signature, runOptions)
+
+                // Core owns the single Circuit-root observer session.
+                let observerSession: MafObserver.ObserverSession voption = ValueNone
 
                 let prompt = ValueSome(runtime.CreatePrompt(agent, signature))
                 let inputPayload = runtime.TrySerializeInputPayload signature input
@@ -342,6 +374,10 @@ module internal MafStreaming =
                                             failure,
                                             approval
                                         )
+
+                                    if StreamingMappedEvent.isTerminal kind then
+                                        event.RuntimeUsage <- usage
+                                        event.RuntimeSession <- resultSession
 
                                     do!
                                         match kind with
@@ -538,6 +574,11 @@ module internal MafStreaming =
                                                 | Error failure -> do! fail failure
                                                 | Ok(providerSession, wrappedSession) ->
                                                     resultSession <- wrappedSession
+
+                                                    match wrappedSession with
+                                                    | ValueSome session -> do! onSession session
+                                                    | ValueNone -> ()
+
                                                     let responseFormat, wrapped = createWrappedResponseFormat signature
 
                                                     match
@@ -786,14 +827,30 @@ module internal MafStreaming =
 
     let runStreaming<'Input, 'Output>
         (runtime: MafRuntime)
+        (runId: RunId)
+        (nodePath: string)
+        (idempotencyKey: string)
         (agent: AgentDefinition)
         (signature: Signature<'Input, 'Output>)
         (input: 'Input)
         (runOptions: RunOptions)
         (jsonOptions: JsonSerializerOptions)
+        (onSession: CircuitSession -> Task)
         ([<EnumeratorCancellation>] cancellationToken: CancellationToken)
         : IAsyncEnumerable<RunEvent<'Output>> =
-        StreamingRunEnumerable(runtime, agent, signature, input, runOptions, jsonOptions, cancellationToken)
+        StreamingRunEnumerable(
+            runtime,
+            runId,
+            nodePath,
+            idempotencyKey,
+            agent,
+            signature,
+            input,
+            runOptions,
+            jsonOptions,
+            onSession,
+            cancellationToken
+        )
         :> IAsyncEnumerable<RunEvent<'Output>>
 
 [<AbstractClass; Sealed>]
@@ -801,12 +858,29 @@ type internal MafStreamingRegistration =
     static do
         MafRuntimeStreamingDispatch.Dispatcher <-
             { new IMafRuntimeStreamingDispatcher with
-                member _.RunStreaming(runtime, agent, signature, input, runOptions, jsonOptions, cancellationToken) =
+                member _.RunStreaming
+                    (
+                        runtime,
+                        runId,
+                        nodePath,
+                        idempotencyKey,
+                        agent,
+                        signature,
+                        input,
+                        runOptions,
+                        jsonOptions,
+                        onSession,
+                        cancellationToken
+                    ) =
                     MafStreaming.runStreaming
                         (runtime :?> MafRuntime)
+                        runId
+                        nodePath
+                        idempotencyKey
                         agent
                         signature
                         input
                         runOptions
                         jsonOptions
+                        onSession
                         cancellationToken }

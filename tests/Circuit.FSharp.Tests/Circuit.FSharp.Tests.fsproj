@@ -7,9 +7,8 @@
 
   <ItemGroup>
     <Compile Include="DocumentationExamples/*.fs" />
-    <Compile Include="ApiTests.fs" />
-    <Compile Include="TestingRuntimeTests.fs" />
-    <Compile Include="CircuitProgramsTests.fs" />
+    <Compile Include="SmokeTests.fs" />
+    <Compile Include="UnifiedApiTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

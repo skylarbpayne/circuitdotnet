@@ -1,39 +1,22 @@
-# 12. Run independent work in parallel
+# 12. Pipeline keyed work with a bound
 
 ## What you will build
 
-You will ask three live agents to analyze one ticket from sentiment, risk, and routing perspectives. At most two calls are active together, while the returned list remains in declaration order.
+You will admit three ticket lanes, process at most two concurrently, and print when each completed lane reaches a downstream node.
 
 ## The idea
 
-Independent work does not need to wait in a chain. `Circuit.``parallel`` 2` starts children subject to a maximum of two active operations:
-
-```text
-             +-> sentiment --+
-Ticket ------+-> risk -------+-> [sentiment; risk; routing]
-       bound +-> routing ----+
-              max active = 2
-```
-
-The list is returned in declaration order even when calls finish in another order. Runtime operation IDs reflect actual scheduling, not list position. If one child fails, Circuit cancels its siblings and drains started work before returning. Provider cancellation is cooperative and may arrive after a request was accepted, so cancellation does not guarantee zero charge. Unbounded fan-out can exhaust sockets, quotas, rate limits, and budgets.
+`Circuit.keyedItems` assigns stable item identity. `WithMaxConcurrency(2)` bounds active lanes and backpressures source admission. Downstream handoff follows completion order, so the fast second ticket does not wait for the slow first ticket.
 
 ## Create or open the project
 
-From a repository clone, open `tutorials/fsharp/12-parallel-programs`. Configure the live provider explicitly:
-
-```bash
-read -rsp "OpenAI API key: " OPENAI_API_KEY && echo
-export OPENAI_API_KEY
-export OPENAI_MODEL="a-model-you-have-access-to"
-```
-
-Choose a model with structured-output support. This run can make three provider calls and incur three calls' cost. Never commit credentials; production deployments should inject them from a secret store.
+Open `tutorials/fsharp/12-parallel-programs`. No provider credentials are required.
 
 ## Complete source
 
 [!code-fsharp](../../tutorials/fsharp/12-parallel-programs/Program.fs)
 
-Each list item is a real `Circuit.call` with a distinct agent definition and the same typed signature. The bound is `2`, not the number of children. `Circuit.run` owns cancellation and combines the children into one result.
+The delayed processing node and `completion-handoff` node make scheduling order visible.
 
 ## Run it
 
@@ -41,35 +24,26 @@ Each list item is a real `Circuit.call` with a distinct agent definition and the
 dotnet run --project tutorials/fsharp/12-parallel-programs
 ```
 
-Representative output (**findings are provider-variable**):
-
-```text
-Analyses (declaration order):
-1. Sentiment: The customer sounds concerned but patient.
-2. Risk: Verify the account address before changing credentials.
-3. Routing: Route to account access support.
-```
-
-Completion timing can vary, but successful output positions are stable. Missing environment variables fail before client construction; provider and timeout failures are reported without exception details.
+Representative deterministic order begins with `ticket-2` even though `ticket-1` was admitted first.
 
 ## What changed
 
-Chapter 11 sequenced classification before drafting because the second call needed the first result. Chapter 12 identifies genuinely independent work and uses bounded parallel composition instead.
+Chapter 11 had one lane. Chapter 12 uses a finite keyed source, bounded concurrency, and immediate completion-order handoff.
 
 ## Check your understanding
 
-1. Why can completion order differ from result order?
-2. What resources and costs does the bound protect?
-3. Why can a cancelled sibling still consume provider time or money?
+1. What does the concurrency bound protect?
+2. Why retain source ordinals?
+3. Why must keys be unique?
 
 ## Try it yourself
 
-Change the bound from `2` to `1` and run once. Confirm the three output positions remain the same even though the calls are now scheduled serially.
+Set the bound to one and compare the downstream order.
 
 ## Recap and next step
 
-- Parallelism is appropriate only when children do not depend on one another.
-- The maximum concurrency bound limits active work; it does not change declaration-order results.
-- Failure cancels siblings cooperatively, but cancellation timing cannot reverse provider work already accepted.
+- Sources create stable independent lanes.
+- Backpressure is bounded.
+- Completion order drives execution; source order remains an explicit projection.
 
-Chapter 13 moves composition into a named, validated workflow when explicit topology becomes useful.
+Chapter 13 materializes a different child graph for each ticket kind.

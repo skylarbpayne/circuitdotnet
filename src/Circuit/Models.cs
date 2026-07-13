@@ -92,7 +92,7 @@ public sealed class OperationResult<T>
     }
 
     /// <summary>
-    /// Gets the is success.
+    /// Gets whether the operation succeeded.
     /// </summary>
     public bool IsSuccess { get; }
 
@@ -215,23 +215,45 @@ public sealed class AgentRunOptions
     /// </summary>
     public SensitiveDataMode SensitiveDataMode { get; set; } = SensitiveDataMode.Standard;
 
-    /// <summary>
-    /// Gets or sets the services.
-    /// </summary>
+    /// <summary>Gets or sets ambient services.</summary>
     public IServiceProvider? Services { get; set; }
+
+    /// <summary>Gets the max concurrency value.</summary>
+    public int MaxConcurrency { get; set; } = 8;
+    /// <summary>Gets the event buffer capacity value.</summary>
+    public int EventBufferCapacity { get; set; } = 128;
+    /// <summary>Gets the max dynamic depth value.</summary>
+    public int MaxDynamicDepth { get; set; } = 16;
+    /// <summary>Gets the max dynamic nodes value.</summary>
+    public int MaxDynamicNodes { get; set; } = 1024;
+    /// <summary>Gets the max approval rounds value.</summary>
+    public int MaxApprovalRounds { get; set; } = 16;
+    /// <summary>Gets the maximum number of items returned by one resumable-source page.</summary>
+    public int MaxSourcePageSize { get; set; } = 256;
+    /// <summary>Gets the maximum number of resumable-source pages read across one checkpoint lineage.</summary>
+    public int MaxSourcePages { get; set; } = 1024;
+    /// <summary>Gets the maximum serialized checkpoint size in bytes.</summary>
+    public int MaxCheckpointBytes { get; set; } = 4 * 1024 * 1024;
+    /// <summary>Gets the disposal drain timeout value.</summary>
+    public TimeSpan DisposalDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     internal Circuit.Core.RunOptions ToCore()
     {
         var tags = Tags ?? EmptyStringDictionary;
 
         return new Circuit.Core.RunOptions(
-            Session is null ? FSharpValueOption<Circuit.Core.CircuitSession>.None : FSharpValueOption<Circuit.Core.CircuitSession>.Some(Session.Inner),
-            string.IsNullOrWhiteSpace(TenantId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(TenantId),
-            string.IsNullOrWhiteSpace(UserId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(UserId),
-            ValidateAndCopyTags(tags),
-            (Circuit.Core.StructuredOutputPolicy)StructuredOutputPolicy,
-            (Circuit.Core.SensitiveDataMode)SensitiveDataMode,
-            Services ?? EmptyServiceProvider.Instance);
+                Session is null ? FSharpValueOption<Circuit.Core.CircuitSession>.None : FSharpValueOption<Circuit.Core.CircuitSession>.Some(Session.Inner),
+                string.IsNullOrWhiteSpace(TenantId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(TenantId),
+                string.IsNullOrWhiteSpace(UserId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(UserId),
+                ValidateAndCopyTags(tags),
+                (Circuit.Core.StructuredOutputPolicy)StructuredOutputPolicy,
+                (Circuit.Core.SensitiveDataMode)SensitiveDataMode,
+                Services ?? EmptyServiceProvider.Instance)
+            .WithMaxConcurrency(MaxConcurrency)
+            .WithEventBufferCapacity(EventBufferCapacity)
+            .WithLimits(MaxDynamicDepth, MaxDynamicNodes, MaxApprovalRounds, MaxSourcePageSize, MaxSourcePages)
+            .WithMaxCheckpointBytes(MaxCheckpointBytes)
+            .WithDisposalDrainTimeout(DisposalDrainTimeout);
     }
 
     internal static AgentRunOptions FromCore(Circuit.Core.RunOptions options)
@@ -244,6 +266,15 @@ public sealed class AgentRunOptions
             StructuredOutputPolicy = (StructuredOutputPolicy)options.StructuredOutputPolicy,
             SensitiveDataMode = (SensitiveDataMode)options.SensitiveDataMode,
             Services = options.Services,
+            MaxConcurrency = options.MaxConcurrency,
+            EventBufferCapacity = options.EventBufferCapacity,
+            MaxDynamicDepth = options.MaxDynamicDepth,
+            MaxDynamicNodes = options.MaxDynamicNodes,
+            MaxApprovalRounds = options.MaxApprovalRounds,
+            MaxSourcePageSize = options.MaxSourcePageSize,
+            MaxSourcePages = options.MaxSourcePages,
+            MaxCheckpointBytes = options.MaxCheckpointBytes,
+            DisposalDrainTimeout = options.DisposalDrainTimeout,
         };
 
     private static readonly IReadOnlyDictionary<string, string> EmptyStringDictionary =
@@ -303,6 +334,7 @@ public sealed class AgentRunOptions
 
     private sealed class EmptyServiceProvider : IServiceProvider
     {
+        /// <summary>Gets the instance value.</summary>
         public static EmptyServiceProvider Instance { get; } = new();
 
         /// <summary>
@@ -312,21 +344,20 @@ public sealed class AgentRunOptions
     }
 }
 
-/// <summary>
-/// Represents the workflow run options.
-/// </summary>
-public sealed class WorkflowRunOptions
+/// <summary>Supplies process-local dependencies when resuming a serialized checkpoint.</summary>
+public sealed class ResumeOptions
 {
-    /// <summary>
-    /// Gets or sets the session id.
-    /// </summary>
-    public string? SessionId { get; set; }
+    /// <summary>Gets or sets the service provider rebound in the receiving process.</summary>
+    public IServiceProvider? Services { get; set; }
 
-    internal Circuit.Core.WorkflowRunOptions ToCore()
-        => new(string.IsNullOrWhiteSpace(SessionId) ? FSharpValueOption<string>.None : FSharpValueOption<string>.Some(SessionId));
+    internal Circuit.Core.ResumeOptions ToCore()
+        => new(Services ?? EmptyResumeServiceProvider.Instance);
 
-    internal static WorkflowRunOptions FromCore(Circuit.Core.WorkflowRunOptions options)
-        => new() { SessionId = options.SessionId.IsSome ? options.SessionId.Value : null };
+    private sealed class EmptyResumeServiceProvider : IServiceProvider
+    {
+        internal static EmptyResumeServiceProvider Instance { get; } = new();
+        public object? GetService(Type serviceType) => null;
+    }
 }
 
 /// <summary>
@@ -334,11 +365,12 @@ public sealed class WorkflowRunOptions
 /// </summary>
 public sealed class ApprovalRequest
 {
-    private ApprovalRequest(string requestId, string toolName, string? argumentsJson)
+    private ApprovalRequest(string requestId, string toolName, string? argumentsJson, ApprovalPrompt? prompt)
     {
         RequestId = requestId;
         ToolName = toolName;
         ArgumentsJson = argumentsJson;
+        Prompt = prompt;
     }
 
     /// <summary>
@@ -356,8 +388,15 @@ public sealed class ApprovalRequest
     /// </summary>
     public string? ArgumentsJson { get; }
 
+    /// <summary>Gets the complete graph approval prompt when this request came from an approval node.</summary>
+    public ApprovalPrompt? Prompt { get; }
+
     internal static ApprovalRequest FromCore(Circuit.Core.ApprovalRequest request)
-        => new(request.RequestId, request.ToolName, request.ArgumentsJson.IsSome ? request.ArgumentsJson.Value : null);
+        => new(
+            request.RequestId,
+            request.ToolName,
+            request.ArgumentsJson.IsSome ? request.ArgumentsJson.Value : null,
+            request.Prompt.IsSome ? ApprovalPrompt.FromCore(request.Prompt.Value) : null);
 }
 
 /// <summary>
@@ -463,299 +502,4 @@ public sealed class ApprovalResponse
 
     internal static ApprovalResponse FromCore(Circuit.Core.ApprovalResponse response)
         => new(response.RequestId, response.Approved, response.Note);
-}
-
-/// <summary>
-/// Represents the agent run event.
-/// </summary>
-public sealed class AgentRunEvent<T>
-{
-    private AgentRunEvent(
-        long sequence,
-        string runId,
-        DateTimeOffset timestamp,
-        AgentRunEventKind kind,
-        string? operationId,
-        string? textDelta,
-        T? value,
-        AgentFailure? failure,
-        ApprovalRequest? approval)
-    {
-        Sequence = sequence;
-        RunId = runId;
-        Timestamp = timestamp;
-        Kind = kind;
-        OperationId = operationId;
-        TextDelta = textDelta;
-        Value = value;
-        Failure = failure;
-        Approval = approval;
-    }
-
-    /// <summary>
-    /// Gets the sequence.
-    /// </summary>
-    public long Sequence { get; }
-
-    /// <summary>
-    /// Gets the run id.
-    /// </summary>
-    public string RunId { get; }
-
-    /// <summary>
-    /// Gets the timestamp.
-    /// </summary>
-    public DateTimeOffset Timestamp { get; }
-
-    /// <summary>
-    /// Gets the kind.
-    /// </summary>
-    public AgentRunEventKind Kind { get; }
-
-    /// <summary>
-    /// Gets the operation id.
-    /// </summary>
-    public string? OperationId { get; }
-
-    /// <summary>
-    /// Gets the text delta.
-    /// </summary>
-    public string? TextDelta { get; }
-
-    /// <summary>
-    /// Gets the value.
-    /// </summary>
-    public T? Value { get; }
-
-    /// <summary>
-    /// Gets the failure.
-    /// </summary>
-    public AgentFailure? Failure { get; }
-
-    /// <summary>
-    /// Gets the approval.
-    /// </summary>
-    public ApprovalRequest? Approval { get; }
-
-    internal static AgentRunEvent<T> FromCore(Circuit.Core.RunEvent<T> @event)
-        => new(
-            @event.Sequence,
-            @event.RunId.Value,
-            @event.Timestamp,
-            (AgentRunEventKind)@event.Kind,
-            @event.OperationId.IsSome ? @event.OperationId.Value : null,
-            @event.TextDelta.IsSome ? @event.TextDelta.Value : null,
-            @event.Value.IsSome ? @event.Value.Value : default,
-            @event.Failure.IsSome ? AgentFailure.FromCore(@event.Failure.Value) : null,
-            @event.Approval.IsSome ? ApprovalRequest.FromCore(@event.Approval.Value) : null
-        );
-}
-
-/// <summary>
-/// Represents the agent run result.
-/// </summary>
-public sealed class AgentRunResult<T>
-{
-    private AgentRunResult(
-        string runId,
-        OperationResult<T> result,
-        RunUsage usage,
-        CircuitSession? session,
-        DateTimeOffset startedAt,
-        DateTimeOffset completedAt)
-    {
-        RunId = runId;
-        Result = result;
-        Usage = usage;
-        Session = session;
-        StartedAt = startedAt;
-        CompletedAt = completedAt;
-    }
-
-    /// <summary>
-    /// Gets the run id.
-    /// </summary>
-    public string RunId { get; }
-
-    /// <summary>
-    /// Gets the result.
-    /// </summary>
-    public OperationResult<T> Result { get; }
-
-    /// <summary>
-    /// Gets the usage.
-    /// </summary>
-    public RunUsage Usage { get; }
-
-    /// <summary>
-    /// Gets the session.
-    /// </summary>
-    public CircuitSession? Session { get; }
-
-    /// <summary>
-    /// Gets the started at.
-    /// </summary>
-    public DateTimeOffset StartedAt { get; }
-
-    /// <summary>
-    /// Gets the completed at.
-    /// </summary>
-    public DateTimeOffset CompletedAt { get; }
-
-    internal static AgentRunResult<T> FromCore(Circuit.Core.RunResult<T> result)
-        => new(
-            result.RunId.Value,
-            OperationResult<T>.FromCore(result.Result),
-            RunUsage.FromCore(result.Usage),
-            result.Session.IsSome ? CircuitSession.FromCore(result.Session.Value) : null,
-            result.StartedAt,
-            result.CompletedAt
-        );
-}
-
-/// <summary>
-/// Represents the workflow checkpoint.
-/// </summary>
-public sealed class WorkflowCheckpoint<T>
-{
-    private WorkflowCheckpoint(Circuit.Core.WorkflowCheckpoint<T> inner)
-    {
-        Inner = inner;
-        DefinitionId = inner.DefinitionId.Value;
-        DefinitionVersion = inner.DefinitionVersion.ToString();
-        CreatedAt = inner.CreatedAt;
-    }
-
-    internal Circuit.Core.WorkflowCheckpoint<T> Inner { get; }
-
-    /// <summary>
-    /// Gets the definition id.
-    /// </summary>
-    public string DefinitionId { get; }
-
-    /// <summary>
-    /// Gets the definition version.
-    /// </summary>
-    public string DefinitionVersion { get; }
-
-    /// <summary>
-    /// Gets the checkpoint creation time in UTC.
-    /// </summary>
-    public DateTimeOffset CreatedAt { get; }
-
-    /// <summary>
-    /// Serializes the checkpoint to an opaque JSON envelope.
-    /// </summary>
-    public JsonElement Serialize() => Inner.Serialize();
-
-    internal static WorkflowCheckpoint<T> FromCore(Circuit.Core.WorkflowCheckpoint<T> checkpoint) => new(checkpoint);
-
-    /// <summary>
-    /// Restores a checkpoint from a serialized JSON envelope.
-    /// </summary>
-    /// <remarks>
-    /// Deserialization validates envelope structure and format compatibility only; it does not establish integrity or
-    /// authenticity. Treat checkpoints as trusted sensitive state. Enforce serialized-size limits before parsing,
-    /// protect stored checkpoints with appropriate authentication and encryption, and never pass a client-supplied
-    /// envelope directly to this method.
-    /// </remarks>
-    /// <param name="state">The checkpoint envelope returned by <see cref="Serialize"/>.</param>
-    /// <returns>The restored checkpoint.</returns>
-    /// <exception cref="ArgumentException"><paramref name="state"/> is not a valid checkpoint envelope.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="state"/> uses an unsupported checkpoint format version.</exception>
-    public static WorkflowCheckpoint<T> Deserialize(JsonElement state)
-        => new(Circuit.Core.WorkflowCheckpoint<T>.Deserialize(state));
-}
-
-/// <summary>
-/// Represents the workflow context.
-/// </summary>
-public sealed class WorkflowContext
-{
-    internal WorkflowContext(Circuit.Core.WorkflowContext inner)
-    {
-        Inner = inner;
-    }
-
-    internal Circuit.Core.WorkflowContext Inner { get; }
-
-    /// <summary>
-    /// Gets the run id.
-    /// </summary>
-    public string RunId => Inner.RunId.Value;
-
-    /// <summary>
-    /// Gets the definition id.
-    /// </summary>
-    public string DefinitionId => Inner.DefinitionId.Value;
-
-    /// <summary>
-    /// Gets the definition version.
-    /// </summary>
-    public string DefinitionVersion => Inner.DefinitionVersion.ToString();
-
-    /// <summary>
-    /// Gets the step id.
-    /// </summary>
-    public string StepId => Inner.StepId;
-
-    /// <summary>
-    /// Gets the cancellation token.
-    /// </summary>
-    public CancellationToken CancellationToken => Inner.CancellationToken;
-}
-
-/// <summary>
-/// Represents the workflow run.
-/// </summary>
-public sealed class WorkflowRun<T> : IAsyncDisposable
-{
-    private readonly Circuit.Core.WorkflowRun<T> _inner;
-
-    internal WorkflowRun(Circuit.Core.WorkflowRun<T> inner)
-    {
-        _inner = inner;
-        RunId = inner.RunId.Value;
-        Events = Stream(inner.Events);
-    }
-
-    /// <summary>
-    /// Gets the run id.
-    /// </summary>
-    public string RunId { get; }
-
-    /// <summary>
-    /// Gets the events.
-    /// </summary>
-    public IAsyncEnumerable<AgentRunEvent<T>> Events { get; }
-
-    /// <summary>
-    /// Executes respond async.
-    /// </summary>
-    public ValueTask RespondAsync(ApprovalResponse response, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(response);
-        return _inner.RespondAsync(response.ToCore(), cancellationToken);
-    }
-
-    /// <summary>
-    /// Creates checkpoint async.
-    /// </summary>
-    public async Task<WorkflowCheckpoint<T>> CreateCheckpointAsync(CancellationToken cancellationToken = default)
-        => WorkflowCheckpoint<T>.FromCore(await _inner.CreateCheckpointAsync(cancellationToken).ConfigureAwait(false));
-
-    /// <summary>
-    /// Executes dispose async.
-    /// </summary>
-    public ValueTask DisposeAsync() => ((IAsyncDisposable)_inner).DisposeAsync();
-
-    private static async IAsyncEnumerable<AgentRunEvent<T>> Stream(
-        IAsyncEnumerable<Circuit.Core.RunEvent<T>> source,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        await foreach (var item in source.WithCancellation(cancellationToken).ConfigureAwait(false))
-        {
-            yield return AgentRunEvent<T>.FromCore(item);
-        }
-    }
 }

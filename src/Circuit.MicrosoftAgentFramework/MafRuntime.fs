@@ -12,28 +12,48 @@ open Microsoft.Extensions.AI
 type internal IMafRuntimeStreamingDispatcher =
     abstract RunStreaming<'Input, 'Output> :
         runtime: obj *
+        runId: RunId *
+        nodePath: string *
+        idempotencyKey: string *
         agent: AgentDefinition *
         signature: Signature<'Input, 'Output> *
         input: 'Input *
         runOptions: RunOptions *
         jsonOptions: JsonSerializerOptions *
+        onSession: (CircuitSession -> Task) *
         cancellationToken: CancellationToken ->
             IAsyncEnumerable<RunEvent<'Output>>
 
 type internal IMafRuntimeInteractiveDispatcher =
     abstract Start<'Input, 'Output> :
         runtime: obj *
+        runId: RunId *
+        nodePath: string *
+        idempotencyKey: string *
         agent: AgentDefinition *
         signature: Signature<'Input, 'Output> *
         input: 'Input *
         runOptions: RunOptions *
+        onSession: (CircuitSession -> Task) *
         cancellationToken: CancellationToken ->
             Task<AgentRun<'Output>>
 
 module internal MafRuntimeInteractiveDispatch =
     let mutable Dispatcher: IMafRuntimeInteractiveDispatcher =
         { new IMafRuntimeInteractiveDispatcher with
-            member _.Start(_runtime, _agent, _signature, _input, _runOptions, _cancellationToken) =
+            member _.Start
+                (
+                    _runtime,
+                    _runId,
+                    _nodePath,
+                    _idempotencyKey,
+                    _agent,
+                    _signature,
+                    _input,
+                    _runOptions,
+                    _onSession,
+                    _cancellationToken
+                ) =
                 invalidOp "Interactive support has not been initialized." }
 
     let private initialization =
@@ -52,14 +72,39 @@ module internal MafRuntimeInteractiveDispatch =
             LazyThreadSafetyMode.ExecutionAndPublication
         )
 
-    let Start runtime agent signature input runOptions cancellationToken =
+    let Start runtime runId nodePath idempotencyKey agent signature input runOptions onSession cancellationToken =
         initialization.Value |> ignore
-        Dispatcher.Start(runtime, agent, signature, input, runOptions, cancellationToken)
+
+        Dispatcher.Start(
+            runtime,
+            runId,
+            nodePath,
+            idempotencyKey,
+            agent,
+            signature,
+            input,
+            runOptions,
+            onSession,
+            cancellationToken
+        )
 
 module internal MafRuntimeStreamingDispatch =
     let mutable Dispatcher: IMafRuntimeStreamingDispatcher =
         { new IMafRuntimeStreamingDispatcher with
-            member _.RunStreaming(_runtime, _agent, _signature, _input, _runOptions, _jsonOptions, _cancellationToken) =
+            member _.RunStreaming
+                (
+                    _runtime,
+                    _runId,
+                    _nodePath,
+                    _idempotencyKey,
+                    _agent,
+                    _signature,
+                    _input,
+                    _runOptions,
+                    _jsonOptions,
+                    _onSession,
+                    _cancellationToken
+                ) =
                 invalidOp "Streaming support has not been initialized." }
 
     let private initialization =
@@ -80,9 +125,34 @@ module internal MafRuntimeStreamingDispatch =
 
     let private ensureInitialized () = initialization.Value |> ignore
 
-    let RunStreaming runtime agent signature input runOptions jsonOptions cancellationToken =
+    let RunStreaming
+        runtime
+        runId
+        nodePath
+        idempotencyKey
+        agent
+        signature
+        input
+        runOptions
+        jsonOptions
+        onSession
+        cancellationToken
+        =
         ensureInitialized ()
-        Dispatcher.RunStreaming(runtime, agent, signature, input, runOptions, jsonOptions, cancellationToken)
+
+        Dispatcher.RunStreaming(
+            runtime,
+            runId,
+            nodePath,
+            idempotencyKey,
+            agent,
+            signature,
+            input,
+            runOptions,
+            jsonOptions,
+            onSession,
+            cancellationToken
+        )
 
 module internal MafRuntimeInternals =
     let classifyProviderExecutionFailure runId cancellationToken ex =
@@ -126,7 +196,7 @@ module internal MafRuntimeInternals =
             Error(MafErrors.decodeFailure runId "The provider response could not be decoded." ValueNone (ValueSome ex))
         | ex -> Error(MafErrors.providerFailure runId "The provider request failed." ValueNone (ValueSome ex))
 
-/// Implements <see cref="T:Circuit.Core.ICircuitRuntime" /> and <see cref="T:Circuit.Core.IInteractiveCircuitRuntime" /> on top of Microsoft.Extensions.AI and Microsoft Agent Framework primitives.
+/// Implements the unified Circuit runtime as a Microsoft Agent Framework leaf executor.
 /// <param name="chatClient">The primary chat client used for provider calls.</param>
 /// <param name="options">Runtime options that are snapshotted during construction.</param>
 /// <remarks>
@@ -137,6 +207,8 @@ module internal MafRuntimeInternals =
 /// </remarks>
 [<Sealed>]
 type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
+    inherit CircuitRuntime()
+
     let runtimeOptions =
         if isNull (box options) then
             nullArg "options"
@@ -161,26 +233,44 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
         if isNull runtimeOptions.Observers then
             nullArg "options.Observers"
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.ChatClient = chatClient
+    /// <summary>Gets the internal value.</summary>
     member internal _.RuntimeOptions = runtimeOptions
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.CreateRunContext<'Input, 'Output>
         (runId: RunId, agent: AgentDefinition, signature: Signature<'Input, 'Output>, runOptions: RunOptions)
         =
         RunContext(runId, agent, signature.Id, signature.Version, runOptions)
 
+    /// <summary>Gets the internal value.</summary>
+    member internal _.CreateScheduledRunContext<'Input, 'Output>
+        (
+            runId: RunId,
+            nodePath: string,
+            idempotencyKey: string,
+            agent: AgentDefinition,
+            signature: Signature<'Input, 'Output>,
+            runOptions: RunOptions
+        ) =
+        RunContext(runId, agent, signature.Id, signature.Version, runOptions, nodePath, idempotencyKey)
+
+    /// <summary>Gets the internal value.</summary>
     member internal _.ResolveRequestModel(agent: AgentDefinition) =
         match agent.ModelHint, options.DefaultModelId with
         | ValueSome modelId, _ -> ValueSome modelId
         | ValueNone, ValueSome modelId -> ValueSome modelId
         | ValueNone, ValueNone -> ValueNone
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.CreatePrompt<'Input, 'Output>(agent: AgentDefinition, signature: Signature<'Input, 'Output>) =
         if String.IsNullOrWhiteSpace signature.Instructions then
             agent.Instructions
         else
             agent.Instructions + "\n\n" + signature.Instructions
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.TrySerializeInputPayload<'Input, 'Output>
         (signature: Signature<'Input, 'Output>)
         (input: 'Input)
@@ -190,6 +280,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
         with _ ->
             ValueNone
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.TrySerializeOutputPayload<'Input, 'Output>
         (signature: Signature<'Input, 'Output>)
         (output: 'Output)
@@ -239,6 +330,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
         else
             Ok tools
 
+    /// <summary>Gets the internal value.</summary>
     member internal this.ResolveCapabilitiesAsync
         (runId: RunId)
         (context: RunContext)
@@ -280,6 +372,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
 
         $"Execute signature `{signature.Id.Value}` version `{signature.Version}`.\n\nInput JSON:\n{serializedInput}"
 
+    /// <summary>Gets the internal value.</summary>
     member internal this.TryCreateInputEnvelope<'Input, 'Output>
         (runId: RunId)
         (signature: Signature<'Input, 'Output>)
@@ -307,6 +400,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
 
             entries :> IReadOnlyDictionary<string, string>
 
+    /// <summary>Gets the internal value.</summary>
     member internal _.PrepareSessionAsync
         (runId: RunId)
         (runtimeAgent: AIAgent)
@@ -354,10 +448,11 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
     member internal this.BuildSessionAgentAsync
         (runId: RunId)
         (agent: AgentDefinition)
+        (runOptions: RunOptions)
         (cancellationToken: CancellationToken)
         : Task<Result<MafAgentFactory.MafCompiledAgent, CircuitFailure>> =
         task {
-            let context = RunContext(runId, agent, agent.Id, agent.Version, RunOptions.Default)
+            let context = RunContext(runId, agent, agent.Id, agent.Version, runOptions)
             let! capabilityResult = this.ResolveCapabilitiesAsync runId context agent cancellationToken
 
             match capabilityResult with
@@ -372,6 +467,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                     return Error(MafErrors.skillFailure runId "Skill initialization failed." (ValueSome ex))
         }
 
+    /// <summary>Gets the internal value.</summary>
     member internal this.RunAsyncCore<'Input, 'Output>
         (agent: AgentDefinition)
         (signature: Signature<'Input, 'Output>)
@@ -605,8 +701,9 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
                 MafObserver.unregisterSession observerSession
         }
 
+    /// <summary>Gets the internal value.</summary>
     member internal this.SerializeSessionAsyncCore
-        (agent: AgentDefinition, session: CircuitSession, cancellationToken: CancellationToken)
+        (agent: AgentDefinition, session: CircuitSession, runOptions: RunOptions, cancellationToken: CancellationToken)
         =
         if isNull (box agent) then
             nullArg "agent"
@@ -625,7 +722,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
             let work: Task<JsonElement> =
                 task {
                     let runId = RunId.New()
-                    let! agentResult = this.BuildSessionAgentAsync runId agent cancellationToken
+                    let! agentResult = this.BuildSessionAgentAsync runId agent runOptions cancellationToken
 
                     match agentResult with
                     | Error failure ->
@@ -658,7 +755,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
             ValueTask<JsonElement>(work)
 
     member internal this.DeserializeSessionAsyncCore
-        (agent: AgentDefinition, state: JsonElement, cancellationToken: CancellationToken)
+        (agent: AgentDefinition, state: JsonElement, runOptions: RunOptions, cancellationToken: CancellationToken)
         =
         if isNull (box agent) then
             nullArg "agent"
@@ -669,7 +766,7 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
         let work: Task<CircuitSession> =
             task {
                 let runId = RunId.New()
-                let! agentResult = this.BuildSessionAgentAsync runId agent cancellationToken
+                let! agentResult = this.BuildSessionAgentAsync runId agent runOptions cancellationToken
 
                 match agentResult with
                 | Error failure ->
@@ -693,133 +790,202 @@ type MafRuntime(chatClient: IChatClient, options: MafRuntimeOptions) =
 
         ValueTask<CircuitSession>(work)
 
-    interface ICircuitRuntime with
-        member this.RunAsync(agent, signature, input, runOptions, cancellationToken) =
-            this.RunAsyncCore agent signature input runOptions cancellationToken
+    /// <summary>Gets the execute agent async value.</summary>
+    override this.ExecuteAgentAsync<'Input, 'Output>
+        (
+            schedulerRunId,
+            nodePath,
+            agent,
+            signature: Signature<'Input, 'Output>,
+            input: 'Input,
+            runOptions,
+            idempotencyKey,
+            onDelta,
+            onApproval,
+            onSession,
+            cancellationToken
+        ) : Task<RunResult<'Output>> =
+        task {
+            let startedAt = DateTimeOffset.UtcNow
+            let mutable output: 'Output voption = ValueNone
+            let mutable failure: CircuitFailure voption = ValueNone
+            let mutable usage = RunUsage(0, 0)
+            let mutable resultSession = runOptions.Session
 
-        member this.RunStreamingAsync(agent, signature, input, runOptions, cancellationToken) =
-            MafRuntimeStreamingDispatch.RunStreaming
-                (box this)
-                agent
-                signature
-                input
-                runOptions
-                options.JsonSerializerOptions
-                cancellationToken
+            if options.ToolResolvers.Count = 0 then
+                // Preserve provider token streaming when no tool can request an approval.
+                let stream =
+                    MafRuntimeStreamingDispatch.RunStreaming
+                        (box this)
+                        schedulerRunId
+                        nodePath
+                        idempotencyKey
+                        agent
+                        signature
+                        input
+                        runOptions
+                        options.JsonSerializerOptions
+                        onSession
+                        cancellationToken
 
-        member this.SerializeSessionAsync(agent, session, cancellationToken) =
-            this.SerializeSessionAsyncCore(agent, session, cancellationToken)
+                let enumerator = stream.GetAsyncEnumerator(cancellationToken)
 
-        member this.DeserializeSessionAsync(agent, state, cancellationToken) =
-            this.DeserializeSessionAsyncCore(agent, state, cancellationToken)
+                try
+                    let mutable more = true
 
-    interface IInteractiveCircuitRuntime with
-        member this.StartAsync(agent, signature, input, runOptions, cancellationToken) =
-            MafRuntimeInteractiveDispatch.Start (box this) agent signature input runOptions cancellationToken
+                    while more do
+                        let! available = enumerator.MoveNextAsync().AsTask()
+                        more <- available
 
-    interface IWorkflowRuntime with
-        member this.RunAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                input: 'Input,
-                workflowOptions: WorkflowRunOptions,
-                cancellationToken: CancellationToken
-            ) =
-            let dispatchType =
-                this.GetType().Assembly.GetTypes()
-                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
+                        if available then
+                            let event = enumerator.Current
 
-            let methodInfo =
-                dispatchType.GetMethods(
-                    Reflection.BindingFlags.Static
-                    ||| Reflection.BindingFlags.Public
-                    ||| Reflection.BindingFlags.NonPublic
-                )
-                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Run" && methodInfo.IsGenericMethodDefinition)
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Run' was not found.")
+                            match event.Kind with
+                            | RunEventKind.OutputDelta ->
+                                match event.TextDelta with
+                                | ValueSome delta -> do! onDelta delta
+                                | ValueNone -> ()
+                            | RunEventKind.RunCompleted ->
+                                output <- event.Value
+                                usage <- event.RuntimeUsage
+                                resultSession <- event.RuntimeSession
+                            | RunEventKind.RunFailed ->
+                                failure <- event.Failure
+                                usage <- event.RuntimeUsage
+                                resultSession <- event.RuntimeSession
+                            | _ -> ()
+                finally
+                    enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            else
+                // Approval-capable leaves retain one compiled agent and provider session across
+                // rounds. Core owns publication and matching of each approval response.
+                let! interactive =
+                    MafRuntimeInteractiveDispatch.Start
+                        (box this)
+                        schedulerRunId
+                        nodePath
+                        idempotencyKey
+                        agent
+                        signature
+                        input
+                        runOptions
+                        onSession
+                        cancellationToken
+
+                try
+                    let enumerator = interactive.Events.GetAsyncEnumerator(cancellationToken)
+
+                    try
+                        let mutable more = true
+
+                        while more do
+                            let! available = enumerator.MoveNextAsync().AsTask()
+                            more <- available
+
+                            if available then
+                                let event = enumerator.Current
+
+                                match event.Kind with
+                                | RunEventKind.OutputDelta ->
+                                    match event.TextDelta with
+                                    | ValueSome delta -> do! onDelta delta
+                                    | ValueNone -> ()
+                                | RunEventKind.ApprovalRequested ->
+                                    match event.Approval with
+                                    | ValueSome request ->
+                                        let! response = onApproval request
+                                        do! interactive.RespondAsync(response, cancellationToken).AsTask()
+                                    | ValueNone -> ()
+                                | RunEventKind.RunCompleted ->
+                                    output <- event.Value
+                                    usage <- event.RuntimeUsage
+                                    resultSession <- event.RuntimeSession
+                                | RunEventKind.RunFailed ->
+                                    failure <- event.Failure
+                                    usage <- event.RuntimeUsage
+                                    resultSession <- event.RuntimeSession
+                                | _ -> ()
+                    finally
+                        enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+                finally
+                    (interactive :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
             let result =
-                methodInfo
-                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
-                    .Invoke(
-                        null,
-                        [| box this
-                           box definition
-                           box input
-                           box workflowOptions
-                           box cancellationToken |]
-                    )
+                match output, failure with
+                | ValueSome value, _ -> CircuitResult<'Output>.Success value
+                | _, ValueSome error -> CircuitResult<'Output>.Error error
+                | _ ->
+                    CircuitResult<'Output>
+                        .Error(
+                            MafErrors.providerFailure
+                                schedulerRunId
+                                "The provider execution ended without a terminal response."
+                                ValueNone
+                                ValueNone
+                        )
 
-            if isNull result then
-                invalidOp "Workflow runtime dispatch method 'Run' returned null."
+            return RunResult(schedulerRunId, result, usage, resultSession, startedAt, DateTimeOffset.UtcNow)
+        }
 
-            result :?> Task<RunResult<'Output>>
+    /// Projects unified Circuit observations into configured MAF observers and telemetry.
+    override _.ObserveCircuitAsync(observation, runOptions, cancellationToken) =
+        task {
+            match unbox<CircuitObservation> observation with
+            | CircuitRunStarted info ->
+                let session =
+                    MafObserver.createCircuitRunSession
+                        options.Observers
+                        info.RunId
+                        info.DefinitionId
+                        info.DefinitionVersion
+                        runOptions.Services
 
-        member this.StartAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                input: 'Input,
-                workflowOptions: WorkflowRunOptions,
-                cancellationToken: CancellationToken
-            ) =
-            let dispatchType =
-                this.GetType().Assembly.GetTypes()
-                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
+                do! MafObserver.notifyStartedAsync session info.StartedAt ValueNone ValueNone cancellationToken
+            | CircuitNodeStarted(runId, info) ->
+                do! MafObserver.notifyNodeStartedAsync (MafObserver.tryGetSession runId) info.NodePath cancellationToken
+            | CircuitApprovalRequested(runId, approval) ->
+                do!
+                    MafObserver.notifyApprovalRequestedAsync
+                        (MafObserver.tryGetSession runId)
+                        approval.RequestId
+                        approval.ToolName
+                        approval
+                        cancellationToken
+            | CircuitNodeCompleted(runId, info, failure) ->
+                do!
+                    MafObserver.notifyNodeCompletedAsync
+                        (MafObserver.tryGetSession runId)
+                        info.NodePath
+                        failure
+                        cancellationToken
+            | CircuitRunCompleted(runId, failure, usage, startedAt, completedAt) ->
+                let session = MafObserver.tryGetSession runId
 
-            let methodInfo =
-                dispatchType.GetMethods(
-                    Reflection.BindingFlags.Static
-                    ||| Reflection.BindingFlags.Public
-                    ||| Reflection.BindingFlags.NonPublic
-                )
-                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Start" && methodInfo.IsGenericMethodDefinition)
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Start' was not found.")
+                let kind =
+                    if failure.IsSome then
+                        RunEventKind.RunFailed
+                    else
+                        RunEventKind.RunCompleted
 
-            let result =
-                methodInfo
-                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
-                    .Invoke(
-                        null,
-                        [| box this
-                           box definition
-                           box input
-                           box workflowOptions
-                           box cancellationToken |]
-                    )
+                do!
+                    MafObserver.notifyCircuitRootEventAsync
+                        session
+                        kind
+                        ValueNone
+                        failure
+                        (ValueSome startedAt)
+                        (ValueSome completedAt)
+                        (ValueSome usage)
+                        MafErrors.emptyDiagnosticMetadata
+                        cancellationToken
 
-            if isNull result then
-                invalidOp "Workflow runtime dispatch method 'Start' returned null."
+                MafObserver.unregisterSession session
+        }
 
-            result :?> Task<WorkflowRun<'Output>>
+    /// <summary>Gets the serialize session core async value.</summary>
+    override this.SerializeSessionCoreAsync(agent, session, runOptions, cancellationToken) =
+        this.SerializeSessionAsyncCore(agent, session, runOptions, cancellationToken)
 
-        member this.ResumeAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                checkpoint: WorkflowCheckpoint<'Output>,
-                cancellationToken: CancellationToken
-            ) =
-            let dispatchType =
-                this.GetType().Assembly.GetTypes()
-                |> Array.tryFind (fun valueType -> valueType.Name = "WorkflowRuntimeDispatch")
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch type was not found.")
-
-            let methodInfo =
-                dispatchType.GetMethods(
-                    Reflection.BindingFlags.Static
-                    ||| Reflection.BindingFlags.Public
-                    ||| Reflection.BindingFlags.NonPublic
-                )
-                |> Array.tryFind (fun methodInfo -> methodInfo.Name = "Resume" && methodInfo.IsGenericMethodDefinition)
-                |> Option.defaultWith (fun () -> invalidOp "Workflow runtime dispatch method 'Resume' was not found.")
-
-            let result =
-                methodInfo
-                    .MakeGenericMethod([| typeof<'Input>; typeof<'Output> |])
-                    .Invoke(null, [| box this; box definition; box checkpoint; box cancellationToken |])
-
-            if isNull result then
-                invalidOp "Workflow runtime dispatch method 'Resume' returned null."
-
-            result :?> Task<WorkflowRun<'Output>>
+    /// Restores a provider session with the receiving process's rebound services and capabilities.
+    override this.DeserializeSessionCoreAsync(agent, state, runOptions, cancellationToken) =
+        this.DeserializeSessionAsyncCore(agent, state, runOptions, cancellationToken)

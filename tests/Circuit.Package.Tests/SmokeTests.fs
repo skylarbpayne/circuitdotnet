@@ -242,47 +242,32 @@ module PackageSmokeTests =
         using System.ComponentModel.DataAnnotations;
         using Circuit;
         using Circuit.Testing;
-        using Microsoft.Extensions.DependencyInjection;
 
         var runtime = new ScriptedRuntime(
         [
             ScriptedResponses.OutputJson("{\"message\":\"pong\"}"),
-            ScriptedResponses.Stream(["{\"message\":\"po", "ng\"}"])
+            ScriptedResponses.OutputJson("{\"message\":\"streamed\"}")
         ]);
-
-        var services = new ServiceCollection();
-        services.AddSingleton<Circuit.Core.ICircuitRuntime>(runtime);
-        services.AddCircuit(_ => { });
-
-        await using var provider = services.BuildServiceProvider();
-        var client = provider.GetRequiredService<ICircuitClient>();
+        var client = new CircuitClientBuilder().UseRuntime(runtime).Build();
         var agent = new AgentDefinition("smoke.agent", "1.0.0", "Smoke", "Return pong.");
         var signature = new AgentSignature<SmokeInput, SmokeOutput>("smoke.signature", "1.0.0", "Smoke", "Return pong.");
+        var graph = CircuitDefinition<SmokeInput, SmokeOutput>.FromAgent(agent, signature);
 
-        var result = await client.RunAsync(agent, signature, new SmokeInput { Message = "ping" });
-        if (!result.Result.IsSuccess || result.Result.Value?.Message != "pong")
+        var result = await client.RunAsync(graph, new SmokeInput { Message = "ping" });
+        if (!result.IsSuccess || result.Value?.Message != "pong")
         {
-            throw new System.Exception("C# package smoke failed to run the typed agent.");
+            throw new System.Exception("C# package smoke failed to run the typed Circuit.");
         }
 
-        var events = new List<AgentRunEvent<SmokeOutput>>();
-        await foreach (var @event in client.RunStreamingAsync(agent, signature, new SmokeInput { Message = "stream" }))
+        var streamed = new List<CircuitResponse<SmokeOutput>>();
+        await foreach (var response in client.StreamAsync(graph, new SmokeInput { Message = "stream" }))
         {
-            events.Add(@event);
+            streamed.Add(response);
         }
 
-        var terminalCount = events.Count(@event => @event.Kind is AgentRunEventKind.RunCompleted or AgentRunEventKind.RunFailed);
-        if (terminalCount != 1 || events.Count == 0 || events[^1].Kind != AgentRunEventKind.RunCompleted)
+        if (streamed.Count != 1 || !streamed[0].IsSuccess || streamed[0].Value.Message != "streamed")
         {
-            throw new System.Exception("C# package smoke did not produce one terminal streaming event.");
-        }
-
-        for (var index = 1; index < events.Count; index++)
-        {
-            if (events[index].Sequence <= events[index - 1].Sequence)
-            {
-                throw new System.Exception("C# package smoke emitted non-monotonic event sequences.");
-            }
+            throw new System.Exception("C# package smoke failed to stream the typed Circuit.");
         }
 
         if (runtime.Calls.Count != 2 || runtime.RemainingResponses != 0)
@@ -290,7 +275,7 @@ module PackageSmokeTests =
             throw new System.Exception("C# package smoke failed to execute the offline scripted scenario.");
         }
 
-        Console.WriteLine(result.Result.Value!.Message);
+        Console.WriteLine(result.Value!.Message);
 
         sealed class SmokeInput
         {
@@ -332,6 +317,7 @@ module PackageSmokeTests =
 open System.ComponentModel.DataAnnotations
 open System.Threading
 open Circuit.Core
+open Circuit.FSharp
 open Circuit.Testing
 
 [<AllowNullLiteral>]
@@ -361,17 +347,13 @@ let signature =
         Seq.empty
     )
 
-let result =
-    runtime.RunAsync(agent, signature, SmokeInput(Message = "ping"), RunOptions.Default, CancellationToken.None)
-    |> _.Result
+let graph = Circuit.agent agent signature
+let result = Circuit.run runtime graph (SmokeInput(Message = "ping")) RunOptions.Default CancellationToken.None |> _.Result
 
-if not result.Result.IsSuccess then
-    failwith "F# package smoke failed to run the typed agent scenario."
+if not result.IsSuccess || result.Value.Message <> "pong" then
+    failwith "F# package smoke failed to run the typed Circuit."
 
-if result.Result.Value.Message <> "pong" then
-    failwith "F# package smoke returned the wrong typed output."
-
-printfn "%s" result.Result.Value.Message
+printfn "%s" result.Value.Message
         """
 
     [<Fact>]

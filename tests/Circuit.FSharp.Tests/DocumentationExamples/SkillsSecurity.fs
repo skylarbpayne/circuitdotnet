@@ -1,32 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.SkillsSecurity
 
-open System.Collections.Generic
+open System.Threading
 open Circuit.Core
+open Circuit.FSharp
 
-module SkillsSecurityExample =
-    let inlineSkill =
-        SkillReference.Create(
-            "skill.inline-style",
-            "1.0.0",
-            "Inline support guidance.",
-            SkillSource.CreateInline(
-                "Use a calm, concise support tone.",
-                [ SkillResource.Create("glossary", box "vip = high-touch customer") ],
-                [ SkillScriptDescriptor.Create("normalize-contact") ]
-            )
-        )
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-skillssecurity" "1.0.0"
 
-    let resolvedSkill =
-        ResolvedSkill.Create(
-            inlineSkill,
-            [ KeyValuePair("audience", box "premium-support")
-              KeyValuePair("revision", box 3) ]
-        )
-
-    let fileSkill =
-        SkillReference.Create(
-            "skill.file-style",
-            "1.0.0",
-            "File-backed guidance with SKILL.md and optional references.",
-            SkillSource.CreateFile "/srv/circuit/skills/support-style"
-        )
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

@@ -1,10 +1,13 @@
-#nullable enable
 M:Circuit.MicrosoftAgentFramework.DependencyInjection.IServiceCollection.AddMafRuntime(Microsoft.Extensions.DependencyInjection.IServiceCollection,Microsoft.Extensions.AI.IChatClient,Circuit.MicrosoftAgentFramework.MafRuntimeOptions)~Microsoft.Extensions.DependencyInjection.IServiceCollection
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunCompletedAsync(Circuit.MicrosoftAgentFramework.MafRunObservation,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunEventAsync(Circuit.MicrosoftAgentFramework.MafObservedEvent,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.MicrosoftAgentFramework.IRunObserver.OnRunStartedAsync(Circuit.Core.RunContext,System.DateTimeOffset,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.MicrosoftAgentFramework.IToolApprovalPolicy.IsApprovedAsync(System.String,Circuit.MicrosoftAgentFramework.ToolApprovalContext)~System.Threading.Tasks.ValueTask{System.Boolean}
 M:Circuit.MicrosoftAgentFramework.MafRuntime.#ctor(Microsoft.Extensions.AI.IChatClient,Circuit.MicrosoftAgentFramework.MafRuntimeOptions)
+M:Circuit.MicrosoftAgentFramework.MafRuntime.DeserializeSessionCoreAsync(Circuit.Core.AgentDefinition,System.Text.Json.JsonElement,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{Circuit.Core.CircuitSession}
+M:Circuit.MicrosoftAgentFramework.MafRuntime.ExecuteAgentAsync(Circuit.Core.RunId,System.String,Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.String,Microsoft.FSharp.Core.FSharpFunc{System.String,System.Threading.Tasks.Task},Microsoft.FSharp.Core.FSharpFunc{Circuit.Core.ApprovalRequest,System.Threading.Tasks.Task{Circuit.Core.ApprovalResponse}},Microsoft.FSharp.Core.FSharpFunc{Circuit.Core.CircuitSession,System.Threading.Tasks.Task},System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.RunResult{``1}}
+M:Circuit.MicrosoftAgentFramework.MafRuntime.ObserveCircuitAsync(System.Object,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task
+M:Circuit.MicrosoftAgentFramework.MafRuntime.SerializeSessionCoreAsync(Circuit.Core.AgentDefinition,Circuit.Core.CircuitSession,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Text.Json.JsonElement}
 M:Circuit.MicrosoftAgentFramework.MafRuntimeOptions.#ctor()
 M:Circuit.MicrosoftAgentFramework.OpenTelemetryRunObserver.#ctor(Microsoft.FSharp.Core.FSharpOption{Circuit.MicrosoftAgentFramework.OpenTelemetryRunObserverOptions})
 M:Circuit.MicrosoftAgentFramework.OpenTelemetryRunObserverOptions.#ctor()
@@ -12,7 +15,7 @@ M:Circuit.MicrosoftAgentFrameworkRuntimeFactory.CreateClient(Microsoft.Extension
 M:Circuit.ServiceCollectionExtensions.AddCircuit(Microsoft.Extensions.DependencyInjection.IServiceCollection,System.Action{Circuit.CircuitOptions})~Microsoft.Extensions.DependencyInjection.IServiceCollection
 P:Circuit.MicrosoftAgentFramework.MafObservedEvent.Approval~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.ApprovalRequest}
 P:Circuit.MicrosoftAgentFramework.MafObservedEvent.Failure~Microsoft.FSharp.Core.FSharpValueOption{Circuit.Core.CircuitFailure}
-P:Circuit.MicrosoftAgentFramework.MafObservedEvent.Kind~Circuit.Core.RunEventKind
+P:Circuit.MicrosoftAgentFramework.MafObservedEvent.Kind~Circuit.MicrosoftAgentFramework.MafObservedEventKind
 P:Circuit.MicrosoftAgentFramework.MafObservedEvent.OperationId~Microsoft.FSharp.Core.FSharpValueOption{System.String}
 P:Circuit.MicrosoftAgentFramework.MafObservedEvent.RunId~Circuit.Core.RunId
 P:Circuit.MicrosoftAgentFramework.MafObservedEvent.TextDelta~Microsoft.FSharp.Core.FSharpValueOption{System.String}
@@ -50,6 +53,17 @@ T:Circuit.MicrosoftAgentFramework.MafRuntime
 T:Circuit.MicrosoftAgentFramework.MafRuntimeOptions
 T:Circuit.MicrosoftAgentFramework.OpenTelemetryRunObserver
 T:Circuit.MicrosoftAgentFramework.OpenTelemetryRunObserverOptions
+T:Circuit.MicrosoftAgentFramework.MafObservedEventKind
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.ApprovalRequested = 4
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.IntermediateOutput = 7
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.OutputDelta = 1
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.RunCompleted = 8
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.RunFailed = 9
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.RunStarted = 0
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.StepCompleted = 6
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.StepStarted = 5
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.ToolCompleted = 3
+F:Circuit.MicrosoftAgentFramework.MafObservedEventKind.ToolStarted = 2
 T:Circuit.MicrosoftAgentFramework.ToolApprovalContext
 T:Circuit.MicrosoftAgentFrameworkRuntimeFactory
 T:Circuit.ServiceCollectionExtensions

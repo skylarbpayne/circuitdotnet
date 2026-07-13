@@ -1,7 +1,7 @@
-#nullable enable
 F:Circuit.Testing.ScriptedCallKind.Run = 0
 F:Circuit.Testing.ScriptedCallKind.Streaming = 1
 F:Circuit.Testing.ScriptedResponse.Tags.Failure = 3
+F:Circuit.Testing.ScriptedResponse.Tags.ForNode = 6
 F:Circuit.Testing.ScriptedResponse.Tags.OutputJson = 0
 F:Circuit.Testing.ScriptedResponse.Tags.OutputValue = 1
 F:Circuit.Testing.ScriptedResponse.Tags.Stream = 2
@@ -9,20 +9,20 @@ F:Circuit.Testing.ScriptedResponse.Tags.Throw = 4
 F:Circuit.Testing.ScriptedResponse.Tags.WaitForCancellation = 5
 M:Circuit.Testing.RecordingRunObserver.#ctor()
 M:Circuit.Testing.RecordingRunObserver.Clear()~System.Void
-M:Circuit.Testing.RunAssertions.AssertMonotonicSequence(System.Collections.Generic.IEnumerable{Circuit.AgentRunEvent{``0}})~System.Void
-M:Circuit.Testing.RunAssertions.AssertMonotonicSequence(System.Collections.Generic.IEnumerable{Circuit.Core.RunEvent{``0}})~System.Void
 M:Circuit.Testing.RunAssertions.AssertOperationOrder(System.Collections.Generic.IEnumerable{Circuit.Testing.RecordedObserverEvent},System.String[])~System.Void
-M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.AgentRunEvent{``0}},System.Int32)~System.Void
-M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.Core.RunEvent{``0}},System.Int32)~System.Void
 M:Circuit.Testing.RunAssertions.AssertTerminalEventCount(System.Collections.Generic.IEnumerable{Circuit.Testing.RecordedObserverEvent},System.Int32)~System.Void
 M:Circuit.Testing.ScriptedResponseExhaustedException.#ctor(System.String)
 M:Circuit.Testing.ScriptedResponses.Failure(Circuit.Core.CircuitFailure)~Circuit.Testing.ScriptedResponse
+M:Circuit.Testing.ScriptedResponses.ForNode(System.String,Circuit.Testing.ScriptedResponse)~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedResponses.OutputJson(System.String)~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedResponses.OutputValue(System.Object)~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedResponses.Stream(System.Collections.Generic.IEnumerable{System.String})~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedResponses.Throw(System.Exception)~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedResponses.WaitForCancellation()~Circuit.Testing.ScriptedResponse
 M:Circuit.Testing.ScriptedRuntime.#ctor(System.Collections.Generic.IEnumerable{Circuit.Testing.ScriptedResponse})
+M:Circuit.Testing.ScriptedRuntime.DeserializeSessionCoreAsync(Circuit.Core.AgentDefinition,System.Text.Json.JsonElement,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{Circuit.Core.CircuitSession}
+M:Circuit.Testing.ScriptedRuntime.ExecuteAgentAsync(Circuit.Core.RunId,System.String,Circuit.Core.AgentDefinition,Circuit.Core.Signature{``0,``1},``0,Circuit.Core.RunOptions,System.String,Microsoft.FSharp.Core.FSharpFunc{System.String,System.Threading.Tasks.Task},Microsoft.FSharp.Core.FSharpFunc{Circuit.Core.ApprovalRequest,System.Threading.Tasks.Task{Circuit.Core.ApprovalResponse}},Microsoft.FSharp.Core.FSharpFunc{Circuit.Core.CircuitSession,System.Threading.Tasks.Task},System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.Core.RunResult{``1}}
+M:Circuit.Testing.ScriptedRuntime.SerializeSessionCoreAsync(Circuit.Core.AgentDefinition,Circuit.Core.CircuitSession,Circuit.Core.RunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Text.Json.JsonElement}
 M:Circuit.Testing.TestFailures.Create(Circuit.Core.CircuitFailureCode,System.String)~Circuit.Core.CircuitFailure
 M:Circuit.Testing.TestFailures.Create(Circuit.Core.CircuitFailureCode,System.String,System.String,System.String,System.String,System.Exception)~Circuit.Core.CircuitFailure
 P:Circuit.Testing.RecordedCall.AgentId~System.String
@@ -31,6 +31,7 @@ P:Circuit.Testing.RecordedCall.AgentVersion~System.String
 P:Circuit.Testing.RecordedCall.InputJson~System.String
 P:Circuit.Testing.RecordedCall.InputSchemaJson~System.String
 P:Circuit.Testing.RecordedCall.Kind~Circuit.Testing.ScriptedCallKind
+P:Circuit.Testing.RecordedCall.NodePath~System.String
 P:Circuit.Testing.RecordedCall.OptionsJson~System.String
 P:Circuit.Testing.RecordedCall.OutputSchemaJson~System.String
 P:Circuit.Testing.RecordedCall.RunId~System.String
@@ -47,7 +48,10 @@ P:Circuit.Testing.RecordedObserverEvent.RunId~System.String
 P:Circuit.Testing.RecordedObserverEvent.Timestamp~System.DateTimeOffset
 P:Circuit.Testing.RecordingRunObserver.Events~System.Collections.Generic.IReadOnlyList{Circuit.Testing.RecordedObserverEvent}
 P:Circuit.Testing.ScriptedResponse.Failure.Item~Circuit.Core.CircuitFailure
+P:Circuit.Testing.ScriptedResponse.ForNode.nodePathSuffix~System.String
+P:Circuit.Testing.ScriptedResponse.ForNode.response~Circuit.Testing.ScriptedResponse
 P:Circuit.Testing.ScriptedResponse.IsFailure~System.Boolean
+P:Circuit.Testing.ScriptedResponse.IsForNode~System.Boolean
 P:Circuit.Testing.ScriptedResponse.IsOutputJson~System.Boolean
 P:Circuit.Testing.ScriptedResponse.IsOutputValue~System.Boolean
 P:Circuit.Testing.ScriptedResponse.IsStream~System.Boolean
@@ -68,6 +72,7 @@ T:Circuit.Testing.RunAssertions
 T:Circuit.Testing.ScriptedCallKind
 T:Circuit.Testing.ScriptedResponse
 T:Circuit.Testing.ScriptedResponse.Failure
+T:Circuit.Testing.ScriptedResponse.ForNode
 T:Circuit.Testing.ScriptedResponse.OutputJson
 T:Circuit.Testing.ScriptedResponse.OutputValue
 T:Circuit.Testing.ScriptedResponse.Stream

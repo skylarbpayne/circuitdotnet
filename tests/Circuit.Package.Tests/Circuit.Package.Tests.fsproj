@@ -7,7 +7,8 @@
 
   <ItemGroup>
     <Compile Include="SmokeTests.fs" />
-    <Compile Include="PublicApiTests.fs" />
+    <Compile Include="UnifiedPackageTests.fs" />
+    <Compile Include="PublicApiBaselineTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
