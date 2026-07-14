@@ -8,4 +8,5 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("Circuit.MicrosoftAgentFramework.Tests")>]
 [<assembly: InternalsVisibleTo("Circuit.FSharp")>]
 [<assembly: InternalsVisibleTo("Circuit.FSharp.Tests")>]
+[<assembly: InternalsVisibleTo("Circuit.Testing")>]
 do ()

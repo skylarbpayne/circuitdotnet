@@ -1,237 +1,179 @@
-module Circuit.Tutorial.Checkpoints
+module Tutorial
 
 open System
-open System.ComponentModel.DataAnnotations
+open System.Collections.Generic
 open System.IO
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Circuit.Core
 open Circuit.FSharp
-open Circuit.MicrosoftAgentFramework
-open Microsoft.Extensions.AI
-open OpenAI.Chat
 
-[<AllowNullLiteral>]
-type TicketInput() =
-    [<property: Required; StringLength(120, MinimumLength = 3)>]
-    member val Subject = "" with get, set
+type Ticket =
+    { Id: string
+      Review: bool
+      DelayMs: int }
 
-    [<property: Required; StringLength(2000, MinimumLength = 10)>]
-    member val Message = "" with get, set
+type CodeOnlyRuntime() =
+    inherit CircuitRuntime()
 
-[<AllowNullLiteral>]
-type DraftOutput() =
-    [<property: Required; StringLength(500, MinimumLength = 10)>]
-    member val SuggestedReply = "" with get, set
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            _runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        Task.FromException<RunResult<'Output>>(InvalidOperationException("This chapter uses code leaves only."))
 
-let buildDefinition () =
-    let drafter =
-        AgentDefinition.create
-            "support.checkpoint-drafter"
-            "1.0.0"
-            "Response drafter"
-            "Draft a concise and safe response to the support ticket."
+    override _.SerializeSessionCoreAsync(_, _, _runOptions, _) = ValueTask<JsonElement>()
+    override _.DeserializeSessionCoreAsync(_, _, _runOptions, _) = ValueTask<CircuitSession>()
 
-    let signature =
-        Signature.create<TicketInput, DraftOutput>
-            "support.checkpoint-draft"
-            "1.0.0"
-            "Checkpointed support draft"
-            "Return one suggestedReply as structured output."
+let tickets: IReadOnlyList<Ticket> =
+    [| { Id = "ticket-review"
+         Review = true
+         DelayMs = 0 }
+       { Id = "ticket-active"
+         Review = false
+         DelayMs = 3000 } |]
 
-    let draftStep = Workflow.agent "draft.response" drafter signature
+let source =
+    Circuit.keyedItems "checkpoint-tickets" "1.0.0" _.Id (fun (_: unit) -> tickets)
 
-    let reviewStep =
-        Workflow.request "review.response" (fun (draft: DraftOutput) ->
-            ApprovalPrompt.Create("Review drafted response", draft.SuggestedReply))
+let child ticket =
+    if ticket.Review then
+        Circuit.approval "durable-review" "1.0.0" (fun (_: Ticket) ->
+            ApprovalPrompt.Create("Durable review", ticket.Id))
+        |> Circuit.thenStep (
+            Circuit.code "review-result" "1.0.0" (fun context decision ->
+                Task.FromResult(Response.succeed context $"{ticket.Id}:approved={decision.Approved}"))
+        )
+    else
+        Circuit.code "slow-active-lane" "1.0.0" (fun context value ->
+            task {
+                do! Task.Delay(value.DelayMs, context.CancellationToken)
+                return Response.succeed context $"{value.Id}:completed"
+            })
 
-    let decisionStep =
-        Workflow.code "record.decision" (fun _ (response: ApprovalResponse) -> Task.FromResult response.Approved)
+let pipeline =
+    source
+    |> Circuit.thenDynamic "checkpoint-route" "1.0.0" _.Id 2 child
+    |> Circuit.define "active-lane-checkpoint" "1.0.0"
 
-    Workflow.define "support.checkpoint-review" "1.0.0" draftStep
-    |> Workflow.thenStep reviewStep
-    |> Workflow.thenStep decisionStep
+let writeAtomic path (state: JsonElement) =
+    let fullPath = Path.GetFullPath path
+    Directory.CreateDirectory(Path.GetDirectoryName fullPath) |> ignore
+    let temporary = fullPath + $".{Guid.NewGuid():N}.tmp"
 
-let createAsync (runtime: IWorkflowRuntime) path cancellationToken =
+    try
+        File.WriteAllText(temporary, state.GetRawText())
+        File.Move(temporary, fullPath, true)
+    finally
+        if File.Exists temporary then
+            File.Delete temporary
+
+let createAsync runtime path =
     task {
-        let definition = buildDefinition ()
-        let issues = Workflow.validate definition
+        let! run = Circuit.start runtime pipeline () (RunOptions.Default.WithMaxConcurrency(2)) CancellationToken.None
+        let enumerator = run.Events.GetAsyncEnumerator()
 
-        if not (Seq.isEmpty issues) then
-            eprintfn "The checked-in workflow definition is invalid."
-            return 1
-        else
-            let ticket =
-                TicketInput(
-                    Subject = "Password reset email never arrived",
-                    Message = "I requested a password reset twice, but no email has arrived. What should I try next?"
-                )
+        try
+            let mutable paused = false
 
-            let! run = Workflow.start runtime definition ticket WorkflowRunOptions.Default cancellationToken
+            while not paused do
+                let! more = enumerator.MoveNextAsync().AsTask()
 
-            let enumerator = run.Events.GetAsyncEnumerator(cancellationToken)
+                if not more then
+                    failwith "Run ended before the review lane paused."
 
-            try
-                let mutable paused = false
-                let mutable failed = false
+                match enumerator.Current with
+                | ApprovalRequested request ->
+                    printfn "Paused request %s while another lane remains active." request.RequestId
+                    paused <- true
+                | _ -> ()
 
-                while not paused && not failed do
-                    let! moved = enumerator.MoveNextAsync().AsTask()
+            let! checkpoint = run.CreateCheckpointAsync(CancellationToken.None).AsTask()
 
-                    if not moved then
-                        failed <- true
-                    else
-                        match enumerator.Current.Kind with
-                        | RunEventKind.ApprovalRequested -> paused <- true
-                        | RunEventKind.RunFailed -> failed <- true
-                        | _ -> ()
-
-                if failed then
-                    eprintfn "Workflow did not reach the approval checkpoint."
-                    return 1
-                else
-                    let! checkpoint = run.CreateCheckpointAsync(cancellationToken).AsTask()
-                    let fullPath = Path.GetFullPath(path)
-                    let directory = Path.GetDirectoryName(fullPath)
-                    Directory.CreateDirectory(directory) |> ignore
-
-                    let temporaryPath =
-                        Path.Combine(directory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp")
-
-                    try
-                        File.WriteAllText(temporaryPath, checkpoint.Serialize().GetRawText())
-
-                        if not (OperatingSystem.IsWindows()) then
-                            File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead ||| UnixFileMode.UserWrite)
-
-                        File.Move(temporaryPath, fullPath, true)
-                    finally
-                        if File.Exists(temporaryPath) then
-                            File.Delete(temporaryPath)
-
-                    printfn "Checkpoint written atomically to: %s" fullPath
-                    printfn "Stop this process, then use the documented resume command."
-                    return 0
-            finally
-                enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
-                (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
+            if checkpoint.IsSuccess then
+                writeAtomic path (checkpoint.Value.Serialize())
+                printfn "Checkpoint written to %s; start a second process with resume." (Path.GetFullPath path)
+                return 0
+            else
+                eprintfn "%s" checkpoint.Failure.Message
+                return 1
+        finally
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
     }
 
-let resumeAsync (runtime: IWorkflowRuntime) path approved cancellationToken =
+let resumeAsync runtime path approved =
     task {
-        let fullPath = Path.GetFullPath(path)
+        let fullPath = Path.GetFullPath path
 
-        if not (File.Exists(fullPath)) then
-            eprintfn "Checkpoint file not found: %s" fullPath
-            return 2
-        elif FileInfo(fullPath).Length > 1_048_576L then
-            eprintfn "Checkpoint exceeds this tutorial's 1 MiB input limit."
+        if not (File.Exists fullPath) then
+            eprintfn "Checkpoint not found: %s" fullPath
             return 2
         else
             try
+                use document = JsonDocument.Parse(File.ReadAllText fullPath)
+                let checkpoint = CircuitCheckpoint<string>.Deserialize(document.RootElement)
+                let! run = Circuit.resume runtime pipeline checkpoint ResumeOptions.Default CancellationToken.None
+                let enumerator = run.Events.GetAsyncEnumerator()
+
                 try
-                    use document = JsonDocument.Parse(File.ReadAllText(fullPath))
-                    let checkpoint = WorkflowCheckpoint<bool>.Deserialize(document.RootElement)
-                    let definition = buildDefinition ()
-                    let issues = Workflow.validate definition
+                    let mutable terminal = false
+                    let mutable failed = false
 
-                    if not (Seq.isEmpty issues) then
-                        eprintfn "The checked-in workflow definition is invalid."
-                        return 1
-                    else
-                        let! run = Workflow.resume runtime definition checkpoint cancellationToken
-                        let enumerator = run.Events.GetAsyncEnumerator(cancellationToken)
+                    while not terminal do
+                        let! more = enumerator.MoveNextAsync().AsTask()
 
-                        try
-                            let mutable terminal = false
-                            let mutable exitCode = 1
+                        if not more then
+                            terminal <- true
+                        else
+                            match enumerator.Current with
+                            | ApprovalRequested request ->
+                                printfn "Restored approval %s from the serialized checkpoint." request.RequestId
 
-                            while not terminal do
-                                let! moved = enumerator.MoveNextAsync().AsTask()
+                                let! accepted =
+                                    run
+                                        .RespondAsync(
+                                            ApprovalResponse(request.RequestId, approved, "second process"),
+                                            CancellationToken.None
+                                        )
+                                        .AsTask()
 
-                                if not moved then
-                                    terminal <- true
-                                else
-                                    let event = enumerator.Current
+                                if not accepted.IsSuccess then
+                                    failed <- true
+                            | OutputProduced(_, response) when response.IsSuccess -> printfn "%s" response.Value
+                            | RunCompleted response ->
+                                failed <- failed || not response.IsSuccess
+                                terminal <- true
+                            | _ -> ()
 
-                                    match event.Kind with
-                                    | RunEventKind.ApprovalRequested ->
-                                        let request = event.Approval.Value
-                                        printfn "Restored the pending review; checkpoint contents are not displayed."
-
-                                        do!
-                                            run
-                                                .RespondAsync(
-                                                    ApprovalResponse(
-                                                        request.RequestId,
-                                                        approved,
-                                                        "tutorial operator decision"
-                                                    ),
-                                                    cancellationToken
-                                                )
-                                                .AsTask()
-                                    | RunEventKind.RunCompleted ->
-                                        printfn
-                                            "Resumed workflow completed: %s"
-                                            (if event.Value.Value then "approved" else "rejected")
-
-                                        exitCode <- 0
-                                        terminal <- true
-                                    | RunEventKind.RunFailed ->
-                                        let failure = event.Failure.Value
-                                        eprintfn "Resume failed (%O): %s" failure.Code failure.Message
-                                        terminal <- true
-                                    | _ -> ()
-
-                            return exitCode
-                        finally
-                            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
-                            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
-                with
-                | :? JsonException
-                | :? ArgumentException ->
-                    eprintfn "The checkpoint envelope is malformed, unsupported, or incompatible."
-                    return 1
+                    return if failed then 1 else 0
+                finally
+                    enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+                    (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
             finally
-                if File.Exists(fullPath) then
-                    File.Delete(fullPath)
+                if File.Exists fullPath then
+                    File.Delete fullPath
     }
 
 [<EntryPoint>]
 let main args =
-    let command =
-        match args with
-        | [| "create"; path |] -> Some(path, None)
-        | [| "resume"; path; "--approve" |] -> Some(path, Some true)
-        | [| "resume"; path; "--reject" |] -> Some(path, Some false)
-        | _ -> None
+    let runtime = CodeOnlyRuntime() :> ICircuitRuntime
 
-    let apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-    let model = Environment.GetEnvironmentVariable("OPENAI_MODEL")
-
-    match command with
-    | None ->
+    match args with
+    | [| "create"; path |] -> createAsync runtime path |> _.GetAwaiter().GetResult()
+    | [| "resume"; path; "--approve" |] -> resumeAsync runtime path true |> _.GetAwaiter().GetResult()
+    | [| "resume"; path; "--reject" |] -> resumeAsync runtime path false |> _.GetAwaiter().GetResult()
+    | _ ->
         eprintfn "Usage: create <path> | resume <path> --approve|--reject"
         2
-    | Some _ when String.IsNullOrWhiteSpace(apiKey) || String.IsNullOrWhiteSpace(model) ->
-        eprintfn "Set OPENAI_API_KEY and OPENAI_MODEL before running this chapter."
-        2
-    | Some(path, decision) ->
-        try
-            let openAiClient = ChatClient(model, apiKey)
-            use chatClient = openAiClient.AsIChatClient()
-            let runtime = MafRuntime(chatClient, MafRuntimeOptions()) :> IWorkflowRuntime
-            use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60.0))
-
-            match decision with
-            | None -> createAsync runtime path timeout.Token
-            | Some approved -> resumeAsync runtime path approved timeout.Token
-            |> fun work -> work.GetAwaiter().GetResult()
-        with
-        | :? OperationCanceledException ->
-            eprintfn "The workflow timed out or was cancelled."
-            1
-        | _ ->
-            eprintfn "Configuration, provider, checkpoint, or workflow operation failed."
-            1

@@ -47,15 +47,13 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                 Message = "I requested a reset twice. What should I try next?"
             )
 
-        let stream =
-            runtime.RunStreamingAsync(agent, signature, ticket, RunOptions.Default, cancellationToken)
-
-        let enumerator = stream.GetAsyncEnumerator(cancellationToken)
-        let mutable lastSequence = -1L
+        let definition = Circuit.agent agent signature
+        let! run = Circuit.start runtime definition ticket RunOptions.Default cancellationToken
+        let enumerator = run.Events.GetAsyncEnumerator(cancellationToken)
         let mutable terminalCount = 0
         let mutable deltaCharacters = 0
-        let mutable completedOutput = ValueNone
-        let mutable failure = ValueNone
+        let mutable completedOutput: Response<TicketOutput> voption = ValueNone
+        let mutable failure: CircuitFailure voption = ValueNone
 
         try
             let mutable keepReading = true
@@ -66,30 +64,23 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                 if not hasEvent then
                     keepReading <- false
                 else
-                    let event = enumerator.Current
-
-                    if event.Sequence <= lastSequence then
-                        invalidOp "The runtime emitted a non-monotonic event sequence."
-
-                    lastSequence <- event.Sequence
-
-                    match event.Kind with
-                    | RunEventKind.OutputDelta ->
-                        match event.TextDelta with
-                        | ValueSome delta ->
-                            // Deltas can contain customer data, so report only progress here.
-                            deltaCharacters <- deltaCharacters + delta.Length
-                            printf "."
-                        | ValueNone -> ()
-                    | RunEventKind.RunCompleted ->
+                    match enumerator.Current with
+                    | OutputDelta delta ->
+                        deltaCharacters <- deltaCharacters + delta.Text.Length
+                        printf "."
+                    | OutputProduced(_, response) -> completedOutput <- ValueSome response
+                    | RunCompleted response ->
                         terminalCount <- terminalCount + 1
-                        completedOutput <- event.Value
-                    | RunEventKind.RunFailed ->
-                        terminalCount <- terminalCount + 1
-                        failure <- event.Failure
+
+                        match response.Outcome with
+                        | Failed problem -> failure <- ValueSome problem
+                        | Succeeded _ -> ()
+
+                        keepReading <- false
                     | _ -> ()
         finally
-            do enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
+            (run :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
         printfn "\nReceived %d provider-variable delta characters." deltaCharacters
 
@@ -98,10 +89,17 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
             return 1
         else
             match completedOutput, failure with
-            | ValueSome output, _ ->
-                printfn "Category: %s" output.Category
-                printfn "Suggested reply: %s" output.SuggestedReply
+            | ValueSome response, _ when response.IsSuccess ->
+                printfn "Category: %s" response.Value.Category
+                printfn "Suggested reply: %s" response.Value.SuggestedReply
                 return 0
+            | ValueSome response, _ ->
+                eprintfn
+                    "Circuit could not complete the request (%O): %s"
+                    response.Failure.Code
+                    response.Failure.Message
+
+                return 1
             | _, ValueSome problem ->
                 eprintfn "Circuit could not complete the request (%O): %s" problem.Code problem.Message
                 return 1

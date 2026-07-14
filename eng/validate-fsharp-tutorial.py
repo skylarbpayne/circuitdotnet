@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -24,9 +25,9 @@ CHAPTERS = (
     ("08-tools", "Tools.fsproj", "Program.fs"),
     ("09-approvals", "Approvals.fsproj", "Program.fs"),
     ("10-skills", "Skills.fsproj", "Program.fs"),
-    ("11-circuit-programs", "CircuitPrograms.fsproj", "Program.fs"),
+    ("11-circuit-programs", "CircuitComposition.fsproj", "Program.fs"),
     ("12-parallel-programs", "ParallelPrograms.fsproj", "Program.fs"),
-    ("13-workflows", "Workflows.fsproj", "Program.fs"),
+    ("13-workflows", "Pipelines.fsproj", "Program.fs"),
     ("14-human-review", "HumanReview.fsproj", "Program.fs"),
     ("15-checkpoints", "Checkpoints.fsproj", "Program.fs"),
     ("16-testing", "Testing.fsproj", "Tests.fs"),
@@ -192,7 +193,32 @@ def main() -> int:
     if extra_source:
         errors.append("shared or unexpected tutorial source: " + ", ".join(str(path.relative_to(ROOT)) for path in extra_source))
 
-    scan_files = list(DOCS_ROOT.rglob("*.md")) + [path for path in tutorial_files if path.suffix == ".fs"]
+    source_hashes: dict[str, list[str]] = {}
+    for slug, _, source_name in CHAPTERS:
+        source = TUTORIAL_ROOT / slug / source_name
+        if source.is_file():
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            source_hashes.setdefault(digest, []).append(slug)
+    duplicates = [slugs for slugs in source_hashes.values() if len(slugs) > 1]
+    if duplicates:
+        errors.append("tutorial chapters must progress rather than duplicate source: " + repr(duplicates))
+
+    capability_markers = {
+        "11-circuit-programs": ("Circuit.thenStep", "Circuit.run"),
+        "12-parallel-programs": ("Circuit.keyedItems", "WithMaxConcurrency", "completion-handoff"),
+        "13-workflows": ("Circuit.thenDynamic", "Circuit.collectSourceOrder", "Circuit.stream", "Circuit.start"),
+        "14-human-review": ("Circuit.approval", "RespondAsync", "single-use"),
+        "15-checkpoints": ("CircuitCheckpoint", ".Serialize()", "Circuit.resume", '"create"', '"resume"'),
+        "16-testing": ("ScriptedRuntime", "ScriptedResponses.ForNode", "Circuit.thenDynamic"),
+    }
+    for slug, markers in capability_markers.items():
+        source_name = next(source for chapter, _, source in CHAPTERS if chapter == slug)
+        content = (TUTORIAL_ROOT / slug / source_name).read_text(encoding="utf-8")
+        missing = [marker for marker in markers if marker not in content]
+        if missing:
+            errors.append(f"{slug} is missing required progressive capability markers: {missing}")
+
+    scan_files = list(DOCS_ROOT.rglob("*.md")) + [ROOT / "docs" / "getting-started" / "fsharp.md"] + [path for path in tutorial_files if path.suffix == ".fs"]
     package_command = re.compile(
         r"^\s*(?:\$\s*)?dotnet\s+add\s+package\s+CircuitDotNet(?:\.|\b)",
         re.IGNORECASE | re.MULTILINE,
@@ -203,8 +229,11 @@ def main() -> int:
         r"\s*(?:=|:)\s*[\"']([^\"']+)[\"']"
     )
     harmless = re.compile(r"^(?:your[-_ ]|<|example|placeholder|redacted|not-set)", re.IGNORECASE)
+    stale_api = re.compile(r"\bAgent\.(?:run|start)\b|\bCircuit\.call\b|\bcircuit\s*\{|\bI(?:InteractiveCircuitRuntime|WorkflowRuntime)\b|\bWorkflow(?:Definition|Checkpoint|RunOptions)\b|\bWorkflow\.")
     for path in scan_files:
         content = path.read_text(encoding="utf-8")
+        if stale_api.search(content):
+            errors.append(f"{path.relative_to(ROOT)} teaches a removed execution API")
         if package_command.search(content):
             errors.append(f"{path.relative_to(ROOT)} presents an unpublished CircuitDotNet package command")
         for match in openai_credential.finditer(content):

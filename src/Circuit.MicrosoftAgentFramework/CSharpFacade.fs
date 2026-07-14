@@ -32,7 +32,7 @@ module internal CSharpFacadeAdapters =
             | null -> ()
             | jsonOptions ->
                 let snapshot = JsonSerializerOptions(jsonOptions)
-                snapshot.MakeReadOnly()
+                snapshot.MakeReadOnly(populateMissingResolver = true)
                 runtimeOptions.JsonSerializerOptions <- snapshot
 
             runtimeOptions.SecondaryStructuredOutputClient <- toValueOption options.SecondaryStructuredOutputClient
@@ -91,44 +91,10 @@ type MicrosoftAgentFrameworkRuntimeFactory private () =
 type private DefaultMafRuntime(runtime: Circuit.Core.ICircuitRuntime) =
     member _.Runtime = runtime
 
-type private UnsupportedWorkflowRuntime(message: string) =
-    let unsupported () = invalidOp message
-
-    interface Circuit.Core.IWorkflowRuntime with
-        member _.RunAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                input: 'Input,
-                options: WorkflowRunOptions,
-                cancellationToken: CancellationToken
-            ) : Task<RunResult<'Output>> =
-            unsupported ()
-
-        member _.StartAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                input: 'Input,
-                options: WorkflowRunOptions,
-                cancellationToken: CancellationToken
-            ) : Task<WorkflowRun<'Output>> =
-            unsupported ()
-
-        member _.ResumeAsync<'Input, 'Output>
-            (
-                definition: WorkflowDefinition<'Input, 'Output>,
-                checkpoint: WorkflowCheckpoint<'Output>,
-                cancellationToken: CancellationToken
-            ) : Task<WorkflowRun<'Output>> =
-            unsupported ()
-
 module private AddCircuitServiceRegistration =
     [<Literal>]
     let MissingChatClientMessage =
         "AddCircuit requires an IChatClient singleton to be registered when no ICircuitRuntime is supplied."
-
-    [<Literal>]
-    let UnsupportedWorkflowRuntimeMessage =
-        "The registered Circuit runtime does not support workflows. Register an IWorkflowRuntime to enable workflow operations."
 
     let createDefaultRuntime (serviceProvider: IServiceProvider) =
         let chatClient = serviceProvider.GetService(typeof<IChatClient>) :?> IChatClient
@@ -151,19 +117,10 @@ module private AddCircuitServiceRegistration =
 
         DefaultMafRuntime(runtime :> Circuit.Core.ICircuitRuntime)
 
-    let createWorkflowRuntime (serviceProvider: IServiceProvider) =
-        match serviceProvider.GetRequiredService<Circuit.Core.ICircuitRuntime>() with
-        | :? Circuit.Core.IWorkflowRuntime as workflowRuntime -> workflowRuntime
-        | _ -> UnsupportedWorkflowRuntime(UnsupportedWorkflowRuntimeMessage) :> Circuit.Core.IWorkflowRuntime
-
-/// Extension methods for registering the high-level Circuit client abstractions.
+/// Extension methods for registering the unified Circuit runtime and client.
 [<AbstractClass; Sealed; Extension>]
 type ServiceCollectionExtensions private () =
-    /// Registers <see cref="T:Circuit.ICircuitClient" />, <see cref="T:Circuit.IAgentClient" />, and <see cref="T:Circuit.IWorkflowClient" />.
-    /// <remarks>
-    /// If no <see cref="T:Circuit.Core.ICircuitRuntime" /> is already registered, this method creates a default
-    /// <see cref="T:Circuit.MicrosoftAgentFramework.MafRuntime" /> from the configured <see cref="T:Microsoft.Extensions.AI.IChatClient" />.
-    /// </remarks>
+    /// Registers one <see cref="T:Circuit.Core.ICircuitRuntime" /> and <see cref="T:Circuit.ICircuitClient" />.
     [<Extension>]
     static member AddCircuit(services: IServiceCollection, configure: Action<Circuit.CircuitOptions>) =
         if isNull (box services) then
@@ -175,7 +132,6 @@ type ServiceCollectionExtensions private () =
         let circuitOptions = Circuit.CircuitOptions()
         configure.Invoke(circuitOptions)
         let snapshot = circuitOptions.Snapshot()
-
         services.TryAddSingleton<Circuit.CircuitOptions>(snapshot) |> ignore
 
         services.TryAddSingleton<DefaultMafRuntime>(fun serviceProvider ->
@@ -186,23 +142,8 @@ type ServiceCollectionExtensions private () =
             serviceProvider.GetRequiredService<DefaultMafRuntime>().Runtime)
         |> ignore
 
-        services.TryAddSingleton<Circuit.Core.IWorkflowRuntime>(fun serviceProvider ->
-            AddCircuitServiceRegistration.createWorkflowRuntime serviceProvider)
-        |> ignore
-
         services.TryAddSingleton<Circuit.ICircuitClient>(fun serviceProvider ->
-            CircuitClientFactory.Create(
-                serviceProvider.GetRequiredService<Circuit.Core.ICircuitRuntime>(),
-                serviceProvider.GetRequiredService<Circuit.Core.IWorkflowRuntime>()
-            ))
-        |> ignore
-
-        services.TryAddSingleton<Circuit.IAgentClient>(fun serviceProvider ->
-            serviceProvider.GetRequiredService<Circuit.ICircuitClient>() :> Circuit.IAgentClient)
-        |> ignore
-
-        services.TryAddSingleton<Circuit.IWorkflowClient>(fun serviceProvider ->
-            serviceProvider.GetRequiredService<Circuit.ICircuitClient>() :> Circuit.IWorkflowClient)
+            CircuitClientFactory.Create(serviceProvider.GetRequiredService<Circuit.Core.ICircuitRuntime>()))
         |> ignore
 
         services

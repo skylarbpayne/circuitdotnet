@@ -58,10 +58,9 @@ module private OpenTelemetryRunObserverInternals =
     let ToolDuration =
         TelemetryContracts.Meter.CreateHistogram<double>("circuit.tool.duration", "s")
 
-    let WorkflowSteps =
-        TelemetryContracts.Meter.CreateCounter<int64>("circuit.workflow.steps")
+    let Nodes = TelemetryContracts.Meter.CreateCounter<int64>("circuit.workflow.steps")
 
-    let WorkflowStepDuration =
+    let NodeDuration =
         TelemetryContracts.Meter.CreateHistogram<double>("circuit.workflow.step.duration", "s")
 
     let ValidationFailures =
@@ -176,9 +175,9 @@ type OpenTelemetryRunObserver(?options: OpenTelemetryRunObserverOptions) =
         | RunOperationKind.Tool ->
             OpenTelemetryRunObserverInternals.Tools.Add(1L, metricTags)
             OpenTelemetryRunObserverInternals.ToolDuration.Record(duration, metricTags)
-        | RunOperationKind.WorkflowStep ->
-            OpenTelemetryRunObserverInternals.WorkflowSteps.Add(1L, metricTags)
-            OpenTelemetryRunObserverInternals.WorkflowStepDuration.Record(duration, metricTags)
+        | RunOperationKind.Node ->
+            OpenTelemetryRunObserverInternals.Nodes.Add(1L, metricTags)
+            OpenTelemetryRunObserverInternals.NodeDuration.Record(duration, metricTags)
         | _ -> ()
 
         if isNull failure then

@@ -33,7 +33,7 @@ Both variables are preflight requirements for every mode, and there is no model 
 
 [!code-fsharp](../../tutorials/fsharp/03-validation/Program.fs)
 
-`Required` rejects missing or empty strings. `StringLength` now supplies both minimum and maximum lengths. The same annotation mechanism contributes constraints to the provider schema and validates the decoded output locally. The invalid branch changes only the input values; it still calls the public `Agent.run` path, whose ordering guarantees input validation before provider execution.
+`Required` rejects missing or empty strings. `StringLength` now supplies both minimum and maximum lengths. The same annotation mechanism contributes constraints to the provider schema and validates the decoded output locally. The invalid branch changes only the input values; it still calls the public `Circuit.run over Circuit.agent` path, whose ordering guarantees input validation before provider execution.
 
 ## Run it
 

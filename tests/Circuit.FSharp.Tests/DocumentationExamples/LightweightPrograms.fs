@@ -1,29 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.LightweightPrograms
 
-open System.ComponentModel.DataAnnotations
+open System.Threading
 open Circuit.Core
 open Circuit.FSharp
 
-[<AllowNullLiteral>]
-type Classification() =
-    [<property: Required>]
-    member val Category = "" with get, set
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-lightweightprograms" "1.0.0"
 
-[<AllowNullLiteral>]
-type Summary() =
-    [<property: Required>]
-    member val Text = "" with get, set
-
-module LightweightProgramsExample =
-    let agent =
-        AgentDefinition.create "triage.agent" "1.0.0" "Triage" "Classify the input."
-
-    let signature =
-        Signature.create<string, Classification> "triage.signature" "1.0.0" "Triage" "Return only the classification."
-
-    let program =
-        circuit {
-            let! classification = Circuit.call agent signature "A billing ticket"
-
-            return Summary(Text = $"Category={classification.Category}")
-        }
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

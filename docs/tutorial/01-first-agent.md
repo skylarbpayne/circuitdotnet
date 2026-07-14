@@ -61,7 +61,7 @@ A few F# details may be new even if you know the basics:
 
 - `member val Subject = "" with get, set` defines a mutable .NET property. The JSON serializer and data-annotation validator can read and populate these contract properties.
 - `task { ... }` builds an asynchronous .NET `Task` while letting the code use `let!` for asynchronous results.
-- `:> ICircuitRuntime` explicitly upcasts `MafRuntime` to the runtime interface expected by `Agent.run`.
+- `:> ICircuitRuntime` explicitly upcasts `MafRuntime` to the runtime interface expected by `Circuit.run over Circuit.agent`.
 - `GetAwaiter().GetResult()` is the small console application's bridge from its synchronous entry point into `runAsync`. Application code that is already asynchronous should use `let!` or `do!` instead.
 
 ## Run it

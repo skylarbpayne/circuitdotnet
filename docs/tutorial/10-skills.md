@@ -69,4 +69,4 @@ Change the inline guidance to require replies under two sentences, increment the
 - Inline, script-free sources keep this chapter's capability narrow.
 - Script execution requires an explicit trusted runner and is not sandboxed.
 
-Next, compose multiple typed calls into a lightweight `circuit {}` program.
+Next, compose multiple typed calls into a lightweight graph-backed Circuit composition program.

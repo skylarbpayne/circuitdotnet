@@ -3,6 +3,7 @@
 namespace Circuit.MicrosoftAgentFramework
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 open System.Text.Json
@@ -420,11 +421,27 @@ type internal CircuitResolvedToolFunction
     let emptyAdditionalProperties =
         Dictionary<string, obj>(StringComparer.Ordinal) :> IReadOnlyDictionary<string, obj>
 
+    let invocationOccurrences =
+        ConcurrentDictionary<string, int64>(StringComparer.Ordinal)
+
     do jsonOptions.MakeReadOnly()
 
-    member private _.CreateToolContext(cancellationToken: CancellationToken) =
+    member private _.CreateToolContext
+        (toolName: string, invocationIdentity: string, occurrence: int64, cancellationToken: CancellationToken)
+        =
+        let operationKey =
+            let bytes =
+                Text.Encoding.UTF8.GetBytes(
+                    $"{runContext.IdempotencyKey}|tool|{toolName}|invocation|{invocationIdentity}|occurrence|{occurrence}"
+                )
+
+            Security.Cryptography.SHA256.HashData(bytes)
+            |> Convert.ToHexString
+            |> _.ToLowerInvariant()
+
         ToolContext(
             runContext.RunId,
+            operationKey,
             runContext.Options.TenantId,
             runContext.Options.UserId,
             runContext.Options.Services,
@@ -477,6 +494,29 @@ type internal CircuitResolvedToolFunction
             ValueSome(JsonSerializer.Serialize(arguments, jsonOptions))
         with _ ->
             ValueNone
+
+    member private _.StableInvocationIdentity(arguments: AIFunctionArguments) =
+        let rec canonical (element: JsonElement) =
+            match element.ValueKind with
+            | JsonValueKind.Object ->
+                element.EnumerateObject()
+                |> Seq.sortBy _.Name
+                |> Seq.map (fun property -> $"{JsonSerializer.Serialize(property.Name)}:{canonical property.Value}")
+                |> String.concat ","
+                |> fun body -> "{" + body + "}"
+            | JsonValueKind.Array ->
+                element.EnumerateArray()
+                |> Seq.map canonical
+                |> String.concat ","
+                |> fun body -> "[" + body + "]"
+            | _ -> element.GetRawText()
+
+        let payload = JsonSerializer.SerializeToElement(arguments, jsonOptions) |> canonical
+        let bytes = Text.Encoding.UTF8.GetBytes($"{tool.Name.Value}|{payload}")
+
+        Security.Cryptography.SHA256.HashData(bytes)
+        |> Convert.ToHexString
+        |> _.ToLowerInvariant()
 
     member private _.CreateObserverFailure (operationId: string) (ex: exn) =
         match ex with
@@ -540,9 +580,17 @@ type internal CircuitResolvedToolFunction
 
     override this.InvokeCoreAsync(arguments: AIFunctionArguments, cancellationToken: CancellationToken) =
         task {
+            let invocationIdentity = this.StableInvocationIdentity(arguments)
+
+            // Occurrences are counted within one semantic argument identity. Distinct concurrent
+            // calls therefore do not depend on scheduling order; identical calls produce the same
+            // deterministic key set regardless of which indistinguishable call wins the race.
+            let occurrence =
+                invocationOccurrences.AddOrUpdate(invocationIdentity, 1L, fun _ current -> current + 1L)
+
             let operationId =
                 this.TryGetOperationId(arguments)
-                |> ValueOption.defaultWith (fun () -> $"{tool.Name.Value}:{Guid.NewGuid():N}")
+                |> ValueOption.defaultValue $"{tool.Name.Value}:invocation-{occurrence}"
 
             do!
                 MafObserver.notifyToolStartedAsync
@@ -566,7 +614,16 @@ type internal CircuitResolvedToolFunction
                 let! output =
                     task {
                         try
-                            return! tool.InvokeAsync(this.CreateToolContext(cancellationToken), input)
+                            return!
+                                tool.InvokeAsync(
+                                    this.CreateToolContext(
+                                        tool.Name.Value,
+                                        invocationIdentity,
+                                        occurrence,
+                                        cancellationToken
+                                    ),
+                                    input
+                                )
                         with
                         | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
                             return raise (OperationCanceledException(cancellationToken))

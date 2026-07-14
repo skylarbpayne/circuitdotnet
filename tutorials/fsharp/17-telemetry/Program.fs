@@ -50,10 +50,10 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                 Message = "I requested a password reset twice, but no email has arrived."
             )
 
-        let! runResult = Agent.run runtime agent signature ticket RunOptions.Default cancellationToken
+        let! runResult = Circuit.run runtime (Circuit.agent agent signature) ticket RunOptions.Default cancellationToken
 
-        if runResult.Result.IsSuccess then
-            let output = runResult.Result.Value
+        if runResult.IsSuccess then
+            let output = runResult.Value
 
             printfn
                 "Run succeeded. Category: %s; suggested reply length: %d"
@@ -62,7 +62,7 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
 
             return 0
         else
-            let failure = runResult.Result.Failure
+            let failure = runResult.Failure
             eprintfn "Circuit could not complete the request (%O): %s" failure.Code failure.Message
             return 1
     }

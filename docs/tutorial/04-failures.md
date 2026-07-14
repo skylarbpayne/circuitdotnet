@@ -9,7 +9,7 @@ You will convert every `CircuitFailureCode` into a short, safe application messa
 A structured failure separates application control flow from sensitive diagnostics. Code can decide whether a failure is validation, provider, decode, cancellation, or another Circuit boundary without parsing exception text.
 
 ```text
-RunResult
+Response<TicketOutput>
   |-- success -> TicketOutput
   `-- failure -> CircuitFailureCode -> safe application message
 ```
@@ -34,9 +34,9 @@ There is no embedded key or model default. Select a structured-output-capable mo
 
 [!code-fsharp](../../tutorials/fsharp/04-failures/Program.fs)
 
-`printFailure` covers validation, unsupported structured output, decode, provider, tool, approval, skill, workflow, checkpoint mismatch, and cancellation codes. Its final branch keeps the application safe if a newer runtime supplies an unfamiliar numeric enum value. The function deliberately does not print `failure.Exception`, request IDs, operation IDs, or provider payloads.
+`printFailure` covers all 16 current codes: validation, unsupported structured output, decode, provider, tool, approval, skill, engine, checkpoint mismatch, cancellation, checkpointability, cardinality, duplicate keys, resource limits, generated-graph integrity, and invalid approval responses. Its final branch keeps the application safe if a newer runtime supplies an unfamiliar numeric enum value. The function deliberately does not print `failure.Exception`, request IDs, operation IDs, or provider payloads.
 
-The `--cancel` branch passes an already-cancelled token. Circuit reports cancellation through `RunResult` for expected runtime cancellation; the outer exception handler remains a fixed safety net for startup or adapter exceptions.
+The `--cancel` branch passes an already-cancelled token. Circuit reports cancellation through a failed `Response<'T>` for expected runtime cancellation; the outer exception handler remains a fixed safety net for startup or adapter exceptions.
 
 ## Run it
 
@@ -91,7 +91,7 @@ Change only the safe `CircuitFailureCode.Provider` message to recommend contacti
 
 ## Recap and next step
 
-- `RunResult` makes success and structured failure explicit.
+- `Response<'T>` makes success and structured failure explicit.
 - Every current failure code maps to deliberate application behavior.
 - Raw exceptions, identifiers, and provider content do not belong in ordinary user output.
 

@@ -1,15 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.Workflows
 
 open System.Threading
-open System.Threading.Tasks
 open Circuit.Core
+open Circuit.FSharp
 
-module WorkflowsExample =
-    let approvalFlow =
-        Workflow.request "manager.approval" (fun approved ->
-            ApprovalPrompt.Create($"Approve {approved}", "A human must approve before completion."))
-        |> Workflow.define "approval.workflow" "1.0.0"
-        |> Workflow.thenStep (Workflow.code "decision" (fun _ response -> Task.FromResult response.Approved))
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-workflows" "1.0.0"
 
-    let start (runtime: IWorkflowRuntime) =
-        Workflow.start runtime approvalFlow 42 WorkflowRunOptions.Default CancellationToken.None
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

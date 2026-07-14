@@ -8,16 +8,16 @@ Circuit gives you:
 - native structured output with optional single-pass repair;
 - dynamic tools with explicit approval boundaries;
 - skills as versioned instruction bundles;
-- F# lightweight programs and workflow composition;
-- Microsoft Agent Framework runtime integration;
+- immutable graph-backed Circuits with pipelining, branching, approvals, and checkpoints;
+- one Core-owned scheduler with Microsoft Agent Framework as an agent-leaf adapter;
 - testing helpers for deterministic examples and assertions;
 - OpenTelemetry observer hooks with explicit redaction controls.
 
 ## Packages
 
 - `CircuitDotNet` — primary C# entry point.
-- `CircuitDotNet.FSharp` — F# helpers and the `circuit` computation expression.
-- `CircuitDotNet.Core` — runtime-neutral contracts and workflow primitives.
+- `CircuitDotNet.FSharp` — F# graph composition and execution projections.
+- `CircuitDotNet.Core` — runtime-neutral graph, response, event, scheduler, and checkpoint contracts.
 - `CircuitDotNet.MicrosoftAgentFramework` — MAF adapter, DI helpers, and OpenTelemetry observer.
 - `CircuitDotNet.Testing` — scripted runtimes and assertion helpers.
 
@@ -59,13 +59,9 @@ The repository includes offline ticket-triage samples in both languages.
 - `mise exec dotnet@10.0.301 -- dotnet run --project samples/TicketTriage.CSharp`
 - `mise exec dotnet@10.0.301 -- dotnet run --project samples/TicketTriage.FSharp`
 
-Add `--live` to load an environment-supplied `IChatClient` plugin through:
-
-- `CIRCUIT_SAMPLE_CHAT_CLIENT_FACTORY_ASSEMBLY`
-- `CIRCUIT_SAMPLE_CHAT_CLIENT_FACTORY_TYPE`
-- optional `CIRCUIT_SAMPLE_MODEL_ID`
-
-Add `--otel` to enable console OpenTelemetry export in live mode.
+Both commands are deterministic and ignore provider credentials. Live provider, tool, skill, session,
+approval, telemetry, and provider-switching setup is taught progressively in the 18 runnable F# tutorial
+chapters instead of being hidden behind sample-only command-line switches.
 
 ## Current scope
 
@@ -77,5 +73,5 @@ Circuit does not currently promise:
 
 - provider portability across untested live providers;
 - sandboxing for skill scripts or tool handlers;
-- automatic retries, compensation, or durable orchestration outside explicit workflow checkpoints;
+- automatic retries, compensation, or durable orchestration outside explicit Circuit checkpoints;
 - backwards-compatible session or checkpoint restoration across incompatible definition changes.

@@ -12,7 +12,7 @@ Approval changes the tool flow into a protocol:
 model requests tool -> ApprovalRequested -> host decision -> continue -> terminal event
 ```
 
-`Agent.start` requires `IInteractiveCircuitRuntime` and returns a live `AgentRun`. Its request identifier is opaque and single-use. The host responds to that exact request on the same handle, then keeps enumerating.
+`Circuit.start` requires `ICircuitRuntime` and returns a live `CircuitRun`. Its request identifier is opaque and single-use. The host responds to that exact request on the same handle, then keeps enumerating.
 
 Circuit models a pause; it does not identify, authenticate, or authorize the operator. The host owns identity, authorization, policy, audit, and user experience. Tool arguments may contain customer secrets, so this sample never prints `ArgumentsJson`.
 

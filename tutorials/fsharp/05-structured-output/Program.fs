@@ -47,15 +47,15 @@ let runAsync (runtime: ICircuitRuntime) runOptions cancellationToken =
                 Message = "I requested a password reset twice, but no email has arrived. What should I try next?"
             )
 
-        let! runResult = Agent.run runtime agent signature ticket runOptions cancellationToken
+        let! runResult = Circuit.run runtime (Circuit.agent agent signature) ticket runOptions cancellationToken
 
-        if runResult.Result.IsSuccess then
-            let output = runResult.Result.Value
+        if runResult.IsSuccess then
+            let output = runResult.Value
             printfn "Category: %s" output.Category
             printfn "Suggested reply: %s" output.SuggestedReply
             return 0
         else
-            let failure = runResult.Result.Failure
+            let failure = runResult.Failure
             eprintfn "Circuit could not complete the request (%O): %s" failure.Code failure.Message
             return 1
     }

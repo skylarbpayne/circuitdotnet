@@ -9,10 +9,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="LegacyTestProjections.fs" />
     <Compile Include="MafRuntimeTests.fs" />
     <Compile Include="AdapterCoverageTests.fs" />
-    <Compile Include="WorkflowRuntimeTests.fs" />
     <Compile Include="MoreCoverageTests.fs" />
+    <Compile Include="UnifiedRuntimeTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

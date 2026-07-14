@@ -1,39 +1,11 @@
-# Lightweight programs
+# Composing Circuit graphs
 
-Lightweight programs are the F# `circuit` computation expression. They help you compose several local steps and agent calls without moving into the heavier workflow runtime.
+Circuit uses one immutable graph model rather than a separate function-backed program representation.
 
-Use a lightweight program when you want:
-
-- F#-native composition;
-- bounded parallel local work;
-- short-lived orchestration that does not need checkpoints or pause/resume.
-
-## F# example
+Use `Circuit.agent` for a typed agent leaf, `Circuit.code` for trusted versioned host code, and `Circuit.thenStep` to connect successful responses. A failed lane bypasses ordinary continuation. Use `Circuit.attempt` for explicit response routing or `Circuit.recover` for a direct replacement value.
 
 [!code-fsharp[F#](../../tests/Circuit.FSharp.Tests/DocumentationExamples/LightweightPrograms.fs)]
 
-## C# availability
+Finite and resumable sources turn the same graph into a pipeline. Each completed item enters downstream work immediately, subject to bounded lane and stage concurrency. `Circuit.collect` preserves completion order; `Circuit.collectSourceOrder` only resequences the final projection.
 
-Circuit does not expose an equivalent lightweight-program API for C# today. Use workflows or ordinary application code instead.
-
-## Failure behavior
-
-- `Circuit.fail` short-circuits the remaining computation.
-- Parallel branches cancel siblings after the first failure.
-- Child-run failures are rewritten to the root program run for consistent correlation.
-
-## Cancellation behavior
-
-Program cancellation stops queued work before start and cancels active parallel branches through the shared token.
-
-## Security notes
-
-- A lightweight program does not add isolation around tools or agent calls.
-- Use explicit workflow approvals when a step requires human release.
-
-## What Circuit does not guarantee
-
-- durability;
-- checkpoints;
-- replay after process restart;
-- a C# façade for this API surface.
+Closure-bearing durable combinators require explicit IDs and versions. Change the version whenever handler behavior changes in a way that should invalidate saved checkpoints.

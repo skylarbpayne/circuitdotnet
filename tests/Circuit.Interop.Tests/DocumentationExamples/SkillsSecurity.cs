@@ -1,30 +1,13 @@
 using Circuit;
 
-namespace Circuit.Interop.Tests.DocumentationExamples;
+namespace DocumentationExamples;
 
-internal static class SkillsSecurityExample
+internal static class SkillsSecurity
 {
-    public static ResolvedSkill CreateResolvedSkill()
+    internal static CircuitDefinition<string, string> Create()
     {
-        var reference = SkillReference.CreateInline(
-            "skill.inline-style",
-            "1.0.0",
-            "Use a calm, concise support tone.",
-            "Inline support guidance.");
-
-        return new ResolvedSkill(
-            reference,
-            new Dictionary<string, object?>
-            {
-                ["audience"] = "premium-support",
-                ["revision"] = 3,
-            });
+        var agent = new AgentDefinition("docs-agent", "1.0.0", "Docs", "Return output.");
+        var signature = new AgentSignature<string, string>("docs-signature", "1.0.0", "Docs", "Return output.");
+        return CircuitDefinition<string, string>.FromAgent(agent, signature).Define("docs-skillssecurity", "1.0.0");
     }
-
-    public static SkillReference CreateFileSkill()
-        => SkillReference.CreateFile(
-            "skill.file-style",
-            "1.0.0",
-            ["/srv/circuit/skills/support-style"],
-            "File-backed guidance with SKILL.md and optional references.");
 }

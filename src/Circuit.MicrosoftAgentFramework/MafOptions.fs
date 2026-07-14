@@ -46,6 +46,29 @@ type IToolApprovalPolicy =
     /// <returns><see langword="true" /> to allow the tool call immediately; otherwise <see langword="false" />.</returns>
     abstract IsApprovedAsync: policyName: string * context: ToolApprovalContext -> ValueTask<bool>
 
+/// Identifies an adapter observer event without exposing the internal leaf execution protocol.
+type MafObservedEventKind =
+    /// The observed run started.
+    | RunStarted = 0
+    /// Provider text was emitted.
+    | OutputDelta = 1
+    /// A tool invocation started.
+    | ToolStarted = 2
+    /// A tool invocation completed.
+    | ToolCompleted = 3
+    /// Human approval was requested.
+    | ApprovalRequested = 4
+    /// An observed step started.
+    | StepStarted = 5
+    /// An observed step completed.
+    | StepCompleted = 6
+    /// An intermediate value was observed.
+    | IntermediateOutput = 7
+    /// The observed run completed successfully.
+    | RunCompleted = 8
+    /// The observed run completed with failure.
+    | RunFailed = 9
+
 /// Represents one observed runtime event surfaced to <see cref="T:Circuit.MicrosoftAgentFramework.IRunObserver" /> implementations.
 [<Sealed>]
 type MafObservedEvent
@@ -65,8 +88,8 @@ type MafObservedEvent
     /// Gets the event timestamp in UTC.
     member _.Timestamp = timestamp
 
-    /// Gets the event kind.
-    member _.Kind = kind
+    /// Gets the adapter observer event kind.
+    member _.Kind = enum<MafObservedEventKind> (int kind)
 
     /// Gets the associated operation identifier when one exists.
     member _.OperationId = operationId
@@ -297,21 +320,27 @@ module internal MafObserver =
         (requestModel: string voption)
         (services: IServiceProvider)
         =
-        tryRegisterSession
-            observers
-            { RunId = runId.Value
-              DefinitionId = definitionId.Value
-              DefinitionVersion = definitionVersion.ToString()
-              AgentName = agentName
-              RequestModel = requestModel
-              RootOperationName = "agent.run" }
-            services
+        // A scheduler-owned Circuit session already publishes root and node events for
+        // agent leaves. Do not replace it with a second leaf-local root session.
+        match activeSessions.TryGetValue(runId.Value) with
+        | true, existing when existing.RootOperationName = "circuit.run" -> ValueNone
+        | _ ->
+            tryRegisterSession
+                observers
+                { RunId = runId.Value
+                  DefinitionId = definitionId.Value
+                  DefinitionVersion = definitionVersion.ToString()
+                  AgentName = agentName
+                  RequestModel = requestModel
+                  RootOperationName = "agent.run" }
+                services
 
-    let createWorkflowRunSession
+    let createCircuitRunSession
         (observers: IReadOnlyList<Circuit.IRunObserver>)
         (runId: RunId)
         (definitionId: DefinitionId)
         (definitionVersion: SemanticVersion)
+        (services: IServiceProvider)
         =
         tryRegisterSession
             observers
@@ -320,8 +349,8 @@ module internal MafObserver =
               DefinitionVersion = definitionVersion.ToString()
               AgentName = definitionId.Value
               RequestModel = ValueNone
-              RootOperationName = "workflow.run" }
-            null
+              RootOperationName = "circuit.run" }
+            services
 
     let unregisterSession (session: ObserverSession voption) =
         match session with
@@ -407,13 +436,14 @@ module internal MafObserver =
             | ValueNone -> ()
         }
 
-    let notifyWorkflowRootEventAsync
+    let notifyCircuitRootEventAsync
         (session: ObserverSession voption)
         (kind: RunEventKind)
         (output: string voption)
         (failure: CircuitFailure voption)
         (startedAt: DateTimeOffset voption)
         (completedAt: DateTimeOffset voption)
+        (usage: RunUsage voption)
         (diagnosticMetadata: IReadOnlyDictionary<string, string>)
         (cancellationToken: CancellationToken)
         =
@@ -436,7 +466,7 @@ module internal MafObserver =
                         startedAt
                         completedAt
                         false
-                        ValueNone
+                        usage
                         ValueNone
                         diagnosticMetadata
                         cancellationToken
@@ -542,7 +572,7 @@ module internal MafObserver =
             | ValueNone -> ()
         }
 
-    let notifyWorkflowStepStartedAsync
+    let notifyNodeStartedAsync
         (session: ObserverSession voption)
         (stepId: string)
         (cancellationToken: CancellationToken)
@@ -555,7 +585,7 @@ module internal MafObserver =
                         RunEventKind.StepStarted
                         stepId
                         stepId
-                        Circuit.RunOperationKind.WorkflowStep
+                        Circuit.RunOperationKind.Node
                         ValueNone
                         ValueNone
                         ValueNone
@@ -573,7 +603,7 @@ module internal MafObserver =
             | ValueNone -> ()
         }
 
-    let notifyWorkflowStepCompletedAsync
+    let notifyNodeCompletedAsync
         (session: ObserverSession voption)
         (stepId: string)
         (failure: CircuitFailure voption)
@@ -587,7 +617,7 @@ module internal MafObserver =
                         RunEventKind.StepCompleted
                         stepId
                         stepId
-                        Circuit.RunOperationKind.WorkflowStep
+                        Circuit.RunOperationKind.Node
                         ValueNone
                         ValueNone
                         ValueNone
@@ -621,7 +651,7 @@ type MafRuntimeOptions() =
             null
         else
             let snapshot = JsonSerializerOptions(options)
-            snapshot.MakeReadOnly()
+            snapshot.MakeReadOnly(populateMissingResolver = true)
             snapshot
 
     let snapshotResolvers (resolvers: IReadOnlyList<'T>) =

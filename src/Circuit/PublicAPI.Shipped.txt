@@ -1,14 +1,19 @@
-#nullable enable
 F:Circuit.AgentFailureCode.ApprovalRequired = 5
 F:Circuit.AgentFailureCode.Cancelled = 9
+F:Circuit.AgentFailureCode.Cardinality = 11
 F:Circuit.AgentFailureCode.CheckpointMismatch = 8
 F:Circuit.AgentFailureCode.Decode = 2
+F:Circuit.AgentFailureCode.DuplicateItemKey = 12
+F:Circuit.AgentFailureCode.Engine = 7
+F:Circuit.AgentFailureCode.GeneratedGraphIntegrity = 14
+F:Circuit.AgentFailureCode.InvalidApprovalResponse = 15
+F:Circuit.AgentFailureCode.NotCheckpointable = 10
 F:Circuit.AgentFailureCode.Provider = 3
+F:Circuit.AgentFailureCode.ResourceLimit = 13
 F:Circuit.AgentFailureCode.Skill = 6
 F:Circuit.AgentFailureCode.StructuredOutputUnsupported = 1
 F:Circuit.AgentFailureCode.Tool = 4
 F:Circuit.AgentFailureCode.Validation = 0
-F:Circuit.AgentFailureCode.Workflow = 7
 F:Circuit.AgentRunEventKind.ApprovalRequested = 4
 F:Circuit.AgentRunEventKind.IntermediateOutput = 7
 F:Circuit.AgentRunEventKind.OutputDelta = 1
@@ -19,10 +24,54 @@ F:Circuit.AgentRunEventKind.StepCompleted = 6
 F:Circuit.AgentRunEventKind.StepStarted = 5
 F:Circuit.AgentRunEventKind.ToolCompleted = 3
 F:Circuit.AgentRunEventKind.ToolStarted = 2
+F:Circuit.CircuitCardinality.ExactlyOne = 0
+F:Circuit.CircuitCardinality.Many = 1
+F:Circuit.CircuitCheckpointability.Checkpointable = 0
+F:Circuit.CircuitCheckpointability.CodecDependent = 1
+F:Circuit.CircuitCheckpointability.NotCheckpointable = 2
+F:Circuit.CircuitEventKind.ApprovalRequested = 4
+F:Circuit.CircuitEventKind.NodeCompleted = 5
+F:Circuit.CircuitEventKind.NodeStarted = 1
+F:Circuit.CircuitEventKind.OutputDelta = 2
+F:Circuit.CircuitEventKind.OutputProduced = 3
+F:Circuit.CircuitEventKind.RunCompleted = 6
+F:Circuit.CircuitEventKind.RunStarted = 0
+F:Circuit.CircuitFailureCode.ApprovalRequired = 5
+F:Circuit.CircuitFailureCode.Cancelled = 9
+F:Circuit.CircuitFailureCode.Cardinality = 11
+F:Circuit.CircuitFailureCode.CheckpointMismatch = 8
+F:Circuit.CircuitFailureCode.Decode = 2
+F:Circuit.CircuitFailureCode.DuplicateItemKey = 12
+F:Circuit.CircuitFailureCode.Engine = 7
+F:Circuit.CircuitFailureCode.GeneratedGraphIntegrity = 14
+F:Circuit.CircuitFailureCode.InvalidApprovalResponse = 15
+F:Circuit.CircuitFailureCode.NotCheckpointable = 10
+F:Circuit.CircuitFailureCode.Provider = 3
+F:Circuit.CircuitFailureCode.ResourceLimit = 13
+F:Circuit.CircuitFailureCode.Skill = 6
+F:Circuit.CircuitFailureCode.StructuredOutputUnsupported = 1
+F:Circuit.CircuitFailureCode.Tool = 4
+F:Circuit.CircuitFailureCode.Validation = 0
+F:Circuit.CircuitNodeKind.Agent = 0
+F:Circuit.CircuitNodeKind.Aggregate = 14
+F:Circuit.CircuitNodeKind.Approval = 13
+F:Circuit.CircuitNodeKind.AsyncSource = 4
+F:Circuit.CircuitNodeKind.Attempt = 8
+F:Circuit.CircuitNodeKind.Branch = 10
+F:Circuit.CircuitNodeKind.Code = 1
+F:Circuit.CircuitNodeKind.Dynamic = 7
+F:Circuit.CircuitNodeKind.Items = 3
+F:Circuit.CircuitNodeKind.Loop = 12
+F:Circuit.CircuitNodeKind.Merge = 11
+F:Circuit.CircuitNodeKind.Named = 15
+F:Circuit.CircuitNodeKind.Recover = 9
+F:Circuit.CircuitNodeKind.ResumableSource = 5
+F:Circuit.CircuitNodeKind.Then = 6
+F:Circuit.CircuitNodeKind.Value = 2
 F:Circuit.RunOperationKind.Approval = 3
+F:Circuit.RunOperationKind.Node = 2
 F:Circuit.RunOperationKind.Run = 0
 F:Circuit.RunOperationKind.Tool = 1
-F:Circuit.RunOperationKind.WorkflowStep = 2
 F:Circuit.SensitiveDataMode.Redact = 1
 F:Circuit.SensitiveDataMode.Standard = 0
 F:Circuit.StructuredOutputPolicy.AllowSecondaryModelRepair = 1
@@ -42,6 +91,8 @@ M:Circuit.ApprovalPrompt.#ctor(System.String,System.String)
 M:Circuit.ApprovalPrompt.#ctor(System.String,System.String,System.Collections.Generic.IReadOnlyDictionary{System.String,System.String})
 M:Circuit.ApprovalResponse.#ctor(System.String,System.Boolean)
 M:Circuit.ApprovalResponse.#ctor(System.String,System.Boolean,System.String)
+M:Circuit.CircuitCheckpoint`1.Deserialize(System.Text.Json.JsonElement)~Circuit.CircuitCheckpoint{`0}
+M:Circuit.CircuitCheckpoint`1.Serialize()~System.Text.Json.JsonElement
 M:Circuit.CircuitClientBuilder.#ctor()
 M:Circuit.CircuitClientBuilder.AddRunObserver(Circuit.IRunObserver)~Circuit.CircuitClientBuilder
 M:Circuit.CircuitClientBuilder.AddSkillResolver(Circuit.ISkillResolver)~Circuit.CircuitClientBuilder
@@ -49,26 +100,59 @@ M:Circuit.CircuitClientBuilder.AddToolResolver(Circuit.IToolResolver)~Circuit.Ci
 M:Circuit.CircuitClientBuilder.Build()~Circuit.ICircuitClient
 M:Circuit.CircuitClientBuilder.ConfigureMicrosoftAgentFramework(System.Action{Circuit.MicrosoftAgentFrameworkOptions})~Circuit.CircuitClientBuilder
 M:Circuit.CircuitClientBuilder.UseMicrosoftAgentFramework(Microsoft.Extensions.AI.IChatClient)~Circuit.CircuitClientBuilder
+M:Circuit.CircuitClientBuilder.UseRuntime(System.Object)~Circuit.CircuitClientBuilder
+M:Circuit.CircuitDefinition`2.Aggregate(System.String,System.String,System.Func{Circuit.CircuitContext,System.Collections.Generic.IReadOnlyList{Circuit.CircuitResponse{`1}},System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.Approval(System.String,System.String,System.Func{`0,Circuit.ApprovalPrompt})~Circuit.CircuitDefinition{`0,Circuit.ApprovalResponse}
+M:Circuit.CircuitDefinition`2.AsyncItems(System.String,System.String,System.Func{`0,System.Collections.Generic.IAsyncEnumerable{``0}})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.Attempt()~Circuit.CircuitDefinition{`0,Circuit.CircuitResponse{`1}}
+M:Circuit.CircuitDefinition`2.Branch(System.String,System.String,System.Func{`0,System.String},System.Collections.Generic.IReadOnlyDictionary{System.String,Circuit.CircuitDefinition{`0,`1}},Circuit.CircuitDefinition{`0,`1})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Define(System.String,System.String)~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Failure(System.String,System.String,System.Func{`0,Circuit.CircuitFailure})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.FromAgent(Circuit.AgentDefinition,Circuit.AgentSignature{`0,`1})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.FromCode(System.String,System.String,System.Func{Circuit.CircuitContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{`1}})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.FromCodeResponse(System.String,System.String,System.Func{Circuit.CircuitContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{Circuit.CircuitResponse{`1}}})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Items(System.String,System.String,System.Func{`0,System.Collections.Generic.IReadOnlyList{``0}})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.KeyedItems(System.String,System.String,System.Func{``0,System.String},System.Func{`0,System.Collections.Generic.IReadOnlyList{``0}})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.Loop(System.String,System.String,System.Int32,System.Func{``0,System.Boolean},Circuit.CircuitDefinition{``0,``0})~Circuit.CircuitDefinition{``0,``0}
+M:Circuit.CircuitDefinition`2.Merge(System.String,System.String,System.Int32,System.Collections.Generic.IReadOnlyList{Circuit.CircuitDefinition{`0,`1}})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Named(System.String)~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Recover(System.String,System.String,System.Func{Circuit.CircuitFailure,`1})~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitDefinition`2.Source(System.String,System.String,Circuit.IResumableCircuitSource{`0,``0})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.Then(Circuit.CircuitDefinition{`1,``0})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.ThenDynamic(System.String,System.String,System.Func{`1,System.String},System.Int32,System.Func{`1,Circuit.CircuitDefinition{`1,``0}})~Circuit.CircuitDefinition{`0,``0}
+M:Circuit.CircuitDefinition`2.Validate()~System.Collections.Generic.IReadOnlyList{Circuit.CircuitValidationIssue}
+M:Circuit.CircuitDefinition`2.Value(`1)~Circuit.CircuitDefinition{`0,`1}
+M:Circuit.CircuitFailure.Create(Circuit.CircuitFailureCode,System.String)~Circuit.CircuitFailure
 M:Circuit.CircuitOptions.#ctor()
 M:Circuit.CircuitOptions.AddRunObserver(Circuit.IRunObserver)~System.Void
 M:Circuit.CircuitOptions.AddSkillResolver(Circuit.ISkillResolver)~System.Void
 M:Circuit.CircuitOptions.AddToolResolver(Circuit.IToolResolver)~System.Void
-M:Circuit.IAgentClient.DeserializeSessionAsync(Circuit.AgentDefinition,System.Text.Json.JsonElement,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitSession}
-M:Circuit.IAgentClient.RunAsync(Circuit.AgentDefinition,Circuit.AgentSignature{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.AgentRunResult{``1}}
-M:Circuit.IAgentClient.RunStreamingAsync(Circuit.AgentDefinition,Circuit.AgentSignature{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Collections.Generic.IAsyncEnumerable{Circuit.AgentRunEvent{``1}}
-M:Circuit.IAgentClient.SerializeSessionAsync(Circuit.AgentDefinition,Circuit.CircuitSession,System.Threading.CancellationToken)~System.Threading.Tasks.Task{System.Text.Json.JsonElement}
+M:Circuit.CircuitResponse`1.Fail(Circuit.CircuitContext,Circuit.CircuitFailure)~Circuit.CircuitResponse{`0}
+M:Circuit.CircuitResponse`1.Succeed(Circuit.CircuitContext,`0)~Circuit.CircuitResponse{`0}
+M:Circuit.CircuitRun`1.CreateCheckpointAsync(System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitResponse{Circuit.CircuitCheckpoint{`0}}}
+M:Circuit.CircuitRun`1.DisposeAsync()~System.Threading.Tasks.ValueTask
+M:Circuit.CircuitRun`1.RespondAsync(Circuit.ApprovalResponse,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitResponse{System.Boolean}}
+M:Circuit.CircuitSourcePage`1.#ctor(System.Collections.Generic.IReadOnlyList{`0},System.String,System.Boolean)
+M:Circuit.CircuitValidationIssue.#ctor(System.String,System.String,System.String)
+M:Circuit.ICircuitClient.CollectAsync(Circuit.CircuitDefinition{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitResponse{System.Collections.Generic.IReadOnlyList{Circuit.CircuitResponse{``1}}}}
+M:Circuit.ICircuitClient.CollectSourceOrderAsync(Circuit.CircuitDefinition{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitResponse{System.Collections.Generic.IReadOnlyList{Circuit.CircuitResponse{``1}}}}
+M:Circuit.ICircuitClient.DeserializeSessionAsync(Circuit.AgentDefinition,System.Text.Json.JsonElement,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitSession}
+M:Circuit.ICircuitClient.ResumeAsync(Circuit.CircuitDefinition{``0,``1},Circuit.CircuitCheckpoint{``1},Circuit.ResumeOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitRun{``1}}
+M:Circuit.ICircuitClient.RunAsync(Circuit.CircuitDefinition{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitResponse{``1}}
+M:Circuit.ICircuitClient.SerializeSessionAsync(Circuit.AgentDefinition,Circuit.CircuitSession,System.Threading.CancellationToken)~System.Threading.Tasks.Task{System.Text.Json.JsonElement}
+M:Circuit.ICircuitClient.StartAsync(Circuit.CircuitDefinition{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.CircuitRun{``1}}
+M:Circuit.ICircuitClient.StreamAsync(Circuit.CircuitDefinition{``0,``1},``0,Circuit.AgentRunOptions,System.Threading.CancellationToken)~System.Collections.Generic.IAsyncEnumerable{Circuit.CircuitResponse{``1}}
 M:Circuit.IContractValidator`1.Validate(`0)~System.Collections.Generic.IReadOnlyList{Circuit.ValidationIssue}
+M:Circuit.IResumableCircuitSource`2.ReadAsync(`0,System.String,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{Circuit.CircuitSourcePage{`1}}
 M:Circuit.IRunObserver.OnEventAsync(Circuit.RunEventEnvelope,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 M:Circuit.ISkillResolver.ResolveAsync(Circuit.SkillResolutionContext,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Collections.Generic.IReadOnlyList{Circuit.ResolvedSkill}}
 M:Circuit.IToolResolver.ResolveAsync(Circuit.ToolResolutionContext,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask{System.Collections.Generic.IReadOnlyList{Circuit.ResolvedTool}}
-M:Circuit.IWorkflowClient.ResumeWorkflowAsync(Circuit.WorkflowDefinition{``0,``1},Circuit.WorkflowCheckpoint{``1},System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.WorkflowRun{``1}}
-M:Circuit.IWorkflowClient.RunWorkflowAsync(Circuit.WorkflowDefinition{``0,``1},``0,Circuit.WorkflowRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.AgentRunResult{``1}}
-M:Circuit.IWorkflowClient.StartWorkflowAsync(Circuit.WorkflowDefinition{``0,``1},``0,Circuit.WorkflowRunOptions,System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.WorkflowRun{``1}}
 M:Circuit.MicrosoftAgentFrameworkOptions.#ctor()
 M:Circuit.OperationResult`1.Error(Circuit.AgentFailure)~Circuit.OperationResult{`0}
 M:Circuit.OperationResult`1.Success(`0)~Circuit.OperationResult{`0}
 M:Circuit.ResolvedSkill.#ctor(Circuit.SkillReference)
 M:Circuit.ResolvedSkill.#ctor(Circuit.SkillReference,System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})
+M:Circuit.ResumeOptions.#ctor()
 M:Circuit.SkillReference.#ctor(System.String,System.String)
 M:Circuit.SkillReference.#ctor(System.String,System.String,System.String)
 M:Circuit.SkillReference.CreateFile(System.String,System.String,System.Collections.Generic.IEnumerable{System.String},System.String)~Circuit.SkillReference
@@ -80,24 +164,6 @@ M:Circuit.ToolDefinition`2.ToResolvedTool(System.Collections.Generic.IEnumerable
 M:Circuit.ToolDefinition`2.WithApproval(Circuit.ToolApprovalMode)~Circuit.ToolDefinition{`0,`1}
 M:Circuit.ToolDefinition`2.WithApprovalPolicy(System.String)~Circuit.ToolDefinition{`0,`1}
 M:Circuit.ValidationIssue.#ctor(System.String,System.String,System.String)
-M:Circuit.WorkflowBuilder`2.Build()~Circuit.WorkflowDefinition{`0,`1}
-M:Circuit.WorkflowBuilder`2.Choose(System.String,System.Func{`1,System.String},System.Collections.Generic.IReadOnlyDictionary{System.String,Circuit.WorkflowDefinition{`1,``0}},Circuit.WorkflowDefinition{`1,``0})~Circuit.WorkflowBuilder{`0,``0}
-M:Circuit.WorkflowBuilder`2.Loop(System.String,System.Int32,System.Func{`1,System.Boolean},Circuit.WorkflowDefinition{`1,`1})~Circuit.WorkflowBuilder{`0,`1}
-M:Circuit.WorkflowBuilder`2.Parallel(System.String,System.Int32,System.Collections.Generic.IReadOnlyList{Circuit.WorkflowDefinition{`1,``0}},System.Func{System.Collections.Generic.IReadOnlyList{``0},System.Threading.CancellationToken,System.Threading.Tasks.Task{``1}})~Circuit.WorkflowBuilder{`0,``1}
-M:Circuit.WorkflowBuilder`2.RequestApproval(System.String,System.Func{`1,Circuit.ApprovalPrompt})~Circuit.WorkflowBuilder{`0,Circuit.ApprovalResponse}
-M:Circuit.WorkflowBuilder`2.Start(System.String,System.String,System.String,Circuit.AgentDefinition,Circuit.AgentSignature{`0,``0})~Circuit.WorkflowBuilder{`0,``0}
-M:Circuit.WorkflowBuilder`2.Start(System.String,System.String,System.String,System.Func{Circuit.WorkflowContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}})~Circuit.WorkflowBuilder{`0,``0}
-M:Circuit.WorkflowBuilder`2.Then(System.String,Circuit.AgentDefinition,Circuit.AgentSignature{`1,``0})~Circuit.WorkflowBuilder{`0,``0}
-M:Circuit.WorkflowBuilder`2.Then(System.String,System.Func{Circuit.WorkflowContext,`1,System.Threading.CancellationToken,System.Threading.Tasks.Task{``0}})~Circuit.WorkflowBuilder{`0,``0}
-M:Circuit.WorkflowCheckpoint`1.Deserialize(System.Text.Json.JsonElement)~Circuit.WorkflowCheckpoint{`0}
-M:Circuit.WorkflowCheckpoint`1.Serialize()~System.Text.Json.JsonElement
-M:Circuit.WorkflowDefinition`2.Start(System.String,System.String,System.String,Circuit.AgentDefinition,Circuit.AgentSignature{`0,`1})~Circuit.WorkflowBuilder{`0,`1}
-M:Circuit.WorkflowDefinition`2.Start(System.String,System.String,System.String,System.Func{Circuit.WorkflowContext,`0,System.Threading.CancellationToken,System.Threading.Tasks.Task{`1}})~Circuit.WorkflowBuilder{`0,`1}
-M:Circuit.WorkflowDefinition`2.Validate()~System.Collections.Generic.IReadOnlyList{Circuit.WorkflowValidationIssue}
-M:Circuit.WorkflowRunOptions.#ctor()
-M:Circuit.WorkflowRun`1.CreateCheckpointAsync(System.Threading.CancellationToken)~System.Threading.Tasks.Task{Circuit.WorkflowCheckpoint{`0}}
-M:Circuit.WorkflowRun`1.DisposeAsync()~System.Threading.Tasks.ValueTask
-M:Circuit.WorkflowRun`1.RespondAsync(Circuit.ApprovalResponse,System.Threading.CancellationToken)~System.Threading.Tasks.ValueTask
 P:Circuit.AgentDefinition.Id~System.String
 P:Circuit.AgentDefinition.Instructions~System.String
 P:Circuit.AgentDefinition.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
@@ -112,15 +178,15 @@ P:Circuit.AgentFailure.Message~System.String
 P:Circuit.AgentFailure.OperationId~System.String
 P:Circuit.AgentFailure.RequestId~System.String
 P:Circuit.AgentFailure.RunId~System.String
-P:Circuit.AgentRunEvent`1.Approval~Circuit.ApprovalRequest
-P:Circuit.AgentRunEvent`1.Failure~Circuit.AgentFailure
-P:Circuit.AgentRunEvent`1.Kind~Circuit.AgentRunEventKind
-P:Circuit.AgentRunEvent`1.OperationId~System.String
-P:Circuit.AgentRunEvent`1.RunId~System.String
-P:Circuit.AgentRunEvent`1.Sequence~System.Int64
-P:Circuit.AgentRunEvent`1.TextDelta~System.String
-P:Circuit.AgentRunEvent`1.Timestamp~System.DateTimeOffset
-P:Circuit.AgentRunEvent`1.Value~`0
+P:Circuit.AgentRunOptions.DisposalDrainTimeout~System.TimeSpan
+P:Circuit.AgentRunOptions.EventBufferCapacity~System.Int32
+P:Circuit.AgentRunOptions.MaxApprovalRounds~System.Int32
+P:Circuit.AgentRunOptions.MaxCheckpointBytes~System.Int32
+P:Circuit.AgentRunOptions.MaxConcurrency~System.Int32
+P:Circuit.AgentRunOptions.MaxDynamicDepth~System.Int32
+P:Circuit.AgentRunOptions.MaxDynamicNodes~System.Int32
+P:Circuit.AgentRunOptions.MaxSourcePageSize~System.Int32
+P:Circuit.AgentRunOptions.MaxSourcePages~System.Int32
 P:Circuit.AgentRunOptions.SensitiveDataMode~Circuit.SensitiveDataMode
 P:Circuit.AgentRunOptions.Services~System.IServiceProvider
 P:Circuit.AgentRunOptions.Session~Circuit.CircuitSession
@@ -128,12 +194,6 @@ P:Circuit.AgentRunOptions.StructuredOutputPolicy~Circuit.StructuredOutputPolicy
 P:Circuit.AgentRunOptions.Tags~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
 P:Circuit.AgentRunOptions.TenantId~System.String
 P:Circuit.AgentRunOptions.UserId~System.String
-P:Circuit.AgentRunResult`1.CompletedAt~System.DateTimeOffset
-P:Circuit.AgentRunResult`1.Result~Circuit.OperationResult{`0}
-P:Circuit.AgentRunResult`1.RunId~System.String
-P:Circuit.AgentRunResult`1.Session~Circuit.CircuitSession
-P:Circuit.AgentRunResult`1.StartedAt~System.DateTimeOffset
-P:Circuit.AgentRunResult`1.Usage~Circuit.RunUsage
 P:Circuit.AgentSignature`2.Description~System.String
 P:Circuit.AgentSignature`2.Id~System.String
 P:Circuit.AgentSignature`2.InputJsonSchema~System.String
@@ -144,17 +204,112 @@ P:Circuit.ApprovalPrompt.Message~System.String
 P:Circuit.ApprovalPrompt.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
 P:Circuit.ApprovalPrompt.Title~System.String
 P:Circuit.ApprovalRequest.ArgumentsJson~System.String
+P:Circuit.ApprovalRequest.Prompt~Circuit.ApprovalPrompt
 P:Circuit.ApprovalRequest.RequestId~System.String
 P:Circuit.ApprovalRequest.ToolName~System.String
 P:Circuit.ApprovalResponse.Approved~System.Boolean
 P:Circuit.ApprovalResponse.Note~System.String
 P:Circuit.ApprovalResponse.RequestId~System.String
+P:Circuit.CircuitCheckpoint`1.CreatedAt~System.DateTimeOffset
+P:Circuit.CircuitCheckpoint`1.DefinitionId~System.String
+P:Circuit.CircuitCheckpoint`1.DefinitionVersion~System.String
+P:Circuit.CircuitCheckpoint`1.Fingerprint~System.String
+P:Circuit.CircuitCheckpoint`1.LineageId~System.String
+P:Circuit.CircuitContext.CancellationToken~System.Threading.CancellationToken
+P:Circuit.CircuitContext.IdempotencyKey~System.String
+P:Circuit.CircuitContext.ItemKey~System.String
+P:Circuit.CircuitContext.NodePath~System.String
+P:Circuit.CircuitContext.RunId~System.String
+P:Circuit.CircuitContext.Services~System.IServiceProvider
+P:Circuit.CircuitDefinition`2.Checkpointability~Circuit.CircuitCheckpointability
+P:Circuit.CircuitDefinition`2.Fingerprint~System.String
+P:Circuit.CircuitDefinition`2.Graph~Circuit.CircuitGraphDescriptor
+P:Circuit.CircuitDefinition`2.Id~System.String
+P:Circuit.CircuitDefinition`2.Version~System.String
+P:Circuit.CircuitEvent`1.Approval~Circuit.ApprovalRequest
+P:Circuit.CircuitEvent`1.Delta~Circuit.CircuitOutputDelta
+P:Circuit.CircuitEvent`1.ItemKey~System.String
+P:Circuit.CircuitEvent`1.Kind~Circuit.CircuitEventKind
+P:Circuit.CircuitEvent`1.NodePath~System.String
+P:Circuit.CircuitEvent`1.NodeResponse~Circuit.CircuitUntypedResponse
+P:Circuit.CircuitEvent`1.Node~Circuit.CircuitNodeInfo
+P:Circuit.CircuitEvent`1.Output~Circuit.CircuitResponse{`0}
+P:Circuit.CircuitEvent`1.RunId~System.String
+P:Circuit.CircuitEvent`1.Run~Circuit.CircuitRunInfo
+P:Circuit.CircuitEvent`1.Terminal~Circuit.CircuitResponse{Circuit.RunSummary}
+P:Circuit.CircuitEvent`1.TextDelta~System.String
+P:Circuit.CircuitFailure.Code~Circuit.CircuitFailureCode
+P:Circuit.CircuitFailure.Exception~System.Exception
+P:Circuit.CircuitFailure.Message~System.String
+P:Circuit.CircuitFailure.OperationId~System.String
+P:Circuit.CircuitFailure.RequestId~System.String
+P:Circuit.CircuitFailure.RunId~System.String
+P:Circuit.CircuitGraphDescriptor.Cardinality~Circuit.CircuitCardinality
+P:Circuit.CircuitGraphDescriptor.Checkpointability~Circuit.CircuitCheckpointability
+P:Circuit.CircuitGraphDescriptor.Fingerprint~System.String
+P:Circuit.CircuitGraphDescriptor.IsValid~System.Boolean
+P:Circuit.CircuitGraphDescriptor.Nodes~System.Collections.Generic.IReadOnlyList{Circuit.CircuitNodeDescriptor}
+P:Circuit.CircuitGraphDescriptor.ValidationIssues~System.Collections.Generic.IReadOnlyList{Circuit.CircuitValidationIssue}
+P:Circuit.CircuitNodeDescriptor.Cardinality~Circuit.CircuitCardinality
+P:Circuit.CircuitNodeDescriptor.Checkpointability~Circuit.CircuitCheckpointability
+P:Circuit.CircuitNodeDescriptor.Children~System.Collections.Generic.IReadOnlyList{System.String}
+P:Circuit.CircuitNodeDescriptor.ConcurrencyLimit~System.Nullable{System.Int32}
+P:Circuit.CircuitNodeDescriptor.Id~System.String
+P:Circuit.CircuitNodeDescriptor.IterationLimit~System.Nullable{System.Int32}
+P:Circuit.CircuitNodeDescriptor.Kind~Circuit.CircuitNodeKind
+P:Circuit.CircuitNodeDescriptor.Path~System.String
+P:Circuit.CircuitNodeDescriptor.Version~System.String
+P:Circuit.CircuitNodeInfo.Attempt~System.Int32
+P:Circuit.CircuitNodeInfo.ItemKey~System.String
+P:Circuit.CircuitNodeInfo.NodeId~System.String
+P:Circuit.CircuitNodeInfo.NodePath~System.String
+P:Circuit.CircuitNodeInfo.Timestamp~System.DateTimeOffset
 P:Circuit.CircuitOptions.MicrosoftAgentFramework~Circuit.MicrosoftAgentFrameworkOptions
 P:Circuit.CircuitOptions.RunObservers~System.Collections.Generic.IReadOnlyList{Circuit.IRunObserver}
 P:Circuit.CircuitOptions.SkillResolvers~System.Collections.Generic.IReadOnlyList{Circuit.ISkillResolver}
 P:Circuit.CircuitOptions.ToolResolvers~System.Collections.Generic.IReadOnlyList{Circuit.IToolResolver}
+P:Circuit.CircuitOutcome`1.Failure~Circuit.CircuitFailure
+P:Circuit.CircuitOutcome`1.IsSuccess~System.Boolean
+P:Circuit.CircuitOutcome`1.Value~`0
+P:Circuit.CircuitOutputDelta.ItemKey~System.String
+P:Circuit.CircuitOutputDelta.NodePath~System.String
+P:Circuit.CircuitOutputDelta.Text~System.String
+P:Circuit.CircuitOutputDelta.Timestamp~System.DateTimeOffset
+P:Circuit.CircuitResponseMetadata.Attempt~System.Int32
+P:Circuit.CircuitResponseMetadata.CompletedAt~System.DateTimeOffset
+P:Circuit.CircuitResponseMetadata.IdempotencyKey~System.String
+P:Circuit.CircuitResponseMetadata.ItemKey~System.String
+P:Circuit.CircuitResponseMetadata.NodePath~System.String
+P:Circuit.CircuitResponseMetadata.RunId~System.String
+P:Circuit.CircuitResponseMetadata.Session~Circuit.CircuitSession
+P:Circuit.CircuitResponseMetadata.SourceOrder~System.Collections.Generic.IReadOnlyList{System.Int64}
+P:Circuit.CircuitResponseMetadata.SourceOrdinal~System.Nullable{System.Int64}
+P:Circuit.CircuitResponseMetadata.StartedAt~System.DateTimeOffset
+P:Circuit.CircuitResponseMetadata.Usage~Circuit.RunUsage
+P:Circuit.CircuitResponse`1.Failure~Circuit.CircuitFailure
+P:Circuit.CircuitResponse`1.IsSuccess~System.Boolean
+P:Circuit.CircuitResponse`1.Metadata~Circuit.CircuitResponseMetadata
+P:Circuit.CircuitResponse`1.Outcome~Circuit.CircuitOutcome{`0}
+P:Circuit.CircuitResponse`1.Value~`0
+P:Circuit.CircuitRunInfo.DefinitionId~System.String
+P:Circuit.CircuitRunInfo.DefinitionVersion~System.String
+P:Circuit.CircuitRunInfo.Fingerprint~System.String
+P:Circuit.CircuitRunInfo.LineageId~System.String
+P:Circuit.CircuitRunInfo.RunId~System.String
+P:Circuit.CircuitRunInfo.StartedAt~System.DateTimeOffset
+P:Circuit.CircuitRun`1.Events~System.Collections.Generic.IAsyncEnumerable{Circuit.CircuitEvent{`0}}
+P:Circuit.CircuitRun`1.RunId~System.String
 P:Circuit.CircuitSession.Id~System.String
 P:Circuit.CircuitSession.Metadata~System.Collections.Generic.IReadOnlyDictionary{System.String,System.String}
+P:Circuit.CircuitSourcePage`1.Completed~System.Boolean
+P:Circuit.CircuitSourcePage`1.ContinuationToken~System.String
+P:Circuit.CircuitSourcePage`1.Items~System.Collections.Generic.IReadOnlyList{`0}
+P:Circuit.CircuitUntypedResponse.Failure~Circuit.CircuitFailure
+P:Circuit.CircuitUntypedResponse.IsSuccess~System.Boolean
+P:Circuit.CircuitUntypedResponse.Metadata~Circuit.CircuitResponseMetadata
+P:Circuit.CircuitValidationIssue.Code~System.String
+P:Circuit.CircuitValidationIssue.Message~System.String
+P:Circuit.CircuitValidationIssue.NodeId~System.String
 P:Circuit.MicrosoftAgentFrameworkOptions.DefaultModelId~System.String
 P:Circuit.MicrosoftAgentFrameworkOptions.JsonSerializerOptions~System.Text.Json.JsonSerializerOptions
 P:Circuit.MicrosoftAgentFrameworkOptions.SecondaryStructuredOutputClient~Microsoft.Extensions.AI.IChatClient
@@ -178,6 +333,7 @@ P:Circuit.ResolvedTool.InputJsonSchema~System.String
 P:Circuit.ResolvedTool.OutputJsonSchema~System.String
 P:Circuit.ResolvedTool.Tags~System.Collections.Generic.IReadOnlySet{System.String}
 P:Circuit.ResolvedTool.Version~System.String
+P:Circuit.ResumeOptions.Services~System.IServiceProvider
 P:Circuit.RunContext.Agent~Circuit.AgentDefinition
 P:Circuit.RunContext.Options~Circuit.AgentRunOptions
 P:Circuit.RunContext.RunId~System.String
@@ -214,6 +370,12 @@ P:Circuit.RunObservation.Repaired~System.Boolean
 P:Circuit.RunObservation.Session~Circuit.CircuitSession
 P:Circuit.RunObservation.StartedAt~System.DateTimeOffset
 P:Circuit.RunObservation.Usage~Circuit.RunUsage
+P:Circuit.RunSummary.CompletedAt~System.DateTimeOffset
+P:Circuit.RunSummary.FailedCount~System.Int32
+P:Circuit.RunSummary.OutputCount~System.Int32
+P:Circuit.RunSummary.StartedAt~System.DateTimeOffset
+P:Circuit.RunSummary.SucceededCount~System.Int32
+P:Circuit.RunSummary.Usage~Circuit.RunUsage
 P:Circuit.RunUsage.InputTokens~System.Int32
 P:Circuit.RunUsage.OutputTokens~System.Int32
 P:Circuit.RunUsage.TotalTokens~System.Int32
@@ -226,6 +388,7 @@ P:Circuit.SkillResolutionContext.Services~System.IServiceProvider
 P:Circuit.SkillResolutionContext.TenantId~System.String
 P:Circuit.SkillResolutionContext.UserId~System.String
 P:Circuit.ToolContext.CancellationToken~System.Threading.CancellationToken
+P:Circuit.ToolContext.IdempotencyKey~System.String
 P:Circuit.ToolContext.RunId~System.String
 P:Circuit.ToolContext.Services~System.IServiceProvider
 P:Circuit.ToolContext.TenantId~System.String
@@ -244,52 +407,57 @@ P:Circuit.ToolResolutionContext.UserId~System.String
 P:Circuit.ValidationIssue.Code~System.String
 P:Circuit.ValidationIssue.Message~System.String
 P:Circuit.ValidationIssue.Path~System.String
-P:Circuit.WorkflowCheckpoint`1.CreatedAt~System.DateTimeOffset
-P:Circuit.WorkflowCheckpoint`1.DefinitionId~System.String
-P:Circuit.WorkflowCheckpoint`1.DefinitionVersion~System.String
-P:Circuit.WorkflowContext.CancellationToken~System.Threading.CancellationToken
-P:Circuit.WorkflowContext.DefinitionId~System.String
-P:Circuit.WorkflowContext.DefinitionVersion~System.String
-P:Circuit.WorkflowContext.RunId~System.String
-P:Circuit.WorkflowContext.StepId~System.String
-P:Circuit.WorkflowDefinition`2.Id~System.String
-P:Circuit.WorkflowDefinition`2.Version~System.String
-P:Circuit.WorkflowRunOptions.SessionId~System.String
-P:Circuit.WorkflowRun`1.Events~System.Collections.Generic.IAsyncEnumerable{Circuit.AgentRunEvent{`0}}
-P:Circuit.WorkflowRun`1.RunId~System.String
-P:Circuit.WorkflowValidationIssue.Code~System.String
-P:Circuit.WorkflowValidationIssue.Message~System.String
-P:Circuit.WorkflowValidationIssue.NodeId~System.String
 T:Circuit.AgentDefinition
 T:Circuit.AgentFailure
 T:Circuit.AgentFailureCode
 T:Circuit.AgentRunEventKind
-T:Circuit.AgentRunEvent`1
 T:Circuit.AgentRunOptions
-T:Circuit.AgentRunResult`1
 T:Circuit.AgentSignature`2
 T:Circuit.ApprovalPrompt
 T:Circuit.ApprovalRequest
 T:Circuit.ApprovalResponse
+T:Circuit.CircuitCardinality
+T:Circuit.CircuitCheckpoint`1
+T:Circuit.CircuitCheckpointability
 T:Circuit.CircuitClientBuilder
+T:Circuit.CircuitContext
+T:Circuit.CircuitDefinition`2
+T:Circuit.CircuitEventKind
+T:Circuit.CircuitEvent`1
+T:Circuit.CircuitFailure
+T:Circuit.CircuitFailureCode
+T:Circuit.CircuitGraphDescriptor
+T:Circuit.CircuitNodeDescriptor
+T:Circuit.CircuitNodeInfo
+T:Circuit.CircuitNodeKind
 T:Circuit.CircuitOptions
+T:Circuit.CircuitOutcome`1
+T:Circuit.CircuitOutputDelta
+T:Circuit.CircuitResponseMetadata
+T:Circuit.CircuitResponse`1
+T:Circuit.CircuitRunInfo
+T:Circuit.CircuitRun`1
 T:Circuit.CircuitSession
-T:Circuit.IAgentClient
+T:Circuit.CircuitSourcePage`1
+T:Circuit.CircuitUntypedResponse
+T:Circuit.CircuitValidationIssue
 T:Circuit.ICircuitClient
 T:Circuit.IContractValidator`1
+T:Circuit.IResumableCircuitSource`2
 T:Circuit.IRunObserver
 T:Circuit.ISkillResolver
 T:Circuit.IToolResolver
-T:Circuit.IWorkflowClient
 T:Circuit.MicrosoftAgentFrameworkOptions
 T:Circuit.ObservedRunEvent
 T:Circuit.OperationResult`1
 T:Circuit.ResolvedSkill
 T:Circuit.ResolvedTool
+T:Circuit.ResumeOptions
 T:Circuit.RunContext
 T:Circuit.RunEventEnvelope
 T:Circuit.RunObservation
 T:Circuit.RunOperationKind
+T:Circuit.RunSummary
 T:Circuit.RunUsage
 T:Circuit.SensitiveDataMode
 T:Circuit.SkillReference
@@ -300,10 +468,3 @@ T:Circuit.ToolContext
 T:Circuit.ToolDefinition`2
 T:Circuit.ToolResolutionContext
 T:Circuit.ValidationIssue
-T:Circuit.WorkflowBuilder`2
-T:Circuit.WorkflowCheckpoint`1
-T:Circuit.WorkflowContext
-T:Circuit.WorkflowDefinition`2
-T:Circuit.WorkflowRunOptions
-T:Circuit.WorkflowRun`1
-T:Circuit.WorkflowValidationIssue

@@ -1,24 +1,13 @@
 using Circuit;
-using Circuit.MicrosoftAgentFramework;
-using Microsoft.Extensions.AI;
-using Microsoft.FSharp.Core;
 
-namespace Circuit.Interop.Tests.DocumentationExamples;
+namespace DocumentationExamples;
 
-internal static class MafAdapterExample
+internal static class MafAdapter
 {
-    public static MafRuntime CreateRuntime(IChatClient chatClient)
+    internal static CircuitDefinition<string, string> Create()
     {
-        var options = new MafRuntimeOptions();
-        options.DefaultModelId = FSharpValueOption<string>.Some("gpt-4.1-mini");
-        options.Observers = [new OpenTelemetryRunObserver(options: null)];
-        return new MafRuntime(chatClient, options);
-    }
-
-    private static MafRuntimeOptions CreateOptions()
-    {
-        var options = new MafRuntimeOptions();
-        options.DefaultModelId = FSharpValueOption<string>.Some("gpt-4.1-mini");
-        return options;
+        var agent = new AgentDefinition("docs-agent", "1.0.0", "Docs", "Return output.");
+        var signature = new AgentSignature<string, string>("docs-signature", "1.0.0", "Docs", "Return output.");
+        return CircuitDefinition<string, string>.FromAgent(agent, signature).Define("docs-mafadapter", "1.0.0");
     }
 }

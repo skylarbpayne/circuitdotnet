@@ -403,6 +403,8 @@ type ScriptedResponse =
     | Throw of exn
     /// Start the stream and then block until cancellation is requested.
     | WaitForCancellation
+    /// Match this response deterministically to a scheduler node-path suffix.
+    | ForNode of nodePathSuffix: string * response: ScriptedResponse
 
 /// Identifies how a scripted call reached the runtime.
 type ScriptedCallKind =
@@ -418,6 +420,7 @@ type RecordedCall
     (
         kind: ScriptedCallKind,
         runId: string,
+        nodePath: string,
         agentId: string,
         agentVersion: string,
         agentName: string,
@@ -431,8 +434,11 @@ type RecordedCall
     /// Gets whether the runtime was called in streaming or non-streaming mode.
     member _.Kind = kind
 
-    /// Gets the generated run identifier.
+    /// Gets the scheduler run identifier.
     member _.RunId = runId
+
+    /// Gets the distinct scheduler node path.
+    member _.NodePath = nodePath
 
     /// Gets the agent identifier.
     member _.AgentId = agentId
@@ -502,6 +508,13 @@ type ScriptedResponses private () =
 
     /// Creates a <see cref="F:Circuit.Testing.ScriptedResponse.WaitForCancellation" /> response.
     static member WaitForCancellation() = ScriptedResponse.WaitForCancellation
+
+    /// Creates a response matched to a distinct scheduler node-path suffix.
+    static member ForNode(nodePathSuffix: string, response: ScriptedResponse) =
+        if String.IsNullOrWhiteSpace nodePathSuffix then
+            invalidArg "nodePathSuffix" "nodePathSuffix cannot be blank."
+
+        ScriptedResponse.ForNode(nodePathSuffix, response)
 
 /// Creates <see cref="T:Circuit.Core.CircuitFailure" /> values for tests.
 [<AbstractClass; Sealed>]
@@ -625,6 +638,7 @@ module internal ScriptedRuntimeHelpers =
         (calls: ConcurrentQueue<RecordedCall>)
         kind
         (runId: RunId)
+        (nodePath: string)
         (agent: AgentDefinition)
         (signature: obj)
         (input: obj)
@@ -643,6 +657,7 @@ module internal ScriptedRuntimeHelpers =
             RecordedCall(
                 kind,
                 runId.Value,
+                nodePath,
                 agent.Id.Value,
                 agent.Version.ToString(),
                 agent.Name,
@@ -658,18 +673,37 @@ module internal ScriptedRuntimeHelpers =
 
     let inline dequeueResponse
         (responses: ConcurrentQueue<ScriptedResponse>)
+        (matched: ConcurrentDictionary<string, ScriptedResponse>)
+        (nodePath: string)
         (runId: RunId)
         (agent: AgentDefinition)
         (signature: obj)
         =
-        match responses.TryDequeue() with
-        | true, response -> response
-        | false, _ ->
-            raise (
-                ScriptedResponseExhaustedException(
-                    $"ScriptedRuntime has no scripted responses remaining for run '{runId.Value}', agent '{agent.Name}', signature '{Snapshots.getSignatureId signature}'. Add another response for this test."
+        let matchingKey =
+            matched.Keys
+            |> Seq.filter (fun suffix -> nodePath.EndsWith(suffix, StringComparison.Ordinal))
+            |> Seq.sortByDescending _.Length
+            |> Seq.tryHead
+
+        match matchingKey with
+        | Some suffix ->
+            match matched.TryRemove suffix with
+            | true, response -> response
+            | _ ->
+                raise (
+                    ScriptedResponseExhaustedException(
+                        $"The matched scripted response '{suffix}' was already consumed."
+                    )
                 )
-            )
+        | None ->
+            match responses.TryDequeue() with
+            | true, response -> response
+            | false, _ ->
+                raise (
+                    ScriptedResponseExhaustedException(
+                        $"ScriptedRuntime has no response matching node '{nodePath}' for run '{runId.Value}', agent '{agent.Name}', signature '{Snapshots.getSignatureId signature}'."
+                    )
+                )
 
     let inline createResult<'Output> (runId: RunId) (result: CircuitResult<'Output>) startedAt completedAt =
         Reflection.createRunResult<'Output> runId result (Reflection.createRunUsage 0 0) ValueNone startedAt completedAt
@@ -745,8 +779,8 @@ module internal ScriptedRuntimeHelpers =
             |> Snapshots.validateOutputUntyped signature
         | ScriptedResponse.Failure _
         | ScriptedResponse.Throw _
-        | ScriptedResponse.WaitForCancellation ->
-            invalidOp "The scripted response does not describe a successful output."
+        | ScriptedResponse.WaitForCancellation
+        | ScriptedResponse.ForNode _ -> invalidOp "The scripted response does not describe a successful output."
 
     let waitForCancellation (cancellationToken: CancellationToken) =
         task {
@@ -764,37 +798,49 @@ module internal ScriptedRuntimeHelpers =
 
     let inline runAsync
         (responseQueue: ConcurrentQueue<ScriptedResponse>)
+        (matchedResponses: ConcurrentDictionary<string, ScriptedResponse>)
         (calls: ConcurrentQueue<RecordedCall>)
+        (runId: RunId)
+        (nodePath: string)
         (agent: AgentDefinition)
         (signature: obj)
         (input: obj)
         (options: RunOptions)
+        (onDelta: string -> Task)
         (cancellationToken: CancellationToken)
         =
-        let runId = RunId.New()
         let startedAt = DateTimeOffset.UtcNow
-        recordCall calls ScriptedCallKind.Run runId agent signature input options
+        recordCall calls ScriptedCallKind.Run runId nodePath agent signature input options
 
-        let response = dequeueResponse responseQueue runId agent signature
+        let response =
+            dequeueResponse responseQueue matchedResponses nodePath runId agent signature
 
-        match response with
-        | ScriptedResponse.OutputJson _
-        | ScriptedResponse.OutputValue _
-        | ScriptedResponse.Stream _ ->
-            let output = readSuccess signature response
-            let completedAt = DateTimeOffset.UtcNow
-            Task.FromResult(createResult runId (CircuitResult<'Output>.Success output) startedAt completedAt)
-        | ScriptedResponse.Failure failure ->
-            let completedAt = DateTimeOffset.UtcNow
-            let stampedFailure = Reflection.stampFailureRunId runId failure
-            Task.FromResult(createResult runId (CircuitResult<'Output>.Error stampedFailure) startedAt completedAt)
-        | ScriptedResponse.Throw error -> raise error
-        | ScriptedResponse.WaitForCancellation ->
-            (waitForCancellation cancellationToken)
-                .ContinueWith(fun (_: Task) ->
-                    let completedAt = DateTimeOffset.UtcNow
-                    let failure = Reflection.createCancelledFailure runId
-                    createResult runId (CircuitResult<'Output>.Error failure) startedAt completedAt)
+        task {
+            match response with
+            | ScriptedResponse.OutputJson _
+            | ScriptedResponse.OutputValue _ ->
+                let output = readSuccess signature response
+                let completedAt = DateTimeOffset.UtcNow
+                return createResult runId (CircuitResult<'Output>.Success output) startedAt completedAt
+            | ScriptedResponse.Stream deltas ->
+                for delta in deltas do
+                    do! onDelta delta
+
+                let output = readSuccess signature response
+                let completedAt = DateTimeOffset.UtcNow
+                return createResult runId (CircuitResult<'Output>.Success output) startedAt completedAt
+            | ScriptedResponse.Failure failure ->
+                let completedAt = DateTimeOffset.UtcNow
+                let stampedFailure = Reflection.stampFailureRunId runId failure
+                return createResult runId (CircuitResult<'Output>.Error stampedFailure) startedAt completedAt
+            | ScriptedResponse.Throw error -> return raise error
+            | ScriptedResponse.WaitForCancellation ->
+                do! waitForCancellation cancellationToken
+                let completedAt = DateTimeOffset.UtcNow
+                let failure = Reflection.createCancelledFailure runId
+                return createResult runId (CircuitResult<'Output>.Error failure) startedAt completedAt
+            | ScriptedResponse.ForNode _ -> return invalidOp "Matched responses must be unwrapped before execution."
+        }
 
     let inline runStreaming
         (responseQueue: ConcurrentQueue<ScriptedResponse>)
@@ -807,9 +853,16 @@ module internal ScriptedRuntimeHelpers =
         =
         let runId = RunId.New()
         let startedAt = DateTimeOffset.UtcNow
-        recordCall calls ScriptedCallKind.Streaming runId agent signature input options
+        recordCall calls ScriptedCallKind.Streaming runId "legacy-stream" agent signature input options
 
-        let response = dequeueResponse responseQueue runId agent signature
+        let response =
+            dequeueResponse
+                responseQueue
+                (ConcurrentDictionary<string, ScriptedResponse>(StringComparer.Ordinal))
+                "legacy-stream"
+                runId
+                agent
+                signature
 
         match response with
         | ScriptedResponse.OutputJson _
@@ -850,85 +903,79 @@ module internal ScriptedRuntimeHelpers =
 
             AsyncEnumerable.WaitForCancellationAsyncEnumerable(createStartedEvent runId startedAt, terminal)
             :> IAsyncEnumerable<RunEvent<'Output>>
+        | ScriptedResponse.ForNode _ -> invalidOp "Matched responses are supported only by unified scheduler leaves."
 
-type internal ScriptedCoreRuntime
-    (responseQueue: ConcurrentQueue<ScriptedResponse>, calls: ConcurrentQueue<RecordedCall>) =
-    interface ICircuitRuntime with
-        member _.RunAsync<'Input, 'Output>
-            (
-                agent: AgentDefinition,
-                signature: Signature<'Input, 'Output>,
-                input: 'Input,
-                options: RunOptions,
-                cancellationToken: CancellationToken
-            ) : Task<RunResult<'Output>> =
-            ScriptedRuntimeHelpers.runAsync
-                responseQueue
-                calls
-                agent
-                (box signature)
-                (box input)
-                options
-                cancellationToken
-
-        member _.RunStreamingAsync<'Input, 'Output>
-            (
-                agent: AgentDefinition,
-                signature: Signature<'Input, 'Output>,
-                input: 'Input,
-                options: RunOptions,
-                cancellationToken: CancellationToken
-            ) : IAsyncEnumerable<RunEvent<'Output>> =
-            ScriptedRuntimeHelpers.runStreaming
-                responseQueue
-                calls
-                agent
-                (box signature)
-                (box input)
-                options
-                cancellationToken
-
-        member _.SerializeSessionAsync(_agent, session, _cancellationToken) =
-            if isNull (box session) then
-                nullArg "session"
-
-            ValueTask<JsonElement>(Reflection.createSessionState session)
-
-        member _.DeserializeSessionAsync(_agent, state, _cancellationToken) =
-            ValueTask<CircuitSession>(Reflection.deserializeSessionState state)
-
-/// Implements <see cref="T:Circuit.Core.ICircuitRuntime" /> with a fixed queue of scripted responses.
-/// <param name="responses">The responses to consume in call order.</param>
-/// <remarks>
-/// The runtime is deterministic and process-local. It is intended for tests, not for security validation or provider-behavior emulation beyond the scripted queue.
-/// </remarks>
+/// Implements the unified Circuit runtime with a deterministic queue of scripted agent-leaf responses.
 [<Sealed>]
 type ScriptedRuntime(responses: IEnumerable<ScriptedResponse>) =
+    inherit CircuitRuntime()
+
     let responseSnapshot =
         if isNull responses then
             nullArg "responses"
 
         responses |> Seq.toArray
 
-    let responseQueue = ConcurrentQueue<ScriptedResponse>(responseSnapshot)
+    let matchedResponses =
+        ConcurrentDictionary<string, ScriptedResponse>(StringComparer.Ordinal)
+
+    let ordinaryResponses = ResizeArray<ScriptedResponse>()
+
+    do
+        for response in responseSnapshot do
+            match response with
+            | ScriptedResponse.ForNode(suffix, value) ->
+                if String.IsNullOrWhiteSpace suffix then
+                    invalidArg "responses" "Matched node suffixes cannot be blank."
+
+                if not (matchedResponses.TryAdd(suffix, value)) then
+                    invalidArg "responses" $"Duplicate matched node suffix '{suffix}'."
+            | value -> ordinaryResponses.Add value
+
+    let responseQueue = ConcurrentQueue<ScriptedResponse>(ordinaryResponses)
     let calls = ConcurrentQueue<RecordedCall>()
-    let runtime = ScriptedCoreRuntime(responseQueue, calls) :> ICircuitRuntime
 
     /// Gets the calls recorded so far.
     member _.Calls = calls.ToArray() :> IReadOnlyList<RecordedCall>
 
     /// Gets the number of scripted responses that have not yet been consumed.
-    member _.RemainingResponses = responseQueue.Count
+    member _.RemainingResponses = responseQueue.Count + matchedResponses.Count
 
-    interface ICircuitRuntime with
-        member _.RunAsync<'Input, 'Output>(agent, signature, input, options, cancellationToken) =
-            runtime.RunAsync<'Input, 'Output>(agent, signature, input, options, cancellationToken)
+    /// <summary>Gets the execute agent async value.</summary>
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            schedulerRunId,
+            nodePath,
+            agent,
+            signature: Signature<'Input, 'Output>,
+            input: 'Input,
+            options,
+            _idempotencyKey,
+            onDelta,
+            _onApproval,
+            _onSession,
+            cancellationToken
+        ) : Task<RunResult<'Output>> =
+        ScriptedRuntimeHelpers.runAsync
+            responseQueue
+            matchedResponses
+            calls
+            schedulerRunId
+            nodePath
+            agent
+            (box signature)
+            (box input)
+            options
+            onDelta
+            cancellationToken
 
-        member _.RunStreamingAsync<'Input, 'Output>(agent, signature, input, options, cancellationToken) =
-            runtime.RunStreamingAsync<'Input, 'Output>(agent, signature, input, options, cancellationToken)
+    /// <summary>Gets the serialize session core async value.</summary>
+    override _.SerializeSessionCoreAsync(_agent, session, _runOptions, _cancellationToken) =
+        if isNull (box session) then
+            nullArg "session"
 
-        member _.SerializeSessionAsync(agent, session, cancellationToken) =
-            runtime.SerializeSessionAsync(agent, session, cancellationToken)
+        ValueTask<JsonElement>(Reflection.createSessionState session)
 
-        member _.DeserializeSessionAsync(agent, state, cancellationToken) =
-            runtime.DeserializeSessionAsync(agent, state, cancellationToken)
+    /// <summary>Gets the deserialize session core async value.</summary>
+    override _.DeserializeSessionCoreAsync(_agent, state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>(Reflection.deserializeSessionState state)

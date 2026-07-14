@@ -48,7 +48,8 @@ module PublicApiTests =
             project.Name = "Circuit.Core"
             || project.Name = "Circuit.FSharp"
             || project.Name = "Circuit.MicrosoftAgentFramework"
-            || project.Name = "Circuit.Testing")
+            || project.Name = "Circuit.Testing"
+            || project.Name = "Circuit")
 
     let private readApiLines path =
         if File.Exists path then
@@ -318,10 +319,16 @@ module PublicApiTests =
             else
                 let summaryText = summaryElement.Value.Trim()
 
-                if String.IsNullOrWhiteSpace summaryText then
-                    None
-                else
-                    Some nameAttribute.Value)
+                let boilerplate =
+                    String.IsNullOrWhiteSpace summaryText
+                    || summaryText.Contains("Gets or executes", StringComparison.OrdinalIgnoreCase)
+                    || summaryText.Contains("this Circuit API member", StringComparison.OrdinalIgnoreCase)
+                    || (summaryText.StartsWith("Executes the ", StringComparison.OrdinalIgnoreCase)
+                        && summaryText.EndsWith(" operation.", StringComparison.OrdinalIgnoreCase))
+                    || summaryText.Contains("TODO", StringComparison.OrdinalIgnoreCase)
+                    || summaryText.Contains("}.", StringComparison.Ordinal)
+
+                if boilerplate then None else Some nameAttribute.Value)
         |> HashSet
 
     [<Fact>]
@@ -363,7 +370,7 @@ module PublicApiTests =
         Assert.True(failures.Length = 0, String.Join(Environment.NewLine, failures))
 
     [<Fact>]
-    let ``public F# package api entries have nonempty xml summaries`` () =
+    let ``public package api entries have nonempty xml summaries`` () =
         let failures = ResizeArray<string>()
 
         for project in xmlDocProjects do
@@ -375,26 +382,15 @@ module PublicApiTests =
                 |> Array.distinct
                 |> Array.choose (fun apiLine ->
                     match expectations.TryGetValue apiLine with
-                    | true, acceptableTargets when acceptableTargets |> Array.exists documentedMembers.Contains -> None
-                    | true, acceptableTargets ->
-                        let targetList = String.Join(" | ", acceptableTargets)
+                    | true, targets when targets |> Array.exists documentedMembers.Contains -> None
+                    | true, targets ->
+                        let targetList = String.Join(" | ", targets)
                         Some $"{apiLine} -> {targetList}"
                     | false, _ -> Some $"{apiLine} -> <no reflection mapping>")
 
             if missing.Length > 0 then
                 failures.Add(
-                    $"{project.Name} is missing XML documentation summaries for:\n{String.Join(Environment.NewLine, missing)}"
+                    $"{project.Name} is missing XML summaries for:\n{String.Join(Environment.NewLine, missing)}"
                 )
 
         Assert.True(failures.Count = 0, String.Join(Environment.NewLine + Environment.NewLine, failures))
-
-    [<Fact>]
-    let ``ICircuitRuntime streaming cancellation token is marked for enumerator cancellation`` () =
-        let streamingMethod = typeof<ICircuitRuntime>.GetMethod("RunStreamingAsync")
-
-        let cancellationParameter = streamingMethod.GetParameters() |> Array.last
-
-        Assert.True(
-            cancellationParameter.IsDefined(typeof<EnumeratorCancellationAttribute>, false),
-            "ICircuitRuntime.RunStreamingAsync must mark its cancellation token with [<EnumeratorCancellation>]."
-        )

@@ -14,9 +14,9 @@
     <Project Path="tutorials/fsharp/08-tools/Tools.fsproj" />
     <Project Path="tutorials/fsharp/09-approvals/Approvals.fsproj" />
     <Project Path="tutorials/fsharp/10-skills/Skills.fsproj" />
-    <Project Path="tutorials/fsharp/11-circuit-programs/CircuitPrograms.fsproj" />
+    <Project Path="tutorials/fsharp/11-circuit-programs/CircuitComposition.fsproj" />
     <Project Path="tutorials/fsharp/12-parallel-programs/ParallelPrograms.fsproj" />
-    <Project Path="tutorials/fsharp/13-workflows/Workflows.fsproj" />
+    <Project Path="tutorials/fsharp/13-workflows/Pipelines.fsproj" />
     <Project Path="tutorials/fsharp/14-human-review/HumanReview.fsproj" />
     <Project Path="tutorials/fsharp/15-checkpoints/Checkpoints.fsproj" />
     <Project Path="tutorials/fsharp/16-testing/Testing.fsproj" />

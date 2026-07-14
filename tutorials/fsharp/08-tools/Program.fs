@@ -84,14 +84,14 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                     "Please check my current plan and explain whether my active account should have priority support."
             )
 
-        let! result = Agent.run runtime agent signature ticket RunOptions.Default cancellationToken
+        let! result = Circuit.run runtime (Circuit.agent agent signature) ticket RunOptions.Default cancellationToken
 
-        if result.Result.IsSuccess then
-            printfn "Category: %s" result.Result.Value.Category
-            printfn "Suggested reply: %s" result.Result.Value.SuggestedReply
+        if result.IsSuccess then
+            printfn "Category: %s" result.Value.Category
+            printfn "Suggested reply: %s" result.Value.SuggestedReply
             return 0
         else
-            let failure = result.Result.Failure
+            let failure = result.Failure
             eprintfn "Circuit could not complete the request (%O): %s" failure.Code failure.Message
             return 1
     }

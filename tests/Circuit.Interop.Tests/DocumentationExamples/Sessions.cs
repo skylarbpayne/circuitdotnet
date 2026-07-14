@@ -1,17 +1,13 @@
-using System.Text.Json;
 using Circuit;
 
-namespace Circuit.Interop.Tests.DocumentationExamples;
+namespace DocumentationExamples;
 
-internal static class SessionsExample
+internal static class Sessions
 {
-    public static async Task<CircuitSession> RoundTripAsync(
-        IAgentClient client,
-        AgentDefinition agent,
-        CircuitSession session,
-        CancellationToken cancellationToken)
+    internal static CircuitDefinition<string, string> Create()
     {
-        JsonElement state = await client.SerializeSessionAsync(agent, session, cancellationToken);
-        return await client.DeserializeSessionAsync(agent, state, cancellationToken);
+        var agent = new AgentDefinition("docs-agent", "1.0.0", "Docs", "Return output.");
+        var signature = new AgentSignature<string, string>("docs-signature", "1.0.0", "Docs", "Return output.");
+        return CircuitDefinition<string, string>.FromAgent(agent, signature).Define("docs-sessions", "1.0.0");
     }
 }

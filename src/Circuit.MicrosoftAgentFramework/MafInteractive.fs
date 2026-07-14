@@ -81,10 +81,14 @@ module internal MafInteractive =
 
     let start<'Input, 'Output>
         (runtime: MafRuntime)
+        (runId: RunId)
+        (nodePath: string)
+        (idempotencyKey: string)
         (agent: AgentDefinition)
         (signature: Signature<'Input, 'Output>)
         (input: 'Input)
         (runOptions: RunOptions)
+        (onSession: CircuitSession -> Task)
         (startToken: CancellationToken)
         : Task<AgentRun<'Output>> =
         if isNull (box agent) then
@@ -96,9 +100,11 @@ module internal MafInteractive =
         if isNull (box runOptions) then
             nullArg "options"
 
-        let runId = RunId.New()
         let startedAt = DateTimeOffset.UtcNow
-        let runContext = runtime.CreateRunContext(runId, agent, signature, runOptions)
+
+        let runContext =
+            runtime.CreateScheduledRunContext(runId, nodePath, idempotencyKey, agent, signature, runOptions)
+
         let channelOptions = BoundedChannelOptions(MafStreaming.StreamBufferCapacity)
         channelOptions.AllowSynchronousContinuations <- false
         channelOptions.FullMode <- BoundedChannelFullMode.Wait
@@ -119,15 +125,9 @@ module internal MafInteractive =
         let mutable disposed = false
         let mutable background: Task = Task.CompletedTask
 
-        let observerSession =
-            MafObserver.createAgentRunSession
-                runtime.RuntimeOptions.Observers
-                runId
-                agent.Name
-                signature.Id
-                signature.Version
-                (runtime.ResolveRequestModel agent)
-                runOptions.Services
+        // The Core scheduler owns the single Circuit root observer session. Tool events
+        // correlate through the supplied scheduler run id.
+        let observerSession: MafObserver.ObserverSession voption = ValueNone
 
         let mutable usageDetails: UsageDetails = null
         let mutable usage = RunUsage(0, 0)
@@ -303,7 +303,7 @@ module internal MafInteractive =
                     | ValueNone -> ()
 
                     let providerApproval =
-                        MafStreaming.createApprovalRequest signature.JsonSerializerOptions item.Request
+                        MafStreaming.createApprovalRequest runtime.RuntimeOptions.JsonSerializerOptions item.Request
 
                     let argumentsJson =
                         if runOptions.SensitiveDataMode = SensitiveDataMode.Standard then
@@ -410,6 +410,10 @@ module internal MafInteractive =
                                         | Ok(session, wrappedSession) ->
                                             resultSession <- wrappedSession
 
+                                            match wrappedSession with
+                                            | ValueSome activeSession -> do! onSession activeSession
+                                            | ValueNone -> ()
+
                                             match
                                                 runtime.TryCreateInputEnvelope runId signature input lifetimeToken
                                             with
@@ -460,6 +464,12 @@ module internal MafInteractive =
                                                 let mutable roundCompleted = false
 
                                                 while not roundCompleted do
+                                                    // A provider round has completed and the session is quiescent.
+                                                    // Publish a codec-safe snapshot before approvals are exposed.
+                                                    match wrappedSession with
+                                                    | ValueSome activeSession -> do! onSession activeSession
+                                                    | ValueNone -> ()
+
                                                     updateRoundMetadata response
                                                     let! struct (requests, overApprovalLimit) = mapResponse response
 
@@ -644,5 +654,27 @@ type internal MafInteractiveRegistration =
     static do
         MafRuntimeInteractiveDispatch.Dispatcher <-
             { new IMafRuntimeInteractiveDispatcher with
-                member _.Start(runtime, agent, signature, input, runOptions, cancellationToken) =
-                    MafInteractive.start (runtime :?> MafRuntime) agent signature input runOptions cancellationToken }
+                member _.Start
+                    (
+                        runtime,
+                        runId,
+                        nodePath,
+                        idempotencyKey,
+                        agent,
+                        signature,
+                        input,
+                        runOptions,
+                        onSession,
+                        cancellationToken
+                    ) =
+                    MafInteractive.start
+                        (runtime :?> MafRuntime)
+                        runId
+                        nodePath
+                        idempotencyKey
+                        agent
+                        signature
+                        input
+                        runOptions
+                        onSession
+                        cancellationToken }

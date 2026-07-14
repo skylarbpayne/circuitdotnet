@@ -25,14 +25,14 @@ type TicketOutput() =
     [<property: Required; StringLength(500, MinimumLength = 10)>]
     member val SuggestedReply = "" with get, set
 
-let printResult label (result: RunResult<TicketOutput>) =
-    if result.Result.IsSuccess then
-        let output = result.Result.Value
+let printResult label (result: Response<TicketOutput>) =
+    if result.IsSuccess then
+        let output = result.Value
         printfn "%s category: %s" label output.Category
         printfn "%s reply: %s" label output.SuggestedReply
         true
     else
-        let failure = result.Result.Failure
+        let failure = result.Failure
         eprintfn "%s failed (%O): %s" label failure.Code failure.Message
         false
 
@@ -58,12 +58,13 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                 Message = "I requested a reset twice. What should I try next?"
             )
 
-        let! first = Agent.run runtime agent signature firstTicket RunOptions.Default cancellationToken
+        let! first =
+            Circuit.run runtime (Circuit.agent agent signature) firstTicket RunOptions.Default cancellationToken
 
         if not (printResult "First response" first) then
             return 1
         else
-            match first.Session with
+            match first.Metadata.Session with
             | ValueNone ->
                 eprintfn "The provider adapter did not return a continuable session."
                 return 1
@@ -75,7 +76,7 @@ let runAsync (runtime: ICircuitRuntime) cancellationToken =
                     )
 
                 let options = RunOptions.Default |> RunOptions.withSession session
-                let! second = Agent.run runtime agent signature followUp options cancellationToken
+                let! second = Circuit.run runtime (Circuit.agent agent signature) followUp options cancellationToken
                 return if printResult "Follow-up" second then 0 else 1
     }
 

@@ -50,7 +50,7 @@ let createEscalationTool () =
     |> ToolDefinition.withApproval ApprovalMode.Always
     |> fun definition -> ResolvedTool.Create(definition, [ "ticket.escalate" ])
 
-let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
+let runAsync (runtime: ICircuitRuntime) approved cancellationToken =
     task {
         let agent =
             AgentDefinition.create
@@ -74,7 +74,7 @@ let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
                     "Repeated password-reset emails have not arrived. Please escalate this account to a specialist."
             )
 
-        let! run = Agent.start runtime agent signature ticket RunOptions.Default cancellationToken
+        let! run = Circuit.start runtime (Circuit.agent agent signature) ticket RunOptions.Default cancellationToken
         let enumerator = run.Events.GetAsyncEnumerator(cancellationToken)
         let mutable terminalCount = 0
         let mutable approvalCount = 0
@@ -90,15 +90,11 @@ let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
                 else
                     let event = enumerator.Current
 
-                    match event.Kind with
-                    | RunEventKind.ApprovalRequested ->
+                    match event with
+                    | ApprovalRequested request ->
                         approvalCount <- approvalCount + 1
-                        let request = event.Approval.Value
-                        // ArgumentsJson may contain customer data. Inspect only opaque metadata here.
                         printfn "Approval requested for tool '%s' (request %s)." request.ToolName request.RequestId
                         let allowThisRequest = approved && approvalCount = 1
-
-                        printfn "Host decision: %s" (if allowThisRequest then "approve" else "reject")
 
                         let reason =
                             if approvalCount > 1 then
@@ -108,18 +104,32 @@ let runAsync (runtime: IInteractiveCircuitRuntime) approved cancellationToken =
                             else
                                 "rejected by tutorial operator"
 
-                        let response = ApprovalResponse(request.RequestId, allowThisRequest, reason)
-                        do! run.RespondAsync(response, cancellationToken).AsTask()
-                    | RunEventKind.RunCompleted ->
-                        terminalCount <- terminalCount + 1
-                        let output = event.Value.Value
+                        let! accepted =
+                            run
+                                .RespondAsync(
+                                    ApprovalResponse(request.RequestId, allowThisRequest, reason),
+                                    cancellationToken
+                                )
+                                .AsTask()
+
+                        if not accepted.IsSuccess then
+                            eprintfn "Approval response was rejected: %s" accepted.Failure.Message
+                    | OutputProduced(_, response) when response.IsSuccess ->
+                        let output = response.Value
                         printfn "Category: %s" output.Category
                         printfn "Suggested reply: %s" output.SuggestedReply
                         resultCode <- 0
-                    | RunEventKind.RunFailed ->
+                    | OutputProduced(_, response) ->
+                        eprintfn
+                            "Circuit could not complete the request (%O): %s"
+                            response.Failure.Code
+                            response.Failure.Message
+                    | RunCompleted response ->
                         terminalCount <- terminalCount + 1
-                        let failure = event.Failure.Value
-                        eprintfn "Circuit could not complete the request (%O): %s" failure.Code failure.Message
+
+                        match response.Outcome with
+                        | Failed failure -> eprintfn "Circuit run failed (%O): %s" failure.Code failure.Message
+                        | Succeeded _ -> ()
                     | _ -> ()
         finally
             do enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult()
@@ -156,7 +166,7 @@ let main args =
             use chatClient = openAiClient.AsIChatClient()
             let options = MafRuntimeOptions()
             options.ToolResolvers <- [| StaticToolResolver([| createEscalationTool () |]) :> IToolResolver |]
-            let runtime = MafRuntime(chatClient, options) :> IInteractiveCircuitRuntime
+            let runtime = MafRuntime(chatClient, options) :> ICircuitRuntime
             use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45.0))
 
             runAsync runtime approved timeout.Token

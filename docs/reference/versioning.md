@@ -1,40 +1,26 @@
 # Versioning
 
-Circuit uses explicit semantic versions on the major public definition types:
+Circuit uses explicit semantic versions for agents, signatures, tools, skills, and root `Circuit<'Input,'Output>` definitions.
 
-- agent definitions;
-- signatures;
-- tools;
-- skills;
-- workflows.
+## Why versions exist
 
-## Why version values exist
-
-They let you:
-
-- name compatible revisions explicitly;
-- bind sessions and checkpoints to the right definition family;
-- reject unsafe restores when topology or capability snapshots change.
+Versions name compatible revisions, bind sessions and checkpoints to the intended definition family, and make unsafe durable restores fail before resumed work begins.
 
 ## Current rules
 
-- Tool resolver identity is unique by tool ID plus **major** version.
-- Sessions are bound to runtime/definition/signature/capability snapshots, not only an ID string.
-- Workflow checkpoints include definition ID, version, and a topology fingerprint.
-- Workflow fingerprints intentionally hash graph topology and declared definition metadata only. They do **not** hash delegates, selector functions, prompt builders, aggregate functions, loop predicates, or other runtime objects.
+- Tool resolver identity is unique by tool ID plus major version.
+- Sessions bind to the runtime adapter, agent definition, signature, tenant/user context, and resolved capabilities.
+- A `CircuitCheckpoint<'Output>` records the root definition ID, semantic version, exact structural fingerprint, and durable lineage.
+- The fingerprint covers graph topology, node identities and versions, declared types, and frozen constant values.
+- Delegates such as selectors, prompt builders, code handlers, aggregate handlers, and loop predicates cannot be fingerprinted.
+- Generated children are materialized, validated, and fingerprint-checked on resume before their evaluation continues.
 
 ## Recommended practice
 
-- Bump the major version when you break contract compatibility.
-- Keep IDs stable for the same conceptual capability.
-- Treat workflow topology changes as checkpoint-breaking unless proven otherwise.
-- Version skills whenever their instructions, files, or script contract change in a way that could affect behavior.
-- For resumable workflows, **bump the workflow definition semantic version whenever behavior changes inside code delegates, branch selectors, approval prompts, aggregates, or loop predicates**. Those behaviors are outside the fingerprint by design, so the version is the semantic checkpoint boundary.
+- Bump the major version for contract-breaking input, output, or capability changes.
+- Keep IDs stable only for the same conceptual definition.
+- Treat graph topology changes as checkpoint-breaking.
+- Bump a root Circuit version whenever behavior changes inside an unhashable delegate, even if topology is unchanged.
+- Version skills when instructions, files, or script contracts can change behavior.
 
-## Non-guarantees
-
-Circuit does not guarantee:
-
-- automatic migration between versions;
-- semantic compatibility checks beyond the explicit validation and fingerprint rules it enforces;
-- long-term restore compatibility across breaking adapter changes.
+Circuit does not migrate checkpoints automatically or infer semantic compatibility beyond explicit versions, validation, and fingerprints. Adapter format changes may also be checkpoint-breaking.

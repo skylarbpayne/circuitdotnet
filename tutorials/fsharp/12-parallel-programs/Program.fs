@@ -1,104 +1,75 @@
-module Circuit.Tutorial.ParallelPrograms
+module Tutorial
 
 open System
-open System.ComponentModel.DataAnnotations
+open System.Collections.Generic
+open System.Text.Json
 open System.Threading
+open System.Threading.Tasks
 open Circuit.Core
 open Circuit.FSharp
-open Circuit.MicrosoftAgentFramework
-open Microsoft.Extensions.AI
-open OpenAI.Chat
 
-[<AllowNullLiteral>]
-type TicketInput() =
-    [<property: Required; StringLength(120, MinimumLength = 3)>]
-    member val Subject = "" with get, set
+type Ticket = { Id: string; DelayMs: int }
 
-    [<property: Required; StringLength(2000, MinimumLength = 10)>]
-    member val Message = "" with get, set
+type CodeOnlyRuntime() =
+    inherit CircuitRuntime()
 
-[<AllowNullLiteral>]
-type Analysis() =
-    [<property: Required; StringLength(20)>]
-    member val Perspective = "" with get, set
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            _runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        Task.FromException<RunResult<'Output>>(InvalidOperationException("This chapter uses code leaves only."))
 
-    [<property: Required; StringLength(300)>]
-    member val Finding = "" with get, set
+    override _.SerializeSessionCoreAsync(_, _, _runOptions, _) = ValueTask<JsonElement>()
+    override _.DeserializeSessionCoreAsync(_, _, _runOptions, _) = ValueTask<CircuitSession>()
 
-let runAsync (runtime: ICircuitRuntime) cancellationToken =
-    task {
-        let ticket =
-            TicketInput(
-                Subject = "Password reset email never arrived",
-                Message = "I requested a password reset twice, but no email has arrived. What should I try next?"
-            )
+let tickets: IReadOnlyList<Ticket> =
+    [| { Id = "ticket-1"; DelayMs = 80 }
+       { Id = "ticket-2"; DelayMs = 10 }
+       { Id = "ticket-3"; DelayMs = 25 } |]
 
-        let signature =
-            Signature.create<TicketInput, Analysis>
-                "support.analysis"
-                "1.0.0"
-                "Ticket analysis"
-                "Return the requested perspective name and one concise finding."
+let source = Circuit.keyedItems "tickets" "1.0.0" _.Id (fun (_: unit) -> tickets)
 
-        let makeAgent id name instructions =
-            AgentDefinition.create id "1.0.0" name instructions
+let processTicket =
+    Circuit.code "process-ticket" "1.0.0" (fun context ticket ->
+        task {
+            do! Task.Delay(ticket.DelayMs, context.CancellationToken)
+            return Response.succeed context ticket.Id
+        })
 
-        let programs =
-            [ Circuit.call
-                  (makeAgent
-                      "support.sentiment"
-                      "Sentiment analyst"
-                      "Analyze customer sentiment. Set perspective to Sentiment.")
-                  signature
-                  ticket
-              Circuit.call
-                  (makeAgent "support.risk" "Risk analyst" "Analyze account and security risk. Set perspective to Risk.")
-                  signature
-                  ticket
-              Circuit.call
-                  (makeAgent
-                      "support.routing"
-                      "Routing analyst"
-                      "Recommend the responsible support queue. Set perspective to Routing.")
-                  signature
-                  ticket ]
+let handoff =
+    Circuit.code "completion-handoff" "1.0.0" (fun context id ->
+        printfn "downstream accepted %s" id
+        Task.FromResult(Response.succeed context id))
 
-        let! result =
-            Circuit.``parallel`` 2 programs
-            |> Circuit.run runtime RunOptions.Default cancellationToken
-
-        if result.Result.IsSuccess then
-            printfn "Analyses (declaration order):"
-
-            result.Result.Value
-            |> List.iteri (fun index analysis -> printfn "%d. %s: %s" (index + 1) analysis.Perspective analysis.Finding)
-
-            return 0
-        else
-            let failure = result.Result.Failure
-            eprintfn "Parallel program failed (%O): %s" failure.Code failure.Message
-            return 1
-    }
+let pipeline =
+    source
+    |> Circuit.thenStep processTicket
+    |> Circuit.thenStep handoff
+    |> Circuit.define "bounded-pipeline" "1.0.0"
 
 [<EntryPoint>]
 let main _ =
-    let apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-    let model = Environment.GetEnvironmentVariable("OPENAI_MODEL")
+    task {
+        let runtime = CodeOnlyRuntime() :> ICircuitRuntime
 
-    if String.IsNullOrWhiteSpace(apiKey) || String.IsNullOrWhiteSpace(model) then
-        eprintfn "Set OPENAI_API_KEY and OPENAI_MODEL before running this chapter."
-        2
-    else
-        try
-            let openAiClient = ChatClient(model, apiKey)
-            use chatClient = openAiClient.AsIChatClient()
-            let runtime = MafRuntime(chatClient, MafRuntimeOptions()) :> ICircuitRuntime
-            use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60.0))
-            runAsync runtime timeout.Token |> fun work -> work.GetAwaiter().GetResult()
-        with
-        | :? OperationCanceledException ->
-            eprintfn "The analyses timed out or were cancelled."
-            1
-        | _ ->
-            eprintfn "Configuration or provider request failed. See your provider and account diagnostics."
-            1
+        let! result =
+            Circuit.collect runtime pipeline () (RunOptions.Default.WithMaxConcurrency(2)) CancellationToken.None
+
+        if result.IsSuccess then
+            printfn "completion order: %s" (result.Value |> Seq.map _.Value |> String.concat ", ")
+            return 0
+        else
+            eprintfn "%s" result.Failure.Message
+            return 1
+    }
+    |> fun work -> work.GetAwaiter().GetResult()

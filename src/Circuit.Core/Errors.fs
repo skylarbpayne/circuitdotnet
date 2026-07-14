@@ -3,7 +3,7 @@ namespace Circuit.Core
 open System
 open System.Text.Json.Serialization
 
-/// Classifies the high-level reason a Circuit run or workflow operation failed.
+/// Classifies the high-level reason a Circuit run or graph operation failed.
 type CircuitFailureCode =
     /// Input or output validation rejected data before the operation could continue.
     | Validation = 0
@@ -19,12 +19,24 @@ type CircuitFailureCode =
     | ApprovalRequired = 5
     /// Skill resolution, file loading, resource access, or script execution failed.
     | Skill = 6
-    /// Workflow compilation, execution, or resume processing failed.
-    | Workflow = 7
-    /// A checkpoint could not be resumed because it no longer matched the target workflow definition.
+    /// Scheduler compilation, graph execution, or resume processing failed.
+    | Engine = 7
+    /// A checkpoint could not be resumed because it no longer matched the target Circuit definition.
     | CheckpointMismatch = 8
     /// Cancellation was requested before the operation could complete successfully.
     | Cancelled = 9
+    /// The Circuit or source cannot be represented by the configured checkpoint codec.
+    | NotCheckpointable = 10
+    /// An execution projection observed a different root cardinality than it requires.
+    | Cardinality = 11
+    /// A finite or resumable source produced the same stable item key more than once.
+    | DuplicateItemKey = 12
+    /// A configured scheduler or graph resource bound was exhausted.
+    | ResourceLimit = 13
+    /// A runtime-generated Circuit failed validation or replay fingerprint verification.
+    | GeneratedGraphIntegrity = 14
+    /// An approval response was unknown, mismatched, or had already been consumed.
+    | InvalidApprovalResponse = 15
 
 /// Describes a failed Circuit operation in a serializable, runtime-neutral form.
 /// <remarks>
@@ -66,6 +78,10 @@ type CircuitFailure
     [<JsonIgnore>]
     member _.Exception = innerException
 
+    /// Creates an application-defined expected failure without run correlation.
+    static member Create(code: CircuitFailureCode, message: string) =
+        CircuitFailure(code, message, ValueNone, ValueNone, ValueNone, ValueNone)
+
 module internal Failure =
     let create code message runId operationId requestId innerException =
         CircuitFailure(code, message, runId, operationId, requestId, innerException)
@@ -78,9 +94,15 @@ type private CircuitError =
     | Tool of CircuitFailure
     | ApprovalRequired of CircuitFailure
     | Skill of CircuitFailure
-    | Workflow of CircuitFailure
+    | Engine of CircuitFailure
     | CheckpointMismatch of CircuitFailure
     | Cancelled of CircuitFailure
+    | NotCheckpointable of CircuitFailure
+    | Cardinality of CircuitFailure
+    | DuplicateItemKey of CircuitFailure
+    | ResourceLimit of CircuitFailure
+    | GeneratedGraphIntegrity of CircuitFailure
+    | InvalidApprovalResponse of CircuitFailure
 
 module private CircuitError =
     let ofFailure (failure: CircuitFailure) =
@@ -92,9 +114,15 @@ module private CircuitError =
         | CircuitFailureCode.Tool -> Tool failure
         | CircuitFailureCode.ApprovalRequired -> ApprovalRequired failure
         | CircuitFailureCode.Skill -> Skill failure
-        | CircuitFailureCode.Workflow -> Workflow failure
+        | CircuitFailureCode.Engine -> Engine failure
         | CircuitFailureCode.CheckpointMismatch -> CheckpointMismatch failure
         | CircuitFailureCode.Cancelled -> Cancelled failure
+        | CircuitFailureCode.NotCheckpointable -> NotCheckpointable failure
+        | CircuitFailureCode.Cardinality -> Cardinality failure
+        | CircuitFailureCode.DuplicateItemKey -> DuplicateItemKey failure
+        | CircuitFailureCode.ResourceLimit -> ResourceLimit failure
+        | CircuitFailureCode.GeneratedGraphIntegrity -> GeneratedGraphIntegrity failure
+        | CircuitFailureCode.InvalidApprovalResponse -> InvalidApprovalResponse failure
         | _ -> invalidArg "failure" "Unknown failure code."
 
     let toFailure error =
@@ -106,9 +134,15 @@ module private CircuitError =
         | Tool failure
         | ApprovalRequired failure
         | Skill failure
-        | Workflow failure
+        | Engine failure
         | CheckpointMismatch failure
-        | Cancelled failure -> failure
+        | Cancelled failure
+        | NotCheckpointable failure
+        | Cardinality failure
+        | DuplicateItemKey failure
+        | ResourceLimit failure
+        | GeneratedGraphIntegrity failure
+        | InvalidApprovalResponse failure -> failure
 
 /// Represents either a successful value or a <see cref="T:Circuit.Core.CircuitFailure" />.
 type CircuitResult<'T> =

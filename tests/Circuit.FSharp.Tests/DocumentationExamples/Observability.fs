@@ -1,11 +1,11 @@
-namespace Circuit.FSharp.Tests.DocumentationExamples
+module DocumentationExamples.Observability
 
-open Circuit
-open Circuit.MicrosoftAgentFramework
+open System.Threading
+open Circuit.Core
+open Circuit.FSharp
 
-module ObservabilityExample =
-    let createObserver () =
-        let options = OpenTelemetryRunObserverOptions()
-        options.CaptureOutput <- true
-        options.Redactor <- System.Func<string, string>(fun text -> text.Replace("secret", "[redacted]"))
-        OpenTelemetryRunObserver(options) :> Circuit.IRunObserver
+let definition: Circuit<unit, string> =
+    Circuit.value "ok" |> Circuit.define "docs-observability" "1.0.0"
+
+let run (runtime: ICircuitRuntime) =
+    Circuit.run runtime definition () RunOptions.Default CancellationToken.None

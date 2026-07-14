@@ -24,7 +24,7 @@ This example uses `ScriptedRuntime` so it compiles and runs offline.
 
 ## Cancellation behavior
 
-Cancellation flows through `Agent.run`, tool handlers, workflow steps, and F# lightweight programs through the active `CancellationToken`.
+Cancellation flows through `Circuit.run over Circuit.agent`, tool handlers, workflow steps, and F# lightweight programs through the active `CancellationToken`.
 
 ## Security notes
 

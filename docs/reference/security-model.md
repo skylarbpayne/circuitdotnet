@@ -30,7 +30,7 @@ You still own:
 
 ## Checkpoint trust boundary
 
-`WorkflowCheckpoint.Deserialize` validates only the checkpoint envelope's structure and format compatibility. It does not authenticate the checkpoint or verify its integrity. Treat checkpoints as trusted sensitive state: enforce serialized-size limits before parsing, protect checkpoint storage with appropriate authentication and encryption, and never pass a client-supplied checkpoint envelope directly to `Deserialize`.
+`CircuitCheckpoint.Deserialize` validates only the checkpoint envelope's structure and format compatibility. It does not authenticate the checkpoint or verify its integrity. Treat checkpoints as trusted sensitive state: enforce serialized-size limits before parsing, protect checkpoint storage with appropriate authentication and encryption, and never pass a client-supplied checkpoint envelope directly to `Deserialize`.
 
 ## Non-guarantees
 

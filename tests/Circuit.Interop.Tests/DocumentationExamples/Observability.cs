@@ -1,25 +1,13 @@
 using Circuit;
-using Circuit.MicrosoftAgentFramework;
-using Microsoft.Extensions.AI;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Circuit.Interop.Tests.DocumentationExamples;
+namespace DocumentationExamples;
 
-internal static class ObservabilityExample
+internal static class Observability
 {
-    public static IServiceCollection AddObservedCircuit(IServiceCollection services, IChatClient chatClient)
+    internal static CircuitDefinition<string, string> Create()
     {
-        services.AddSingleton(chatClient);
-        services.AddCircuit(options =>
-        {
-            options.AddRunObserver(
-                new OpenTelemetryRunObserver(new OpenTelemetryRunObserverOptions
-                {
-                    CaptureOutput = true,
-                    Redactor = text => text.Replace("secret", "[redacted]", StringComparison.OrdinalIgnoreCase),
-                }));
-        });
-
-        return services;
+        var agent = new AgentDefinition("docs-agent", "1.0.0", "Docs", "Return output.");
+        var signature = new AgentSignature<string, string>("docs-signature", "1.0.0", "Docs", "Return output.");
+        return CircuitDefinition<string, string>.FromAgent(agent, signature).Define("docs-observability", "1.0.0");
     }
 }
