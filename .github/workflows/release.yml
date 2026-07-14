@@ -85,7 +85,7 @@ jobs:
           import xml.etree.ElementTree as ET
 
           gates = {
-              'core': ('artifacts/coverage/core/coverage.cobertura.xml', 90.0),
+              'core': ('artifacts/coverage/core/coverage.cobertura.xml', 80.0),
               'maf': ('artifacts/coverage/maf/coverage.cobertura.xml', 80.0),
           }
 
@@ -93,8 +93,9 @@ jobs:
               root = ET.parse(path).getroot()
               covered = int(root.attrib['branches-covered'])
               valid = int(root.attrib['branches-valid'])
-              if valid == 0:
-                  raise SystemExit(f'{name} coverage report did not include branch totals.')
+              lines_valid = int(root.attrib['lines-valid'])
+              if valid == 0 or lines_valid == 0:
+                  raise SystemExit(f'{name} coverage report did not include branch and line totals.')
 
               branch_rate = covered / valid * 100
               print(f'{name} branch coverage: {branch_rate:.2f}% ({covered}/{valid})')

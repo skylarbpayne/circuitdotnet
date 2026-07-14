@@ -157,7 +157,8 @@ type private ConcurrentSessionRuntime() =
     override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
         ValueTask<CircuitSession>()
 
-type private AliasedSessionRuntime(blockExecution: bool, ?throwExecutor: bool, ?throwCodec: bool) =
+type private AliasedSessionRuntime
+    (blockExecution: bool, ?throwExecutor: bool, ?throwCodec: bool, ?restoreNullSession: bool) =
     inherit CircuitRuntime()
 
     let started =
@@ -168,12 +169,15 @@ type private AliasedSessionRuntime(blockExecution: bool, ?throwExecutor: bool, ?
 
     let mutable active = 0
     let mutable maximum = 0
+    let mutable executions = 0
     let throwExecutor = defaultArg throwExecutor false
     let throwCodec = defaultArg throwCodec false
+    let restoreNullSession = defaultArg restoreNullSession false
 
     member _.Started = started.Task
     member _.Release() = release.TrySetResult(()) |> ignore
     member _.Maximum = maximum
+    member _.Executions = executions
 
     override _.ExecuteAgentAsync<'Input, 'Output>
         (
@@ -190,6 +194,7 @@ type private AliasedSessionRuntime(blockExecution: bool, ?throwExecutor: bool, ?
             cancellationToken
         ) =
         task {
+            Interlocked.Increment(&executions) |> ignore
             let current = Interlocked.Increment(&active)
             maximum <- max maximum current
             started.TrySetResult(()) |> ignore
@@ -226,15 +231,164 @@ type private AliasedSessionRuntime(blockExecution: bool, ?throwExecutor: bool, ?
         ValueTask<JsonElement>(document.RootElement.Clone())
 
     override _.DeserializeSessionCoreAsync(_agent, state, _runOptions, _cancellationToken) =
-        ValueTask<CircuitSession>(
-            CircuitSession(
-                state.GetProperty("id").GetString(),
-                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
-                ValueSome "test",
-                ValueSome "definition",
-                ValueSome(box "restored")
+        if restoreNullSession then
+            ValueTask<CircuitSession>(Unchecked.defaultof<CircuitSession>)
+        else
+            ValueTask<CircuitSession>(
+                CircuitSession(
+                    state.GetProperty("id").GetString(),
+                    Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                    ValueSome "test",
+                    ValueSome "definition",
+                    ValueSome(box "restored")
+                )
             )
-        )
+
+type private AgentFailureRuntime() =
+    inherit CircuitRuntime()
+
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        task {
+            do! onDelta "partial provider output"
+
+            return
+                RunResult(
+                    runId,
+                    CircuitResult<'Output>
+                        .Error(CircuitFailure.Create(CircuitFailureCode.Provider, "provider rejected")),
+                    RunUsage(2, 3),
+                    ValueNone,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow
+                )
+        }
+
+    override _.SerializeSessionCoreAsync(_agent, _session, _runOptions, _cancellationToken) = ValueTask<JsonElement>()
+
+    override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>()
+
+type private AgentApprovalRuntime() =
+    inherit CircuitRuntime()
+
+    let mutable providerResponse: ApprovalResponse option = None
+
+    member _.ProviderResponse = providerResponse
+
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        task {
+            let! approved = onApproval (ApprovalRequest("provider-request", "provider-tool", ValueSome "{}"))
+
+            providerResponse <- Some approved
+
+            return
+                RunResult(
+                    runId,
+                    CircuitResult<'Output>.Success(unbox<'Output> (box approved.Approved)),
+                    RunUsage(0, 0),
+                    ValueNone,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow
+                )
+        }
+
+    override _.SerializeSessionCoreAsync(_agent, _session, _runOptions, _cancellationToken) = ValueTask<JsonElement>()
+
+    override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>()
+
+type private ThrowingObservationRuntime() =
+    inherit CircuitRuntime()
+
+    let mutable observations = 0
+    member _.Observations = observations
+
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            _runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        Task.FromException<RunResult<'Output>>(InvalidOperationException("No agent leaf was expected."))
+
+    override _.SerializeSessionCoreAsync(_agent, _session, _runOptions, _cancellationToken) = ValueTask<JsonElement>()
+
+    override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>()
+
+    override _.ObserveCircuitAsync(_observation, _options, _cancellationToken) =
+        Interlocked.Increment(&observations) |> ignore
+        Task.FromException(InvalidOperationException("observer failed"))
+
+type private HangingObservationRuntime() =
+    inherit CircuitRuntime()
+
+    let observationStarted =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    let never =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    member _.ObservationStarted = observationStarted.Task
+
+    override _.ExecuteAgentAsync<'Input, 'Output>
+        (
+            _runId,
+            _path,
+            _agent,
+            _signature: Signature<'Input, 'Output>,
+            _input,
+            _options,
+            _idempotencyKey,
+            _onDelta,
+            _onApproval,
+            _onSession,
+            _cancellationToken
+        ) =
+        Task.FromException<RunResult<'Output>>(InvalidOperationException("No agent leaf was expected."))
+
+    override _.SerializeSessionCoreAsync(_agent, _session, _runOptions, _cancellationToken) = ValueTask<JsonElement>()
+
+    override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
+        ValueTask<CircuitSession>()
+
+    override _.ObserveCircuitAsync(_observation, _options, _cancellationToken) =
+        observationStarted.TrySetResult(()) |> ignore
+        never.Task
 
 type private CodeOnlyRuntime() =
     inherit CircuitRuntime()
@@ -259,6 +413,83 @@ type private CodeOnlyRuntime() =
 
     override _.DeserializeSessionCoreAsync(_agent, _state, _runOptions, _cancellationToken) =
         ValueTask<CircuitSession>()
+
+type private ScriptedEvents<'T>(values: 'T array, failAt: int option) =
+    let mutable moves = 0
+    let mutable disposals = 0
+
+    member _.Moves = moves
+    member _.Disposals = disposals
+
+    interface IAsyncEnumerable<'T> with
+        member _.GetAsyncEnumerator(_cancellationToken) =
+            let mutable index = -1
+
+            { new IAsyncEnumerator<'T> with
+                member _.Current = values[index]
+
+                member _.MoveNextAsync() =
+                    moves <- moves + 1
+                    index <- index + 1
+
+                    match failAt with
+                    | Some expected when index = expected ->
+                        ValueTask<bool>(Task.FromException<bool>(InvalidOperationException("scripted event failure")))
+                    | _ -> ValueTask<bool>(index < values.Length)
+
+                member _.DisposeAsync() =
+                    disposals <- disposals + 1
+                    ValueTask() }
+
+type private ScriptedProjectionRuntime(events: CircuitEvent<int> array, ?failAt: int, ?failStart: bool) =
+    let mutable starts = 0
+    let mutable disposals = 0
+    let failStart = defaultArg failStart false
+    let scripted = ScriptedEvents(events, failAt)
+
+    member _.Starts = starts
+    member _.Disposals = disposals
+    member _.EventMoves = scripted.Moves
+    member _.EventDisposals = scripted.Disposals
+
+    interface ICircuitRuntime with
+        member _.StartAsync<'Input, 'Output>
+            (
+                _circuit: Circuit<'Input, 'Output>,
+                _input: 'Input,
+                _options: RunOptions,
+                _cancellationToken: CancellationToken
+            ) =
+            starts <- starts + 1
+
+            if failStart then
+                Task.FromException<CircuitRun<'Output>>(InvalidOperationException("scripted start failure"))
+            else
+                let typedEvents = scripted :> obj |> unbox<IAsyncEnumerable<CircuitEvent<'Output>>>
+
+                Task.FromResult(
+                    CircuitRun<'Output>(
+                        RunId.New(),
+                        typedEvents,
+                        (fun _ -> ValueTask<Response<unit>>()),
+                        (fun _ -> ValueTask<Response<CircuitCheckpoint<'Output>>>()),
+                        (fun () ->
+                            disposals <- disposals + 1
+                            ValueTask())
+                    )
+                )
+
+        member _.ResumeAsync<'Input, 'Output>
+            (
+                _circuit: Circuit<'Input, 'Output>,
+                _checkpoint: CircuitCheckpoint<'Output>,
+                _options: ResumeOptions,
+                _cancellationToken: CancellationToken
+            ) =
+            Task.FromException<CircuitRun<'Output>>(InvalidOperationException("Resume was not expected."))
+
+        member _.SerializeSessionAsync(_agent, _session, _cancellationToken) = ValueTask<JsonElement>()
+        member _.DeserializeSessionAsync(_agent, _state, _cancellationToken) = ValueTask<CircuitSession>()
 
 module private Helpers =
     let runtime = CodeOnlyRuntime() :> ICircuitRuntime
@@ -412,6 +643,177 @@ let ``approval pauses one lane and accepts one matching response`` () =
     }
 
 [<Fact>]
+let ``agent leaf approval maps public decisions back to provider request ids`` () =
+    task {
+        let runtime = AgentApprovalRuntime()
+
+        let agent =
+            AgentDefinition.Create(
+                "approval-agent",
+                "1.0.0",
+                "Approval agent",
+                "Request approval",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                Seq.empty
+            )
+
+        let signature =
+            Signature<unit, bool>
+                .Create(
+                    "approval-signature",
+                    "1.0.0",
+                    "Approval signature",
+                    "Return the decision",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let definition = Circuit.agent agent signature
+
+        let! run = Circuit.start (runtime :> ICircuitRuntime) definition () Helpers.options CancellationToken.None
+
+        let enumerator = run.Events.GetAsyncEnumerator()
+        let mutable publicRequest: ApprovalRequest option = None
+        let mutable output: Response<bool> option = None
+
+        while output.IsNone do
+            let! more = enumerator.MoveNextAsync().AsTask()
+            Assert.True(more)
+
+            match enumerator.Current with
+            | ApprovalRequested request ->
+                publicRequest <- Some request
+                Assert.False(StringComparer.Ordinal.Equals("provider-request", request.RequestId))
+                Assert.Equal("provider-tool", request.ToolName)
+
+                let! accepted =
+                    run
+                        .RespondAsync(
+                            ApprovalResponse(request.RequestId, true, "approved by host"),
+                            CancellationToken.None
+                        )
+                        .AsTask()
+
+                Assert.True(accepted.IsSuccess)
+            | OutputProduced(_, response) -> output <- Some response
+            | _ -> ()
+
+        Assert.True(publicRequest.IsSome)
+        Assert.True(output.Value.IsSuccess)
+        Assert.True(output.Value.Value)
+        Assert.True(runtime.ProviderResponse.IsSome)
+        Assert.Equal("provider-request", runtime.ProviderResponse.Value.RequestId)
+        Assert.True(runtime.ProviderResponse.Value.Approved)
+        Assert.Equal("approved by host", runtime.ProviderResponse.Value.Note)
+        do! enumerator.DisposeAsync().AsTask()
+        do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``agent failures restamp paths emit deltas and reject cross-agent session sharing`` () =
+    task {
+        let failingRuntime = AgentFailureRuntime()
+
+        let failedAgent =
+            AgentDefinition.Create(
+                "failed-agent",
+                "1.0.0",
+                "Failed agent",
+                "Fail with a delta",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                Seq.empty
+            )
+
+        let failedSignature =
+            Signature<unit, int>
+                .Create(
+                    "failed-agent-signature",
+                    "1.0.0",
+                    "Failed signature",
+                    "Return an integer",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let failedDefinition = Circuit.agent failedAgent failedSignature
+
+        let! failedRun =
+            Circuit.start (failingRuntime :> ICircuitRuntime) failedDefinition () Helpers.options CancellationToken.None
+
+        let! failureEvents = Helpers.collectEvents failedRun
+
+        let delta =
+            failureEvents
+            |> Array.choose (function
+                | OutputDelta value -> Some value
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.Equal("partial provider output", delta.Text)
+
+        let failedOutput =
+            failureEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.False(failedOutput.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Provider, failedOutput.Failure.Code)
+        Assert.Equal(ValueSome failedOutput.Metadata.NodePath, failedOutput.Failure.OperationId)
+        Assert.Equal(2, failedOutput.Metadata.Usage.InputTokens)
+        Assert.Equal(3, failedOutput.Metadata.Usage.OutputTokens)
+        do! (failedRun :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        let signature =
+            Signature<unit, unit>
+                .Create(
+                    "shared-session-signature",
+                    "1.0.0",
+                    "Shared session",
+                    "Return unit",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let createAgent id =
+            AgentDefinition.Create(id, "1.0.0", id, "Return unit", ValueNone, Seq.empty, Seq.empty, Seq.empty)
+
+        let branches =
+            [| Circuit.agent (createAgent "session-agent-one") signature
+               Circuit.agent (createAgent "session-agent-two") signature |]
+            :> IReadOnlyList<Circuit<unit, unit>>
+
+        let definition = Circuit.merge "cross-agent-session" "1.0.0" 2 branches
+
+        let session =
+            CircuitSession(
+                "shared-session",
+                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                ValueSome "test",
+                ValueSome "definition",
+                ValueNone
+            )
+
+        let options = Helpers.options.WithSession session
+        let runtime = ConcurrentSessionRuntime()
+
+        let! shared = Circuit.collect (runtime :> ICircuitRuntime) definition () options CancellationToken.None
+
+        Assert.False(shared.IsSuccess)
+        Assert.Equal(CircuitFailureCode.GeneratedGraphIntegrity, shared.Failure.Code)
+        Assert.Contains("cannot be shared", shared.Failure.Message)
+        Assert.True(shared.Failure.Exception.IsNone)
+    }
+
+[<Fact>]
 let ``run emits exactly one terminal event`` () =
     task {
         let circuit = Circuit.value 42
@@ -426,6 +828,19 @@ let ``run emits exactly one terminal event`` () =
 
         Assert.Single(terminals) |> ignore
         do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``observer failures remain isolated from scheduler protocol outcomes`` () =
+    task {
+        let runtime = ThrowingObservationRuntime()
+
+        let! response =
+            Circuit.run (runtime :> ICircuitRuntime) (Circuit.value 42) () Helpers.options CancellationToken.None
+
+        Assert.True(response.IsSuccess)
+        Assert.Equal(42, response.Value)
+        Assert.Equal(4, runtime.Observations)
     }
 
 [<Fact>]
@@ -725,6 +1140,51 @@ let ``async sources run but reject checkpoint creation`` () =
         Assert.False(checkpoint.IsSuccess)
         Assert.Equal(CircuitFailureCode.NotCheckpointable, checkpoint.Failure.Code)
         do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``checkpoint creation reports snapshot codec and serialized size failures`` () =
+    task {
+        let unsupported =
+            Circuit.items "unsupported-checkpoint-item" "1.0.0" (fun (_: unit) ->
+                [| typeof<int> |] :> IReadOnlyList<Type>)
+
+        let! unsupportedRun = Circuit.start Helpers.runtime unsupported () Helpers.options CancellationToken.None
+
+        let! unsupportedEvents = Helpers.collectEvents unsupportedRun
+
+        let unsupportedOutput =
+            unsupportedEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response.Value
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.Same(typeof<int>, unsupportedOutput)
+
+        let! unsupportedCheckpoint = unsupportedRun.CreateCheckpointAsync(CancellationToken.None).AsTask()
+
+        Assert.False(unsupportedCheckpoint.IsSuccess)
+        Assert.Equal(CircuitFailureCode.NotCheckpointable, unsupportedCheckpoint.Failure.Code)
+        Assert.Contains("could not be encoded", unsupportedCheckpoint.Failure.Message)
+        Assert.True(unsupportedCheckpoint.Failure.Exception.IsSome)
+        do! (unsupportedRun :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        let largeInput = String('x', 4096)
+
+        let compactOutput =
+            Circuit.code "large-checkpoint-input" "1.0.0" (fun context (_: string) -> Helpers.success context 1)
+
+        let limitedOptions = Helpers.options.WithMaxCheckpointBytes(1024)
+
+        let! largeRun = Circuit.start Helpers.runtime compactOutput largeInput limitedOptions CancellationToken.None
+
+        let! _ = Helpers.collectEvents largeRun
+        let! oversized = largeRun.CreateCheckpointAsync(CancellationToken.None).AsTask()
+        Assert.False(oversized.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ResourceLimit, oversized.Failure.Code)
+        Assert.Contains("size limit", oversized.Failure.Message)
+        do! (largeRun :> IAsyncDisposable).DisposeAsync().AsTask()
     }
 
 [<Fact>]
@@ -1551,6 +2011,95 @@ let ``disposing unread full buffer leaves exactly one cancelled terminal`` () =
     }
 
 [<Fact>]
+let ``hanging observer cannot delay disposal or suppress the typed terminal`` () =
+    task {
+        let runtime = HangingObservationRuntime()
+
+        let options =
+            RunOptions.Default.WithEventBufferCapacity(1).WithDisposalDrainTimeout(TimeSpan.FromMilliseconds(10.0))
+
+        let! run = Circuit.start (runtime :> ICircuitRuntime) (Circuit.value 42) () options CancellationToken.None
+
+        let stream = run.Events
+        do! runtime.ObservationStarted.WaitAsync(TimeSpan.FromSeconds(1.0))
+        let disposal = (run :> IAsyncDisposable).DisposeAsync().AsTask()
+        do! disposal.WaitAsync(TimeSpan.FromMilliseconds(250.0))
+        Assert.True(disposal.IsCompletedSuccessfully)
+
+        let enumerator = stream.GetAsyncEnumerator()
+        let terminals = ResizeArray<Response<RunSummary>>()
+        let mutable more = true
+
+        while more do
+            let! available = enumerator.MoveNextAsync().AsTask()
+            more <- available
+
+            if available then
+                match enumerator.Current with
+                | RunCompleted response -> terminals.Add response
+                | _ -> ()
+
+        let terminal = Assert.Single(terminals)
+        Assert.False(terminal.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Cancelled, terminal.Failure.Code)
+        do! enumerator.DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``concurrent root outputs and disposal always close with one typed terminal`` () =
+    task {
+        let lanes = 32
+
+        for iteration in 1..25 do
+            let mutable started = 0
+
+            let allStarted =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let release =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let source =
+                Circuit.items $"dispose-race-items-{iteration}" "1.0.0" (fun (_: unit) -> Helpers.toArray [ 1..lanes ])
+
+            let gated =
+                Circuit.code $"dispose-race-gate-{iteration}" "1.0.0" (fun context value ->
+                    task {
+                        if Interlocked.Increment(&started) = lanes then
+                            allStarted.TrySetResult(()) |> ignore
+
+                        do! release.Task
+                        return Response.succeed context value
+                    })
+
+            let options =
+                RunOptions.Default
+                    .WithMaxConcurrency(lanes)
+                    .WithEventBufferCapacity(256)
+                    .WithDisposalDrainTimeout(TimeSpan.FromMilliseconds(1.0))
+
+            let! run =
+                Circuit.start Helpers.runtime (source |> Circuit.thenStep gated) () options CancellationToken.None
+
+            let events = Helpers.collectEvents run
+            do! allStarted.Task.WaitAsync(TimeSpan.FromSeconds(2.0))
+
+            let disposal = Task.Run(fun () -> (run :> IAsyncDisposable).DisposeAsync().AsTask())
+
+            release.TrySetResult(()) |> ignore
+            do! disposal.WaitAsync(TimeSpan.FromSeconds(1.0))
+            let! observed = events.WaitAsync(TimeSpan.FromSeconds(1.0))
+
+            let terminals =
+                observed
+                |> Array.choose (function
+                    | RunCompleted response -> Some response
+                    | _ -> None)
+
+            Assert.Single(terminals) |> ignore
+    }
+
+[<Fact>]
 let ``nested source lanes compose parent and child identity across checkpoint replay`` () =
     task {
         let outer =
@@ -2094,8 +2643,42 @@ let ``branch selects exact and default cases and reports selector failures or mi
     }
 
 [<Fact>]
+let ``branch child failures retain scheduler ownership instead of becoming selector failures`` () =
+    task {
+        let failingSource message =
+            Circuit.asyncSource "branch-child-source" "1.0.0" (fun (_: int) ->
+                { new IAsyncEnumerable<string> with
+                    member _.GetAsyncEnumerator(_cancellationToken) =
+                        raise (InvalidOperationException(message)) })
+
+        let cases = Dictionary<string, Circuit<int, string>>(StringComparer.Ordinal)
+        cases["exact"] <- failingSource "exact child failed"
+
+        let exactBranch =
+            Circuit.branch "exact-child" "1.0.0" (fun _ -> "exact") cases ValueNone
+
+        let defaultBranch =
+            Circuit.branch
+                "default-child"
+                "1.0.0"
+                (fun _ -> "other")
+                cases
+                (ValueSome(failingSource "default child failed"))
+
+        for definition, expected in [ exactBranch, "exact child failed"; defaultBranch, "default child failed" ] do
+            let! result = Circuit.run Helpers.runtime definition 1 Helpers.options CancellationToken.None
+            Assert.False(result.IsSuccess)
+            Assert.Equal(CircuitFailureCode.Engine, result.Failure.Code)
+            Assert.Contains("scheduler failed", result.Failure.Message, StringComparison.OrdinalIgnoreCase)
+            Assert.DoesNotContain("selector", result.Failure.Message, StringComparison.OrdinalIgnoreCase)
+            Assert.Contains(expected, string result.Failure.Exception.Value)
+    }
+
+[<Fact>]
 let ``async source collection emits admitted items and reports enumerator failures`` () =
     task {
+        let mutable disposals = 0
+
         let source (values: int array) (failure: exn option) =
             { new IAsyncEnumerable<int> with
                 member _.GetAsyncEnumerator(_cancellationToken) =
@@ -2114,7 +2697,9 @@ let ``async source collection emits admitted items and reports enumerator failur
                                 | Some ex -> ValueTask<bool>(Task.FromException<bool>(ex))
                                 | None -> ValueTask<bool>(false)
 
-                        member _.DisposeAsync() = ValueTask() } }
+                        member _.DisposeAsync() =
+                            Interlocked.Increment(&disposals) |> ignore
+                            ValueTask() } }
 
         let complete =
             Circuit.asyncSource "async-complete" "1.0.0" (fun (_: unit) -> source [| 4; 5; 6 |] None)
@@ -2122,6 +2707,7 @@ let ``async source collection emits admitted items and reports enumerator failur
         let! collected = Circuit.collect Helpers.runtime complete () Helpers.options CancellationToken.None
         Assert.True(collected.IsSuccess)
         Assert.Equal<int list>([ 4; 5; 6 ], collected.Value |> Seq.map _.Value |> Seq.toList)
+        Assert.Equal(1, disposals)
 
         let broken =
             Circuit.asyncSource "async-broken" "1.0.0" (fun (_: unit) ->
@@ -2131,6 +2717,7 @@ let ``async source collection emits admitted items and reports enumerator failur
         Assert.False(reported.IsSuccess)
         Assert.Equal(CircuitFailureCode.Engine, reported.Failure.Code)
         Assert.Contains("enumeration failed", string reported.Failure.Exception.Value)
+        Assert.Equal(2, disposals)
     }
 
 [<Fact>]
@@ -2205,6 +2792,33 @@ let ``scheduler graph decisions count validate and type every node shape`` () =
         Assert.True(SchedulerInternals.nodeCount node >= 1)
         Assert.NotNull(SchedulerInternals.outputType node)
         SchedulerInternals.validateGeneratedNode node
+
+    let nodeIds = nodes |> List.map SchedulerInternals.nodeId
+    Assert.Equal(nodes.Length, nodeIds.Length)
+    Assert.Contains("then", nodeIds)
+    Assert.Contains("decision-async", nodeIds)
+    Assert.Contains("decision-source", nodeIds)
+    Assert.Contains("decision-dynamic", nodeIds)
+    Assert.Contains("attempt", nodeIds)
+    Assert.Contains("decision-recover", nodeIds)
+    Assert.Contains("decision-branch", nodeIds)
+    Assert.Contains("decision-loop", nodeIds)
+
+    let noOrder = Array.empty<int64> :> IReadOnlyList<int64>
+    let laneKey = ItemKey.Create("item")
+
+    let keyedOrdinal =
+        SchedulerInternals.laneFromMetadata (ValueSome laneKey) (ValueSome 3L) noOrder
+
+    let keyed =
+        SchedulerInternals.laneFromMetadata (ValueSome laneKey) ValueNone noOrder
+
+    let ordinal = SchedulerInternals.laneFromMetadata ValueNone (ValueSome 4L) noOrder
+    let root = SchedulerInternals.laneFromMetadata ValueNone ValueNone noOrder
+    Assert.Equal("k4:item;o3", keyedOrdinal.Identity)
+    Assert.Equal("k4:item", keyed.Identity)
+    Assert.Equal("o4", ordinal.Identity)
+    Assert.Equal("root", root.Identity)
 
     Assert.Equal(2, SchedulerInternals.nodeCount thenNode.Node)
     Assert.Equal(2, SchedulerInternals.nodeCount attempted.Node)
@@ -2726,3 +3340,1761 @@ let ``checkpoint approval parser rejects malformed request and prompt fields`` (
         Assert.Throws<JsonException>(fun () -> SchedulerInternals.parseResumeState scalar.RootElement |> ignore)
 
     Assert.Contains("must be an object", scalarEx.Message)
+
+module private ProjectionFixtures =
+    let metadata runId path =
+        let now = DateTimeOffset.UtcNow
+
+        ResponseMetadata(
+            ValueNone,
+            ValueNone,
+            Array.empty,
+            runId,
+            path,
+            RunUsage(0, 0),
+            ValueNone,
+            1,
+            now,
+            now,
+            "projection-test"
+        )
+
+    let output runId path value =
+        let metadata = metadata runId path
+        Response<int>.Create(Succeeded value, metadata)
+
+    let terminal runId outcome =
+        let metadata = metadata runId "terminal"
+        Response<RunSummary>.Create(outcome, metadata)
+
+    let successTerminal runId count =
+        let now = DateTimeOffset.UtcNow
+        let summary = RunSummary(count, count, 0, RunUsage(0, 0), now, now)
+        terminal runId (Succeeded summary)
+
+    let runStarted runId =
+        RunStarted(
+            RunInfo(
+                runId,
+                "projection-lineage",
+                DefinitionId.Create("projection-test"),
+                SemanticVersion.Parse("1.0.0"),
+                "projection-fingerprint",
+                DateTimeOffset.UtcNow
+            )
+        )
+
+[<Fact>]
+let ``stream lazily ignores structural events yields outputs and owns disposal`` () =
+    task {
+        let runId = RunId.New()
+        let response = ProjectionFixtures.output runId "value" 42
+        let node = NodeInfo("value", "value", ValueNone, 1, DateTimeOffset.UtcNow)
+
+        let events =
+            [| ProjectionFixtures.runStarted runId
+               NodeStarted node
+               OutputDelta(CircuitOutputDelta("value", ValueNone, "working", DateTimeOffset.UtcNow))
+               OutputProduced(ValueNone, response)
+               NodeCompleted(node, UntypedResponse(true, ValueNone, response.Metadata))
+               RunCompleted(ProjectionFixtures.successTerminal runId 1) |]
+
+        let runtime = ScriptedProjectionRuntime(events)
+
+        let stream =
+            Circuit.stream (runtime :> ICircuitRuntime) (Circuit.value 42) () RunOptions.Default CancellationToken.None
+
+        Assert.Equal(0, runtime.Starts)
+
+        let enumerator = stream.GetAsyncEnumerator()
+        let! first = enumerator.MoveNextAsync().AsTask()
+        Assert.True(first)
+        Assert.Equal(42, enumerator.Current.Value)
+        Assert.Equal(1, runtime.Starts)
+
+        let! completed = enumerator.MoveNextAsync().AsTask()
+        Assert.False(completed)
+        let movesAtCompletion = runtime.EventMoves
+
+        let! repeated = enumerator.MoveNextAsync().AsTask()
+        Assert.False(repeated)
+        Assert.Equal(movesAtCompletion, runtime.EventMoves)
+
+        do! enumerator.DisposeAsync().AsTask()
+        Assert.Equal(1, runtime.EventDisposals)
+        Assert.Equal(1, runtime.Disposals)
+    }
+
+[<Fact>]
+let ``stream converts approval and failed terminal events into typed failures`` () =
+    task {
+        let runId = RunId.New()
+        let approval = ApprovalRequest("projection-request", "review", ValueSome "{}")
+        let ignoredOutput = ProjectionFixtures.output runId "ignored" 99
+
+        let approvalRuntime =
+            ScriptedProjectionRuntime([| ApprovalRequested approval; OutputProduced(ValueNone, ignoredOutput) |])
+
+        let approvalStream =
+            Circuit.stream
+                (approvalRuntime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        let approvalEnumerator = approvalStream.GetAsyncEnumerator()
+        let! approvalAvailable = approvalEnumerator.MoveNextAsync().AsTask()
+        Assert.True(approvalAvailable)
+        Assert.False(approvalEnumerator.Current.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ApprovalRequired, approvalEnumerator.Current.Failure.Code)
+        Assert.Equal(ValueSome approval.RequestId, approvalEnumerator.Current.Failure.RequestId)
+        Assert.Equal(1, approvalRuntime.EventMoves)
+
+        let! approvalComplete = approvalEnumerator.MoveNextAsync().AsTask()
+        Assert.False(approvalComplete)
+        Assert.Equal(1, approvalRuntime.EventMoves)
+        do! approvalEnumerator.DisposeAsync().AsTask()
+
+        let failure =
+            CircuitFailure(
+                CircuitFailureCode.Provider,
+                "provider failed",
+                ValueSome runId,
+                ValueNone,
+                ValueNone,
+                ValueNone
+            )
+
+        let failedRuntime =
+            ScriptedProjectionRuntime([| RunCompleted(ProjectionFixtures.terminal runId (Failed failure)) |])
+
+        let failedStream =
+            Circuit.stream
+                (failedRuntime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        let failedEnumerator = failedStream.GetAsyncEnumerator()
+        let! failedAvailable = failedEnumerator.MoveNextAsync().AsTask()
+        Assert.True(failedAvailable)
+        Assert.Equal(CircuitFailureCode.Provider, failedEnumerator.Current.Failure.Code)
+        let! failedComplete = failedEnumerator.MoveNextAsync().AsTask()
+        Assert.False(failedComplete)
+        do! failedEnumerator.DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``stream disposal before initialization does not start a run`` () =
+    task {
+        let runtime = ScriptedProjectionRuntime(Array.empty)
+
+        let stream =
+            Circuit.stream (runtime :> ICircuitRuntime) (Circuit.value 1) () RunOptions.Default CancellationToken.None
+
+        let enumerator = stream.GetAsyncEnumerator()
+        do! enumerator.DisposeAsync().AsTask()
+        Assert.Equal(0, runtime.Starts)
+        Assert.Equal(0, runtime.EventDisposals)
+        Assert.Equal(0, runtime.Disposals)
+    }
+
+[<Fact>]
+let ``stream surfaces initialization and event failures while retaining explicit ownership`` () =
+    task {
+        let startFailureRuntime = ScriptedProjectionRuntime(Array.empty, failStart = true)
+
+        let startFailureStream =
+            Circuit.stream
+                (startFailureRuntime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        let startFailureEnumerator = startFailureStream.GetAsyncEnumerator()
+
+        let! startFailure =
+            Assert.ThrowsAsync<InvalidOperationException>(fun () ->
+                startFailureEnumerator.MoveNextAsync().AsTask() :> Task)
+
+        Assert.Equal("scripted start failure", startFailure.Message)
+        Assert.Equal(1, startFailureRuntime.Starts)
+        do! startFailureEnumerator.DisposeAsync().AsTask()
+        Assert.Equal(0, startFailureRuntime.EventDisposals)
+        Assert.Equal(0, startFailureRuntime.Disposals)
+
+        let eventFailureRuntime = ScriptedProjectionRuntime(Array.empty, failAt = 0)
+
+        let eventFailureStream =
+            Circuit.stream
+                (eventFailureRuntime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        let eventFailureEnumerator = eventFailureStream.GetAsyncEnumerator()
+
+        let! eventFailure =
+            Assert.ThrowsAsync<InvalidOperationException>(fun () ->
+                eventFailureEnumerator.MoveNextAsync().AsTask() :> Task)
+
+        Assert.Equal("scripted event failure", eventFailure.Message)
+        Assert.Equal(0, eventFailureRuntime.EventDisposals)
+        Assert.Equal(0, eventFailureRuntime.Disposals)
+        do! eventFailureEnumerator.DisposeAsync().AsTask()
+        Assert.Equal(1, eventFailureRuntime.EventDisposals)
+        Assert.Equal(1, eventFailureRuntime.Disposals)
+    }
+
+[<Fact>]
+let ``collect classifies missing terminals and disposes runs after event failures`` () =
+    task {
+        let missingRuntime = ScriptedProjectionRuntime(Array.empty)
+
+        let! missing =
+            Circuit.collect
+                (missingRuntime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        Assert.False(missing.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, missing.Failure.Code)
+        Assert.Contains("without a terminal event", missing.Failure.Message)
+        Assert.Equal(1, missingRuntime.EventDisposals)
+        Assert.Equal(1, missingRuntime.Disposals)
+
+        let throwingRuntime = ScriptedProjectionRuntime(Array.empty, failAt = 0)
+
+        let! failure =
+            Assert.ThrowsAsync<InvalidOperationException>(fun () ->
+                Circuit.collect
+                    (throwingRuntime :> ICircuitRuntime)
+                    (Circuit.value 1)
+                    ()
+                    RunOptions.Default
+                    CancellationToken.None
+                :> Task)
+
+        Assert.Equal("scripted event failure", failure.Message)
+        Assert.Equal(1, throwingRuntime.EventDisposals)
+        Assert.Equal(1, throwingRuntime.Disposals)
+    }
+
+[<Fact>]
+let ``collect converts approval events to typed projection failures and stops reading`` () =
+    task {
+        let request = ApprovalRequest("collect-approval", "review", ValueSome "{}")
+        let ignored = ProjectionFixtures.output (RunId.New()) "ignored" 42
+
+        let runtime =
+            ScriptedProjectionRuntime([| ApprovalRequested request; OutputProduced(ValueNone, ignored) |])
+
+        let! collected =
+            Circuit.collect (runtime :> ICircuitRuntime) (Circuit.value 1) () RunOptions.Default CancellationToken.None
+
+        Assert.False(collected.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ApprovalRequired, collected.Failure.Code)
+        Assert.Equal(ValueSome request.RequestId, collected.Failure.RequestId)
+        Assert.Equal(1, runtime.EventMoves)
+        Assert.Equal(1, runtime.EventDisposals)
+        Assert.Equal(1, runtime.Disposals)
+    }
+
+[<Fact>]
+let ``collectSourceOrder preserves failed terminal metadata`` () =
+    task {
+        let runId = RunId.New()
+
+        let failure =
+            CircuitFailure(
+                CircuitFailureCode.Provider,
+                "ordered projection failed",
+                ValueSome runId,
+                ValueSome "ordered-node",
+                ValueNone,
+                ValueNone
+            )
+
+        let terminal = ProjectionFixtures.terminal runId (Failed failure)
+        let runtime = ScriptedProjectionRuntime([| RunCompleted terminal |])
+
+        let! ordered =
+            Circuit.collectSourceOrder
+                (runtime :> ICircuitRuntime)
+                (Circuit.value 1)
+                ()
+                RunOptions.Default
+                CancellationToken.None
+
+        Assert.False(ordered.IsSuccess)
+        Assert.Same(failure, ordered.Failure)
+        Assert.Same(terminal.Metadata, ordered.Metadata)
+        Assert.Equal(1, runtime.EventDisposals)
+        Assert.Equal(1, runtime.Disposals)
+    }
+
+[<Fact>]
+let ``run enforces zero one and many output cardinality over projection events`` () =
+    task {
+        let definition = Circuit.value 0
+
+        let execute events =
+            let runtime = ScriptedProjectionRuntime(events)
+            Circuit.run (runtime :> ICircuitRuntime) definition () RunOptions.Default CancellationToken.None
+
+        let zeroRunId = RunId.New()
+        let! zero = execute [| RunCompleted(ProjectionFixtures.successTerminal zeroRunId 0) |]
+        Assert.False(zero.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Cardinality, zero.Failure.Code)
+        Assert.Contains("produced 0", zero.Failure.Message)
+
+        let oneRunId = RunId.New()
+        let oneResponse = ProjectionFixtures.output oneRunId "one" 1
+
+        let! one =
+            execute
+                [| OutputProduced(ValueNone, oneResponse)
+                   RunCompleted(ProjectionFixtures.successTerminal oneRunId 1) |]
+
+        Assert.True(one.IsSuccess)
+        Assert.Equal(1, one.Value)
+
+        let manyRunId = RunId.New()
+        let first = ProjectionFixtures.output manyRunId "first" 1
+        let second = ProjectionFixtures.output manyRunId "second" 2
+
+        let! many =
+            execute
+                [| OutputProduced(ValueNone, first)
+                   OutputProduced(ValueNone, second)
+                   RunCompleted(ProjectionFixtures.successTerminal manyRunId 2) |]
+
+        Assert.False(many.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Cardinality, many.Failure.Code)
+        Assert.Contains("produced 2", many.Failure.Message)
+    }
+
+[<Fact>]
+let ``circuit combinators reject null delegates definitions and collections at construction`` () =
+    let nullCircuit = Unchecked.defaultof<Circuit<int, int>>
+    let value = Circuit.value 1
+
+    let expectNull parameter action =
+        let error = Assert.Throws<ArgumentNullException>(Action action)
+        Assert.Equal(parameter, error.ParamName)
+
+    expectNull "circuit" (fun () -> Circuit.define "defined" "1.0.0" nullCircuit |> ignore)
+
+    let agent =
+        AgentDefinition.Create(
+            "construction.agent",
+            "1.0.0",
+            "Construction agent",
+            "Test constructor validation.",
+            ValueNone,
+            Seq.empty,
+            Seq.empty,
+            Seq.empty
+        )
+
+    let signature =
+        Signature<int, int>
+            .Create(
+                "construction.signature",
+                "1.0.0",
+                "Construction",
+                "Echo",
+                CircuitJson.createOptions (),
+                Seq.empty,
+                Seq.empty
+            )
+
+    expectNull "agent" (fun () -> Circuit.agent Unchecked.defaultof<AgentDefinition> signature |> ignore)
+    expectNull "signature" (fun () -> Circuit.agent agent Unchecked.defaultof<Signature<int, int>> |> ignore)
+
+    expectNull "handler" (fun () ->
+        Circuit.code "null-code" "1.0.0" Unchecked.defaultof<CircuitContext -> int -> Task<Response<int>>>
+        |> ignore)
+
+    expectNull "items" (fun () ->
+        Circuit.items "null-items" "1.0.0" Unchecked.defaultof<int -> IReadOnlyList<int>>
+        |> ignore)
+
+    expectNull "key" (fun () ->
+        Circuit.keyedItems "null-key" "1.0.0" Unchecked.defaultof<int -> string> (fun _ -> Helpers.toArray [ 1 ])
+        |> ignore)
+
+    expectNull "items" (fun () ->
+        Circuit.keyedItems "null-keyed-items" "1.0.0" string Unchecked.defaultof<int -> IReadOnlyList<int>>
+        |> ignore)
+
+    expectNull "source" (fun () ->
+        Circuit.source "null-source" "1.0.0" Unchecked.defaultof<IResumableCircuitSource<int, int>>
+        |> ignore)
+
+    expectNull "source" (fun () ->
+        Circuit.asyncSource "null-async-source" "1.0.0" Unchecked.defaultof<int -> IAsyncEnumerable<int>>
+        |> ignore)
+
+    expectNull "previous" (fun () -> nullCircuit |> Circuit.thenStep value |> ignore)
+    expectNull "next" (fun () -> value |> Circuit.thenStep nullCircuit |> ignore)
+
+    expectNull "key" (fun () ->
+        value
+        |> Circuit.thenDynamic "null-dynamic-key" "1.0.0" Unchecked.defaultof<int -> string> 1 Circuit.value
+        |> ignore)
+
+    expectNull "factory" (fun () ->
+        value
+        |> Circuit.thenDynamic "null-dynamic-factory" "1.0.0" string 1 Unchecked.defaultof<int -> Circuit<int, int>>
+        |> ignore)
+
+    expectNull "previous" (fun () ->
+        nullCircuit
+        |> Circuit.thenDynamic "null-dynamic-previous" "1.0.0" string 1 Circuit.value
+        |> ignore)
+
+    expectNull "previous" (fun () -> Circuit.attempt nullCircuit |> ignore)
+
+    expectNull "handler" (fun () ->
+        value
+        |> Circuit.recover "null-recovery" "1.0.0" Unchecked.defaultof<CircuitFailure -> int>
+        |> ignore)
+
+    expectNull "previous" (fun () ->
+        nullCircuit
+        |> Circuit.recover "null-recovery-previous" "1.0.0" (fun _ -> 0)
+        |> ignore)
+
+    let cases = Dictionary<string, Circuit<int, int>>()
+    cases["one"] <- value
+
+    expectNull "selector" (fun () ->
+        Circuit.branch "null-selector" "1.0.0" Unchecked.defaultof<int -> string> cases ValueNone
+        |> ignore)
+
+    expectNull "cases" (fun () ->
+        Circuit.branch
+            "null-cases"
+            "1.0.0"
+            string
+            Unchecked.defaultof<IReadOnlyDictionary<string, Circuit<int, int>>>
+            ValueNone
+        |> ignore)
+
+    expectNull "branches" (fun () ->
+        Circuit.merge "null-merge" "1.0.0" 1 Unchecked.defaultof<IReadOnlyList<Circuit<int, int>>>
+        |> ignore)
+
+    let emptyBranches =
+        Array.empty<Circuit<int, int>> :> IReadOnlyList<Circuit<int, int>>
+
+    let emptyError =
+        Assert.Throws<ArgumentException>(fun () -> Circuit.merge "empty-merge" "1.0.0" 1 emptyBranches |> ignore)
+
+    Assert.Equal("branches", emptyError.ParamName)
+
+    expectNull "whileTrue" (fun () ->
+        Circuit.loop "null-loop-predicate" "1.0.0" 1 Unchecked.defaultof<int -> bool> value
+        |> ignore)
+
+    expectNull "body" (fun () -> Circuit.loop "null-loop-body" "1.0.0" 1 (fun _ -> false) nullCircuit |> ignore)
+
+    expectNull "prompt" (fun () ->
+        Circuit.approval "null-approval" "1.0.0" Unchecked.defaultof<int -> ApprovalPrompt>
+        |> ignore)
+
+    expectNull "handler" (fun () ->
+        value
+        |> Circuit.aggregate
+            "null-aggregate"
+            "1.0.0"
+            Unchecked.defaultof<
+                CircuitContext -> IReadOnlyList<Response<int>> -> CancellationToken -> Task<Response<int>>
+             >
+        |> ignore)
+
+    expectNull "previous" (fun () ->
+        nullCircuit
+        |> Circuit.aggregate "null-aggregate-previous" "1.0.0" (fun context _ _ -> Helpers.success context 0)
+        |> ignore)
+
+    expectNull "circuit" (fun () -> Circuit.named "null-named" nullCircuit |> ignore)
+    expectNull "circuit" (fun () -> Circuit.validate nullCircuit |> ignore)
+
+[<Fact>]
+let ``circuit graph checkpointability and cardinality compose across branch and merge matrices`` () =
+    let value = Circuit.value 1
+
+    let asyncValue =
+        Circuit.asyncSource "graph-async" "1.0.0" (fun (_: int) ->
+            { new IAsyncEnumerable<int> with
+                member _.GetAsyncEnumerator(_cancellationToken) =
+                    { new IAsyncEnumerator<int> with
+                        member _.Current = 0
+                        member _.MoveNextAsync() = ValueTask<bool>(false)
+                        member _.DisposeAsync() = ValueTask() } })
+
+    let codecPipeline = value |> Circuit.thenStep value
+    let nonCheckpointablePipeline = value |> Circuit.thenStep asyncValue
+    Assert.Equal(CircuitCheckpointability.CodecDependent, codecPipeline.Checkpointability)
+    Assert.Equal(CircuitCheckpointability.NotCheckpointable, nonCheckpointablePipeline.Checkpointability)
+    Assert.Equal(CircuitCardinality.Many, nonCheckpointablePipeline.Graph.Cardinality)
+
+    let emptyCases = Dictionary<string, Circuit<int, int>>()
+    let emptyBranch = Circuit.branch "empty-branch" "1.0.0" string emptyCases ValueNone
+    Assert.Equal(CircuitCheckpointability.Checkpointable, emptyBranch.Checkpointability)
+    Assert.Equal(CircuitCardinality.ExactlyOne, emptyBranch.Graph.Cardinality)
+    Assert.Single(emptyBranch.Graph.Nodes) |> ignore
+
+    let codecCases = Dictionary<string, Circuit<int, int>>()
+    codecCases["value"] <- value
+    let codecBranch = Circuit.branch "codec-branch" "1.0.0" string codecCases ValueNone
+    Assert.Equal(CircuitCheckpointability.CodecDependent, codecBranch.Checkpointability)
+
+    let asyncCases = Dictionary<string, Circuit<int, int>>()
+    asyncCases["async"] <- asyncValue
+
+    let asyncBranch =
+        Circuit.branch "async-branch" "1.0.0" string asyncCases (ValueSome value)
+
+    Assert.Equal(CircuitCheckpointability.NotCheckpointable, asyncBranch.Checkpointability)
+    Assert.Equal(CircuitCardinality.Many, asyncBranch.Graph.Cardinality)
+    Assert.Equal(3, asyncBranch.Graph.Nodes.Count)
+
+    let singleMerge = Circuit.merge "single-merge" "1.0.0" 1 (Helpers.toArray [ value ])
+    Assert.Equal(CircuitCardinality.ExactlyOne, singleMerge.Graph.Cardinality)
+    Assert.Equal(CircuitCheckpointability.CodecDependent, singleMerge.Checkpointability)
+
+    let manyMerge =
+        Circuit.merge "many-merge" "1.0.0" 2 (Helpers.toArray [ value; asyncValue ])
+
+    Assert.Equal(CircuitCardinality.Many, manyMerge.Graph.Cardinality)
+    Assert.Equal(CircuitCheckpointability.NotCheckpointable, manyMerge.Checkpointability)
+    Assert.Equal(3, manyMerge.Graph.Nodes.Count)
+
+    let defined = Circuit.define "defined-graph" "2.0.0" manyMerge
+    Assert.Equal("defined-graph", defined.Id.Value)
+    Assert.Equal("2.0.0", defined.Version.ToString())
+    Assert.False(StringComparer.Ordinal.Equals(manyMerge.Fingerprint, defined.Fingerprint))
+    Assert.Equal(defined.Fingerprint, defined.Graph.Fingerprint)
+    Assert.Equal(manyMerge.Checkpointability, defined.Checkpointability)
+
+module private ResumeFixtures =
+    let checkpoint definitionId version fingerprint options payload =
+        CircuitCheckpoint<int>(
+            definitionId,
+            version,
+            fingerprint,
+            "resume-matrix-lineage",
+            DateTimeOffset.UtcNow,
+            payload,
+            options
+        )
+
+    let terminalFailure (run: CircuitRun<int>) =
+        task {
+            let! events = Helpers.collectEvents run
+
+            let terminal =
+                events
+                |> Array.choose (function
+                    | RunCompleted response -> Some response
+                    | _ -> None)
+                |> Array.exactlyOne
+
+            do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+            Assert.False(terminal.IsSuccess)
+            return terminal.Failure
+        }
+
+[<Fact>]
+let ``agent definitions reject null and duplicate metadata values`` () =
+    let create metadata =
+        AgentDefinition.Create(
+            "metadata-agent",
+            "1.0.0",
+            "Metadata agent",
+            "Validate metadata",
+            ValueNone,
+            Seq.empty,
+            Seq.empty,
+            metadata
+        )
+        |> ignore
+
+    let nullValue =
+        Assert.Throws<ArgumentNullException>(fun () -> create [ KeyValuePair("key", Unchecked.defaultof<string>) ])
+
+    Assert.Equal("metadata", nullValue.ParamName)
+
+    let duplicate =
+        Assert.Throws<ArgumentException>(fun () -> create [ KeyValuePair("key", "one"); KeyValuePair("key", "two") ])
+
+    Assert.Equal("metadata", duplicate.ParamName)
+    Assert.Contains("Duplicate metadata keys", duplicate.Message)
+
+[<Fact>]
+let ``source and dynamic factories report null runtime products`` () =
+    task {
+        let seed =
+            Circuit.code "null-dynamic-seed" "1.0.0" (fun context (_: unit) -> Helpers.success context 1)
+
+        let nullDynamic =
+            seed
+            |> Circuit.thenDynamic "null-dynamic-product" "1.0.0" string 1 (fun _ ->
+                Unchecked.defaultof<Circuit<int, int>>)
+
+        let! dynamicFailure = Circuit.collect Helpers.runtime nullDynamic () Helpers.options CancellationToken.None
+
+        Assert.False(dynamicFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.GeneratedGraphIntegrity, dynamicFailure.Failure.Code)
+        Assert.Contains("returned null", string dynamicFailure.Failure.Exception.Value)
+
+        let nullPageSource =
+            { new IResumableCircuitSource<unit, int> with
+                member _.ReadAsync(_, _, _) =
+                    ValueTask<CircuitSourcePage<int>>(Unchecked.defaultof<CircuitSourcePage<int>>) }
+
+        let nullPage = Circuit.source "null-source-page" "1.0.0" nullPageSource
+        let! pageFailure = Circuit.collect Helpers.runtime nullPage () Helpers.options CancellationToken.None
+        Assert.False(pageFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, pageFailure.Failure.Code)
+        Assert.True(pageFailure.Failure.Exception.IsSome)
+
+        let nullAsync =
+            Circuit.asyncSource "null-async-enumerable" "1.0.0" (fun (_: unit) ->
+                Unchecked.defaultof<IAsyncEnumerable<int>>)
+
+        let! asyncFailure = Circuit.collect Helpers.runtime nullAsync () Helpers.options CancellationToken.None
+        Assert.False(asyncFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, asyncFailure.Failure.Code)
+        Assert.True(asyncFailure.Failure.Exception.IsSome)
+    }
+
+[<Fact>]
+let ``lane and response constructors reject invalid structural inputs`` () =
+    let key = ItemKey.Create("lane")
+    Assert.False(key.Equals("lane"))
+
+    let nullPage =
+        Assert.Throws<ArgumentNullException>(fun () -> CircuitSourcePage<int>(null, ValueNone, true) |> ignore)
+
+    Assert.Equal("items", nullPage.ParamName)
+
+    let now = DateTimeOffset.UtcNow
+
+    let nullSourceOrder =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            ResponseMetadata(
+                ValueNone,
+                ValueNone,
+                null,
+                RunId.New(),
+                "node",
+                RunUsage(0, 0),
+                ValueNone,
+                1,
+                now,
+                now,
+                "key"
+            )
+            |> ignore)
+
+    Assert.Equal("sourceOrder", nullSourceOrder.ParamName)
+
+    let nullMetadata =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            Response<int>.Create(Succeeded 1, Unchecked.defaultof<ResponseMetadata>)
+            |> ignore)
+
+    Assert.Equal("metadata", nullMetadata.ParamName)
+
+    let nullContext = Unchecked.defaultof<CircuitContext>
+
+    let successContext =
+        Assert.Throws<ArgumentNullException>(fun () -> Response.succeed nullContext 1 |> ignore)
+
+    Assert.Equal("context", successContext.ParamName)
+
+    let failure = CircuitFailure.Create(CircuitFailureCode.Provider, "failed")
+
+    let failureContext =
+        Assert.Throws<ArgumentNullException>(fun () -> Response.fail nullContext failure |> ignore)
+
+    Assert.Equal("context", failureContext.ParamName)
+
+    let context =
+        CircuitContext(RunId.New(), "node", ValueNone, "key", RunOptions.Default, CancellationToken.None)
+
+    let nullFailure =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            Response.fail context Unchecked.defaultof<CircuitFailure> |> ignore)
+
+    Assert.Equal("failure", nullFailure.ParamName)
+
+[<Fact>]
+let ``run and approval option constructors reject invalid host inputs`` () =
+    let nullServices =
+        Assert.Throws<ArgumentNullException>(fun () -> ResumeOptions(Unchecked.defaultof<IServiceProvider>) |> ignore)
+
+    Assert.Equal("services", nullServices.ParamName)
+
+    let nullMetadata =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            ApprovalPrompt("Title", "Message", Unchecked.defaultof<IEnumerable<KeyValuePair<string, string>>>)
+            |> ignore)
+
+    Assert.Equal("metadata", nullMetadata.ParamName)
+
+    let invalidMetadata =
+        [ [ KeyValuePair("", "value") ]
+          [ KeyValuePair("key", null) ]
+          [ KeyValuePair("key", "one"); KeyValuePair("key", "two") ] ]
+
+    for metadata in invalidMetadata do
+        let failure =
+            Assert.ThrowsAny<ArgumentException>(fun () -> ApprovalPrompt("Title", "Message", metadata) |> ignore)
+
+        Assert.Equal("metadata", failure.ParamName)
+
+    let blankTitle =
+        Assert.Throws<ArgumentException>(fun () -> ApprovalPrompt.Create(" ", "Message") |> ignore)
+
+    Assert.Equal("title", blankTitle.ParamName)
+
+    let nullMessage =
+        Assert.Throws<ArgumentNullException>(fun () -> ApprovalPrompt.Create("Title", null) |> ignore)
+
+    Assert.Equal("message", nullMessage.ParamName)
+
+    let blankRequest =
+        Assert.Throws<ArgumentException>(fun () -> ApprovalRequest(" ", "tool", ValueNone) |> ignore)
+
+    Assert.Equal("requestId", blankRequest.ParamName)
+
+    let blankTool =
+        Assert.Throws<ArgumentException>(fun () -> ApprovalRequest("request", " ", ValueNone) |> ignore)
+
+    Assert.Equal("toolName", blankTool.ParamName)
+
+    let blankResponse =
+        Assert.Throws<ArgumentException>(fun () -> ApprovalResponse(" ", true, null) |> ignore)
+
+    Assert.Equal("requestId", blankResponse.ParamName)
+
+    let blankNote =
+        Assert.Throws<ArgumentException>(fun () -> ApprovalResponse("request", true, " ") |> ignore)
+
+    Assert.Equal("note", blankNote.ParamName)
+
+[<Fact>]
+let ``checkpoint envelopes and live run handles reject malformed lifecycle operations`` () =
+    task {
+        let parse (text: string) =
+            use document = JsonDocument.Parse(text)
+            CircuitCheckpoint<int>.Deserialize(document.RootElement) |> ignore
+
+        let nonObject = Assert.Throws<ArgumentException>(fun () -> parse "[]")
+        Assert.Equal("state", nonObject.ParamName)
+        Assert.Contains("JSON object", nonObject.Message)
+
+        let missingFormat = Assert.Throws<ArgumentException>(fun () -> parse "{}")
+        Assert.Equal("state", missingFormat.ParamName)
+        Assert.Contains("formatVersion", missingFormat.Message)
+
+        let wrongKind =
+            Assert.Throws<ArgumentException>(fun () -> parse "{\"formatVersion\":\"one\"}")
+
+        Assert.Equal("state", wrongKind.ParamName)
+        Assert.Contains("wrong JSON kind", wrongKind.Message)
+
+        let unsupported =
+            Assert.Throws<ArgumentOutOfRangeException>(fun () -> parse "{\"formatVersion\":2}")
+
+        Assert.Equal("state", unsupported.ParamName)
+        Assert.Contains("Unsupported checkpoint format", unsupported.Message)
+
+        let! run = Circuit.start Helpers.runtime (Circuit.value 1) () Helpers.options CancellationToken.None
+
+        let nullResponse =
+            Assert.Throws<ArgumentNullException>(fun () ->
+                run.RespondAsync(Unchecked.defaultof<ApprovalResponse>, CancellationToken.None)
+                |> ignore)
+
+        Assert.Equal("response", nullResponse.ParamName)
+        do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+        do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        Assert.Throws<ObjectDisposedException>(fun () -> run.Events |> ignore) |> ignore
+
+        Assert.Throws<ObjectDisposedException>(fun () -> run.CreateCheckpointAsync(CancellationToken.None) |> ignore)
+        |> ignore
+
+        Assert.Throws<ObjectDisposedException>(fun () ->
+            run.RespondAsync(ApprovalResponse.Create("disposed", true), CancellationToken.None)
+            |> ignore)
+        |> ignore
+    }
+
+[<Fact>]
+let ``runtime start rejects null circuit and options`` () =
+    let runtime = Helpers.runtime
+    let definition: Circuit<int, int> = Circuit.value 1
+
+    let nullCircuit =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            runtime.StartAsync(Unchecked.defaultof<Circuit<int, int>>, 0, Helpers.options, CancellationToken.None)
+            |> ignore)
+
+    Assert.Equal("circuit", nullCircuit.ParamName)
+
+    let nullOptions =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            runtime.StartAsync(definition, 0, Unchecked.defaultof<RunOptions>, CancellationToken.None)
+            |> ignore)
+
+    Assert.Equal("options", nullOptions.ParamName)
+
+    let nullRuntime = Unchecked.defaultof<ICircuitRuntime>
+
+    let nullStartRuntime =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            Circuit.start nullRuntime definition 0 Helpers.options CancellationToken.None
+            |> ignore)
+
+    Assert.Equal("runtime", nullStartRuntime.ParamName)
+
+    let nullResumeRuntime =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            Circuit.resume
+                nullRuntime
+                definition
+                Unchecked.defaultof<CircuitCheckpoint<int>>
+                ResumeOptions.Default
+                CancellationToken.None
+            |> ignore)
+
+    Assert.Equal("runtime", nullResumeRuntime.ParamName)
+
+    let nullResumeOptions =
+        Assert.Throws<ArgumentNullException>(fun () ->
+            Circuit.resume
+                runtime
+                definition
+                Unchecked.defaultof<CircuitCheckpoint<int>>
+                Unchecked.defaultof<ResumeOptions>
+                CancellationToken.None
+            |> ignore)
+
+    Assert.Equal("options", nullResumeOptions.ParamName)
+
+[<Fact>]
+let ``resume rejects null arguments and each exact definition identity mismatch`` () =
+    task {
+        let runtime = Helpers.runtime
+
+        let definition: Circuit<int, int> =
+            Circuit.define "resume-matrix" "1.0.0" (Circuit.value 7)
+
+        let payload =
+            SchedulerInternals.writeResumeState
+                (SchedulerInternals.emptyResumeState ())
+                typeof<int>
+                (box 7)
+                Helpers.options
+
+        let valid =
+            ResumeFixtures.checkpoint
+                definition.Id
+                definition.Version
+                definition.Fingerprint
+                (ValueSome Helpers.options)
+                payload
+
+        let! nullCircuit =
+            Assert.ThrowsAsync<ArgumentNullException>(fun () ->
+                runtime.ResumeAsync(
+                    Unchecked.defaultof<Circuit<int, int>>,
+                    valid,
+                    ResumeOptions.Default,
+                    CancellationToken.None
+                )
+                :> Task)
+
+        Assert.Equal("circuit", nullCircuit.ParamName)
+
+        let! nullCheckpoint =
+            Assert.ThrowsAsync<ArgumentNullException>(fun () ->
+                runtime.ResumeAsync(
+                    definition,
+                    Unchecked.defaultof<CircuitCheckpoint<int>>,
+                    ResumeOptions.Default,
+                    CancellationToken.None
+                )
+                :> Task)
+
+        Assert.Equal("checkpoint", nullCheckpoint.ParamName)
+
+        let! nullOptions =
+            Assert.ThrowsAsync<ArgumentNullException>(fun () ->
+                runtime.ResumeAsync(definition, valid, Unchecked.defaultof<ResumeOptions>, CancellationToken.None)
+                :> Task)
+
+        Assert.Equal("resumeOptions", nullOptions.ParamName)
+
+        let mismatches =
+            [| ResumeFixtures.checkpoint
+                   (DefinitionId.Create("other-definition"))
+                   definition.Version
+                   definition.Fingerprint
+                   (ValueSome Helpers.options)
+                   payload
+               ResumeFixtures.checkpoint
+                   definition.Id
+                   (SemanticVersion.Parse("2.0.0"))
+                   definition.Fingerprint
+                   (ValueSome Helpers.options)
+                   payload
+               ResumeFixtures.checkpoint
+                   definition.Id
+                   definition.Version
+                   "different-fingerprint"
+                   (ValueSome Helpers.options)
+                   payload |]
+
+        for checkpoint in mismatches do
+            let! run = runtime.ResumeAsync(definition, checkpoint, ResumeOptions.Default, CancellationToken.None)
+            let! failure = ResumeFixtures.terminalFailure run
+            Assert.Equal(CircuitFailureCode.CheckpointMismatch, failure.Code)
+            Assert.Contains("exact Circuit definition", failure.Message)
+    }
+
+[<Fact>]
+let ``resume maps input and serialized session admission failures before leaf execution`` () =
+    task {
+        let definition: Circuit<int, int> =
+            Circuit.define "resume-state-matrix" "1.0.0" (Circuit.value 7)
+
+        let validPayload =
+            SchedulerInternals.writeResumeState
+                (SchedulerInternals.emptyResumeState ())
+                typeof<int>
+                (box 7)
+                Helpers.options
+
+        let wrongInputRoot = JsonNode.Parse(validPayload.GetRawText()).AsObject()
+        wrongInputRoot["inputType"] <- JsonValue.Create(typeof<string>.AssemblyQualifiedName)
+        use wrongInputDocument = JsonDocument.Parse(wrongInputRoot.ToJsonString())
+
+        let wrongInput =
+            ResumeFixtures.checkpoint
+                definition.Id
+                definition.Version
+                definition.Fingerprint
+                ValueNone
+                wrongInputDocument.RootElement
+
+        let! wrongInputRun =
+            Helpers.runtime.ResumeAsync(definition, wrongInput, ResumeOptions.Default, CancellationToken.None)
+
+        let! wrongInputFailure = ResumeFixtures.terminalFailure wrongInputRun
+        Assert.Equal(CircuitFailureCode.CheckpointMismatch, wrongInputFailure.Code)
+        Assert.Contains("malformed", wrongInputFailure.Message)
+        Assert.Contains("input type", string wrongInputFailure.Exception.Value)
+
+        let unknownSessionState = SchedulerInternals.emptyResumeState ()
+        use adapterDocument = JsonDocument.Parse("{}")
+
+        unknownSessionState.SerializedSessions["unknown-agent|lane"] <-
+            struct ("unknown.agent@1.0.0", adapterDocument.RootElement.Clone())
+
+        let unknownSessionPayload =
+            SchedulerInternals.writeResumeState unknownSessionState typeof<int> (box 7) Helpers.options
+
+        let unknownSession =
+            ResumeFixtures.checkpoint
+                definition.Id
+                definition.Version
+                definition.Fingerprint
+                (ValueSome Helpers.options)
+                unknownSessionPayload
+
+        let! unknownSessionRun =
+            Helpers.runtime.ResumeAsync(definition, unknownSession, ResumeOptions.Default, CancellationToken.None)
+
+        let! unknownSessionFailure = ResumeFixtures.terminalFailure unknownSessionRun
+        Assert.Equal(CircuitFailureCode.CheckpointMismatch, unknownSessionFailure.Code)
+        Assert.Contains("does not match an agent node", string unknownSessionFailure.Exception.Value)
+
+        let agent =
+            AgentDefinition.Create(
+                "resume.session.agent",
+                "1.0.0",
+                "Resume agent",
+                "Resume session admission test.",
+                ValueNone,
+                Seq.empty,
+                Seq.empty,
+                Seq.empty
+            )
+
+        let signature =
+            Signature<int, int>
+                .Create(
+                    "resume.session.signature",
+                    "1.0.0",
+                    "Resume",
+                    "Echo",
+                    CircuitJson.createOptions (),
+                    Seq.empty,
+                    Seq.empty
+                )
+
+        let agentCircuit = Circuit.agent agent signature
+        let agentPath = agentCircuit.Id.Value + "/" + agentCircuit.Id.Value + "|lane"
+        let wrongAgentState = SchedulerInternals.emptyResumeState ()
+
+        wrongAgentState.SerializedSessions[agentPath] <-
+            struct ("different.agent@1.0.0", adapterDocument.RootElement.Clone())
+
+        let wrongAgentPayload =
+            SchedulerInternals.writeResumeState wrongAgentState typeof<int> (box 7) Helpers.options
+
+        let wrongAgent =
+            ResumeFixtures.checkpoint
+                agentCircuit.Id
+                agentCircuit.Version
+                agentCircuit.Fingerprint
+                (ValueSome Helpers.options)
+                wrongAgentPayload
+
+        let! wrongAgentRun =
+            Helpers.runtime.ResumeAsync(agentCircuit, wrongAgent, ResumeOptions.Default, CancellationToken.None)
+
+        let! wrongAgentFailure = ResumeFixtures.terminalFailure wrongAgentRun
+        Assert.Equal(CircuitFailureCode.CheckpointMismatch, wrongAgentFailure.Code)
+        Assert.Contains("different agent definition", string wrongAgentFailure.Exception.Value)
+
+        let session =
+            CircuitSession(
+                "admission-session",
+                Dictionary<string, string>() :> IReadOnlyDictionary<string, string>,
+                ValueNone,
+                ValueNone,
+                ValueNone
+            )
+
+        let restoredSelection =
+            SchedulerInternals.selectEffectiveSession (ValueSome session) ValueNone
+
+        let configuredSelection =
+            SchedulerInternals.selectEffectiveSession ValueNone (ValueSome session)
+
+        Assert.Same(session, restoredSelection.Value)
+        Assert.Same(session, configuredSelection.Value)
+        Assert.True((SchedulerInternals.selectEffectiveSession ValueNone ValueNone).IsNone)
+
+        match SchedulerInternals.planSessionAgentAdmission None "agent@1.0.0" with
+        | SchedulerInternals.RegisterSessionAgent -> ()
+        | plan -> failwith $"Expected agent registration, got {plan}."
+
+        match SchedulerInternals.planSessionAgentAdmission (Some "agent@1.0.0") "agent@1.0.0" with
+        | SchedulerInternals.ReuseSessionAgent -> ()
+        | plan -> failwith $"Expected agent reuse, got {plan}."
+
+        match SchedulerInternals.planSessionAgentAdmission (Some "other@1.0.0") "agent@1.0.0" with
+        | SchedulerInternals.RejectSessionAgentSharing existing -> Assert.Equal("other@1.0.0", existing)
+        | plan -> failwith $"Expected cross-agent rejection, got {plan}."
+
+        match SchedulerInternals.planSerializedSessionAdmission None "agent@1.0.0" with
+        | SchedulerInternals.RejectUnknownSerializedSession -> ()
+        | plan -> failwith $"Expected unknown-session rejection, got {plan}."
+
+        match SchedulerInternals.planSerializedSessionAdmission (Some agent) "different@1.0.0" with
+        | SchedulerInternals.RejectSerializedSessionOwner actual -> Assert.Equal("resume.session.agent@1.0.0", actual)
+        | plan -> failwith $"Expected session-owner rejection, got {plan}."
+
+        match SchedulerInternals.planSerializedSessionAdmission (Some agent) "resume.session.agent@1.0.0" with
+        | SchedulerInternals.DeserializeSerializedSession actual -> Assert.Same(agent, actual)
+        | plan -> failwith $"Expected session deserialization, got {plan}."
+
+        match SchedulerInternals.planSessionAliasAdmission (Some session) (Some agent) with
+        | SchedulerInternals.BindSessionAlias(actualSession, actualAgent) ->
+            Assert.Same(session, actualSession)
+            Assert.Same(agent, actualAgent)
+        | plan -> failwith $"Expected session alias binding, got {plan}."
+
+        match SchedulerInternals.planSessionAliasAdmission None (Some agent) with
+        | SchedulerInternals.RejectSessionAlias -> ()
+        | plan -> failwith $"Expected missing-session alias rejection, got {plan}."
+
+        match SchedulerInternals.planSessionAliasAdmission (Some session) None with
+        | SchedulerInternals.RejectSessionAlias -> ()
+        | plan -> failwith $"Expected missing-agent alias rejection, got {plan}."
+
+        let nullSessionState = SchedulerInternals.emptyResumeState ()
+
+        nullSessionState.SerializedSessions[agentPath] <-
+            struct ("resume.session.agent@1.0.0", adapterDocument.RootElement.Clone())
+
+        nullSessionState.SessionAliases[agentPath] <- agentPath
+
+        let nullSessionPayload =
+            SchedulerInternals.writeResumeState nullSessionState typeof<int> (box 7) Helpers.options
+
+        let nullSessionCheckpoint =
+            ResumeFixtures.checkpoint
+                agentCircuit.Id
+                agentCircuit.Version
+                agentCircuit.Fingerprint
+                (ValueSome Helpers.options)
+                nullSessionPayload
+
+        let nullSessionRuntime = AliasedSessionRuntime(false, restoreNullSession = true)
+
+        let! nullSessionRun =
+            (nullSessionRuntime :> ICircuitRuntime)
+                .ResumeAsync(agentCircuit, nullSessionCheckpoint, ResumeOptions.Default, CancellationToken.None)
+
+        let! nullSessionFailure = ResumeFixtures.terminalFailure nullSessionRun
+        Assert.Equal(CircuitFailureCode.CheckpointMismatch, nullSessionFailure.Code)
+        Assert.Contains("restored to null", string nullSessionFailure.Exception.Value)
+        Assert.Equal(0, nullSessionRuntime.Executions)
+    }
+
+[<Fact>]
+let ``branch selection helper classifies exact default missing and selector exceptions`` () =
+    let cases = Dictionary<string, Circuit<string, string>>(StringComparer.Ordinal)
+    cases["exact"] <- Circuit.value "matched"
+
+    let handler (definition: Circuit<string, string>) =
+        match definition.Node with
+        | CircuitGraph.Branch(_, _, value) -> value
+        | _ -> failwith "Expected branch node."
+
+    let withDefault =
+        Circuit.branch "selection-default" "1.0.0" (fun value -> value) cases (ValueSome(Circuit.value "default"))
+
+    match SchedulerInternals.selectBranch (handler withDefault) (box "exact") with
+    | SchedulerInternals.ExactBranch(key, _) -> Assert.Equal("exact", key)
+    | decision -> failwith $"Expected exact branch, got {decision}."
+
+    match SchedulerInternals.selectBranch (handler withDefault) (box "other") with
+    | SchedulerInternals.DefaultBranch _ -> ()
+    | decision -> failwith $"Expected default branch, got {decision}."
+
+    let withoutDefault = Circuit.branch "selection-missing" "1.0.0" id cases ValueNone
+
+    match SchedulerInternals.selectBranch (handler withoutDefault) (box "missing") with
+    | SchedulerInternals.MissingBranch key -> Assert.Equal("missing", key)
+    | decision -> failwith $"Expected missing branch, got {decision}."
+
+    let throwing =
+        Circuit.branch
+            "selection-throws"
+            "1.0.0"
+            (fun (_: string) -> raise (InvalidOperationException("selection failed")))
+            cases
+            ValueNone
+
+    match SchedulerInternals.selectBranch (handler throwing) (box "input") with
+    | SchedulerInternals.BranchSelectionFailed error -> Assert.Equal("selection failed", error.Message)
+    | decision -> failwith $"Expected selector failure, got {decision}."
+
+    let runId = RunId.New()
+    let child = (Circuit.value "planned").Node
+
+    match SchedulerInternals.planBranchExecution runId "root/branch" (SchedulerInternals.ExactBranch("key", child)) with
+    | SchedulerInternals.EvaluateBranch(_, path) -> Assert.Equal("root/branch[key]", path)
+    | plan -> failwith $"Expected exact evaluation plan, got {plan}."
+
+    match SchedulerInternals.planBranchExecution runId "root/branch" (SchedulerInternals.DefaultBranch child) with
+    | SchedulerInternals.EvaluateBranch(_, path) -> Assert.Equal("root/branch[default]", path)
+    | plan -> failwith $"Expected default evaluation plan, got {plan}."
+
+    match SchedulerInternals.planBranchExecution runId "root/branch" (SchedulerInternals.MissingBranch "absent") with
+    | SchedulerInternals.EmitBranchFailure failure ->
+        Assert.Equal(CircuitFailureCode.Engine, failure.Code)
+        Assert.Equal(ValueSome "root/branch", failure.OperationId)
+        Assert.Contains("absent", failure.Message)
+    | plan -> failwith $"Expected missing failure plan, got {plan}."
+
+    let selectionError = InvalidOperationException("selection failed")
+
+    match
+        SchedulerInternals.planBranchExecution
+            runId
+            "root/branch"
+            (SchedulerInternals.BranchSelectionFailed selectionError)
+    with
+    | SchedulerInternals.EmitBranchFailure failure ->
+        Assert.Equal(CircuitFailureCode.Engine, failure.Code)
+        Assert.Same(selectionError, failure.Exception.Value)
+        Assert.Contains("selector failed", failure.Message, StringComparison.OrdinalIgnoreCase)
+    | plan -> failwith $"Expected selector failure plan, got {plan}."
+
+[<Fact>]
+let ``typed handler response erasure preserves succeeded values and controlled failures`` () =
+    let runId = RunId.New()
+    let metadata = ProjectionFixtures.metadata runId "erasure"
+    let succeeded = Response<int>.Create(Succeeded 42, metadata)
+
+    match SchedulerInternals.eraseHandlerResponse succeeded with
+    | SchedulerInternals.HandlerSucceeded value -> Assert.Equal(42, unbox<int> value)
+    | SchedulerInternals.HandlerFailed failure -> failwith failure.Message
+
+    let expected = CircuitFailure.Create(CircuitFailureCode.Validation, "controlled")
+    let failed = Response<int>.Create(Failed expected, metadata)
+
+    match SchedulerInternals.eraseHandlerResponse failed with
+    | SchedulerInternals.HandlerFailed actual -> Assert.Same(expected, actual)
+    | SchedulerInternals.HandlerSucceeded value -> failwith $"Expected controlled failure, got {value}."
+
+    let successfulErased: SchedulerInternals.ErasedResponse =
+        { Value = box 42
+          Failure = ValueNone
+          Metadata = metadata
+          Typed = succeeded }
+
+    match SchedulerInternals.planRecovery successfulErased with
+    | SchedulerInternals.PassThroughRecovery actual -> Assert.Same(successfulErased, actual)
+    | plan -> failwith $"Expected recovery pass-through, got {plan}."
+
+    let failedErased: SchedulerInternals.ErasedResponse =
+        { Value = null
+          Failure = ValueSome expected
+          Metadata = metadata
+          Typed = failed }
+
+    match SchedulerInternals.planRecovery failedErased with
+    | SchedulerInternals.InvokeRecovery actual -> Assert.Same(expected, actual)
+    | plan -> failwith $"Expected recovery invocation, got {plan}."
+
+    match SchedulerInternals.invokeRecoveryHandler (fun (_: CircuitFailure) -> box 7) expected with
+    | SchedulerInternals.HandlerExecutionSucceeded(value, failure) ->
+        Assert.Equal(7, unbox<int> value)
+        Assert.Equal(ValueNone, failure)
+    | result -> failwith $"Expected recovery success, got {result}."
+
+    let recoveryError = InvalidOperationException("recovery failed")
+
+    match SchedulerInternals.invokeRecoveryHandler (fun (_: CircuitFailure) -> raise recoveryError) expected with
+    | SchedulerInternals.HandlerExecutionFailed error -> Assert.Same(recoveryError, error)
+    | result -> failwith $"Expected recovery failure, got {result}."
+
+[<Fact>]
+let ``code and aggregate handlers preserve asynchronous success failure null fault and cancellation outcomes`` () =
+    task {
+        let asyncSuccess =
+            Circuit.code "async-code-success" "1.0.0" (fun context value ->
+                task {
+                    do! Task.Yield()
+                    return Response.succeed context (value + 1)
+                })
+
+        let! succeeded = Circuit.run Helpers.runtime asyncSuccess 4 Helpers.options CancellationToken.None
+        Assert.True(succeeded.IsSuccess)
+        Assert.Equal(5, succeeded.Value)
+
+        let controlled =
+            CircuitFailure.Create(CircuitFailureCode.Validation, "async rejection")
+
+        let asyncFailure: Circuit<int, int> =
+            Circuit.code "async-code-failure" "1.0.0" (fun context _ ->
+                task {
+                    do! Task.Yield()
+                    return Response.fail context controlled
+                })
+
+        let! failed = Circuit.run Helpers.runtime asyncFailure 0 Helpers.options CancellationToken.None
+        Assert.False(failed.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Validation, failed.Failure.Code)
+
+        let nullCode: Circuit<int, int> =
+            Circuit.code "null-code-response" "1.0.0" (fun _ _ -> Task.FromResult(Unchecked.defaultof<Response<int>>))
+
+        let! nullResponse = Circuit.run Helpers.runtime nullCode 0 Helpers.options CancellationToken.None
+        Assert.False(nullResponse.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, nullResponse.Failure.Code)
+        Assert.Contains("returned null", string nullResponse.Failure.Exception.Value)
+
+        let synchronousThrow: Circuit<int, int> =
+            Circuit.code "sync-code-throw" "1.0.0" (fun _ _ ->
+                raise (InvalidOperationException("synchronous code failure")))
+
+        let! synchronousFailure = Circuit.run Helpers.runtime synchronousThrow 0 Helpers.options CancellationToken.None
+
+        Assert.False(synchronousFailure.IsSuccess)
+        Assert.Contains("synchronous code failure", string synchronousFailure.Failure.Exception.Value)
+
+        let faultedCode: Circuit<int, int> =
+            Circuit.code "faulted-code" "1.0.0" (fun _ _ ->
+                Task.FromException<Response<int>>(InvalidOperationException("faulted code failure")))
+
+        let! faulted = Circuit.run Helpers.runtime faultedCode 0 Helpers.options CancellationToken.None
+        Assert.False(faulted.IsSuccess)
+        Assert.Contains("faulted code failure", string faulted.Failure.Exception.Value)
+
+        let entered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        use cancellation = new CancellationTokenSource()
+
+        let cancelledCode: Circuit<int, int> =
+            Circuit.code "cancelled-code" "1.0.0" (fun context _ ->
+                task {
+                    entered.TrySetResult(()) |> ignore
+                    do! Task.Delay(Timeout.InfiniteTimeSpan, context.CancellationToken)
+                    return Response.succeed context 1
+                })
+
+        let cancelledTask =
+            Circuit.run Helpers.runtime cancelledCode 0 Helpers.options cancellation.Token
+
+        do! entered.Task
+        cancellation.Cancel()
+        let! cancelled = cancelledTask
+        Assert.False(cancelled.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Cancelled, cancelled.Failure.Code)
+
+        let source =
+            Circuit.items "async-aggregate-items" "1.0.0" (fun (_: unit) -> Helpers.toArray [ 2; 3 ])
+
+        let asyncAggregate =
+            source
+            |> Circuit.aggregate "async-aggregate-success" "1.0.0" (fun context responses _ ->
+                task {
+                    do! Task.Yield()
+                    return Response.succeed context (responses |> Seq.sumBy _.Value)
+                })
+
+        let! aggregateSuccess = Circuit.run Helpers.runtime asyncAggregate () Helpers.options CancellationToken.None
+
+        Assert.True(aggregateSuccess.IsSuccess)
+        Assert.Equal(5, aggregateSuccess.Value)
+
+        let nullAggregate: Circuit<unit, int> =
+            source
+            |> Circuit.aggregate "null-aggregate-response" "1.0.0" (fun _ _ _ ->
+                Task.FromResult(Unchecked.defaultof<Response<int>>))
+
+        let! aggregateNull = Circuit.run Helpers.runtime nullAggregate () Helpers.options CancellationToken.None
+
+        Assert.False(aggregateNull.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Engine, aggregateNull.Failure.Code)
+        Assert.Contains("aggregate handler failed", aggregateNull.Failure.Message, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``completed checkpoint replays cached decisions across composite node kinds`` () =
+    task {
+        let mutable sourceCalls = 0
+        let mutable codeCalls = 0
+        let mutable recoveryCalls = 0
+        let mutable aggregateCalls = 0
+        let mutable selectorCalls = 0
+        let mutable dynamicBuilds = 0
+
+        let source id values =
+            Circuit.items id "1.0.0" (fun (_: unit) ->
+                Interlocked.Increment(&sourceCalls) |> ignore
+                values |> List.toArray :> IReadOnlyList<int>)
+
+        let successfulCode =
+            Circuit.code "cached-code" "1.0.0" (fun context (_: unit) ->
+                Interlocked.Increment(&codeCalls) |> ignore
+                Helpers.success context 20)
+
+        let controlledFailure =
+            CircuitFailure.Create(CircuitFailureCode.Provider, "cached failure")
+
+        let recovered =
+            Circuit.code "cached-failure" "1.0.0" (fun context (_: unit) ->
+                Interlocked.Increment(&codeCalls) |> ignore
+                Response.fail context controlledFailure |> Task.FromResult)
+            |> Circuit.recover "cached-recovery" "1.0.0" (fun failure ->
+                Interlocked.Increment(&recoveryCalls) |> ignore
+                int failure.Code)
+
+        let aggregated =
+            source "cached-aggregate-items" [ 3; 4 ]
+            |> Circuit.aggregate "cached-aggregate" "1.0.0" (fun context responses _ ->
+                Interlocked.Increment(&aggregateCalls) |> ignore
+                responses |> Seq.sumBy _.Value |> Response.succeed context |> Task.FromResult)
+
+        let cases = Dictionary<string, Circuit<unit, int>>(StringComparer.Ordinal)
+        cases["selected"] <- Circuit.value 40
+
+        let selected =
+            Circuit.branch
+                "cached-branch"
+                "1.0.0"
+                (fun () ->
+                    Interlocked.Increment(&selectorCalls) |> ignore
+                    "selected")
+                cases
+                ValueNone
+
+        let dynamic =
+            Circuit.code "cached-dynamic-input" "1.0.0" (fun context (_: unit) ->
+                Interlocked.Increment(&codeCalls) |> ignore
+                Helpers.success context 50)
+            |> Circuit.thenDynamic "cached-dynamic" "1.0.0" string 1 (fun value ->
+                Interlocked.Increment(&dynamicBuilds) |> ignore
+                Circuit.value value)
+
+        let branches =
+            [| Circuit.value 10
+               successfulCode
+               recovered
+               source "cached-items" [ 30; 31 ]
+               aggregated
+               selected
+               dynamic |]
+            :> IReadOnlyList<Circuit<unit, int>>
+
+        let definition = Circuit.merge "cached-merge" "1.0.0" 3 branches
+        let! run = Circuit.start Helpers.runtime definition () Helpers.options CancellationToken.None
+        let! initialEvents = Helpers.collectEvents run
+
+        let initialOutputs =
+            initialEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) when response.IsSuccess -> Some response.Value
+                | _ -> None)
+            |> Array.sort
+
+        let expectedOutputs =
+            [| 7; 10; 20; 30; 31; 40; 50; int CircuitFailureCode.Provider |] |> Array.sort
+
+        Assert.Equal<int[]>(expectedOutputs, initialOutputs)
+
+        let! saved = run.CreateCheckpointAsync(CancellationToken.None).AsTask()
+        Assert.True(saved.IsSuccess)
+        do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        Assert.Equal(2, sourceCalls)
+        Assert.Equal(3, codeCalls)
+        Assert.Equal(1, recoveryCalls)
+        Assert.Equal(1, aggregateCalls)
+        Assert.Equal(1, selectorCalls)
+        Assert.Equal(1, dynamicBuilds)
+
+        let! resumed =
+            Circuit.resume Helpers.runtime definition saved.Value ResumeOptions.Default CancellationToken.None
+
+        let! resumedEvents = Helpers.collectEvents resumed
+
+        let resumedOutputs =
+            resumedEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) when response.IsSuccess -> Some response.Value
+                | _ -> None)
+            |> Array.sort
+
+        Assert.Equal<int[]>(initialOutputs, resumedOutputs)
+        Assert.Equal(2, sourceCalls)
+        Assert.Equal(3, codeCalls)
+        Assert.Equal(1, recoveryCalls)
+        Assert.Equal(1, aggregateCalls)
+        Assert.Equal(2, selectorCalls)
+        Assert.Equal(3, dynamicBuilds)
+        do! (resumed :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``completed checkpoint restores approval and loop terminal nodes without repeating work`` () =
+    task {
+        let mutable prompts = 0
+
+        let approval =
+            Circuit.approval "cached-approval" "1.0.0" (fun (_: unit) ->
+                Interlocked.Increment(&prompts) |> ignore
+                ApprovalPrompt.Create("Review", "Approve"))
+
+        let! approvalRun = Circuit.start Helpers.runtime approval () Helpers.options CancellationToken.None
+        let approvalEnumerator = approvalRun.Events.GetAsyncEnumerator()
+        let mutable approvalOutput: ApprovalResponse option = None
+
+        while approvalOutput.IsNone do
+            let! more = approvalEnumerator.MoveNextAsync().AsTask()
+            Assert.True(more)
+
+            match approvalEnumerator.Current with
+            | ApprovalRequested request ->
+                let! accepted =
+                    approvalRun
+                        .RespondAsync(ApprovalResponse.Create(request.RequestId, true), CancellationToken.None)
+                        .AsTask()
+
+                Assert.True(accepted.IsSuccess)
+            | OutputProduced(_, response) when response.IsSuccess -> approvalOutput <- Some response.Value
+            | _ -> ()
+
+        Assert.True(approvalOutput.Value.Approved)
+        let! approvalCheckpoint = approvalRun.CreateCheckpointAsync(CancellationToken.None).AsTask()
+        Assert.True(approvalCheckpoint.IsSuccess)
+        do! approvalEnumerator.DisposeAsync().AsTask()
+        do! (approvalRun :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        let! resumedApproval =
+            Circuit.resume
+                Helpers.runtime
+                approval
+                approvalCheckpoint.Value
+                ResumeOptions.Default
+                CancellationToken.None
+
+        let! resumedApprovalEvents = Helpers.collectEvents resumedApproval
+
+        Assert.DoesNotContain(
+            resumedApprovalEvents,
+            fun event ->
+                match event with
+                | ApprovalRequested _ -> true
+                | _ -> false
+        )
+
+        let replayedApproval =
+            resumedApprovalEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response.Value
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.True(replayedApproval.Approved)
+        Assert.Equal(1, prompts)
+        do! (resumedApproval :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        let mutable increments = 0
+        let mutable predicates = 0
+
+        let increment =
+            Circuit.code "cached-loop-increment" "1.0.0" (fun context value ->
+                Interlocked.Increment(&increments) |> ignore
+                Helpers.success context (value + 1))
+
+        let loop =
+            Circuit.loop
+                "cached-loop"
+                "1.0.0"
+                5
+                (fun value ->
+                    Interlocked.Increment(&predicates) |> ignore
+                    value < 2)
+                increment
+
+        let! loopRun = Circuit.start Helpers.runtime loop 0 Helpers.options CancellationToken.None
+        let! loopEvents = Helpers.collectEvents loopRun
+
+        let initialLoopOutput =
+            loopEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response.Value
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.Equal(2, initialLoopOutput)
+        let! loopCheckpoint = loopRun.CreateCheckpointAsync(CancellationToken.None).AsTask()
+        Assert.True(loopCheckpoint.IsSuccess)
+        do! (loopRun :> IAsyncDisposable).DisposeAsync().AsTask()
+        Assert.Equal(2, increments)
+        Assert.Equal(3, predicates)
+
+        let! resumedLoop =
+            Circuit.resume Helpers.runtime loop loopCheckpoint.Value ResumeOptions.Default CancellationToken.None
+
+        let! resumedLoopEvents = Helpers.collectEvents resumedLoop
+
+        let replayedLoopOutput =
+            resumedLoopEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response.Value
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.Equal(2, replayedLoopOutput)
+        Assert.Equal(2, increments)
+        Assert.Equal(3, predicates)
+        do! (resumedLoop :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``failed loop checkpoint replays terminal when predicate changes`` () =
+    task {
+        let mutable predicates = 0
+        let mutable bodies = 0
+
+        let controlled =
+            CircuitFailure.Create(CircuitFailureCode.Validation, "loop body rejected")
+
+        let body =
+            Circuit.code "cached-failed-loop-body" "1.0.0" (fun context (_: int) ->
+                Interlocked.Increment(&bodies) |> ignore
+                Response.fail context controlled |> Task.FromResult)
+
+        let definition =
+            Circuit.loop "cached-failed-loop" "1.0.0" 3 (fun _ -> Interlocked.Increment(&predicates) = 1) body
+
+        let! first = Circuit.start Helpers.runtime definition 0 Helpers.options CancellationToken.None
+        let! firstEvents = Helpers.collectEvents first
+
+        let initial =
+            firstEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.False(initial.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Validation, initial.Failure.Code)
+        Assert.Equal(1, predicates)
+        Assert.Equal(1, bodies)
+
+        let! saved = first.CreateCheckpointAsync(CancellationToken.None).AsTask()
+        Assert.True(saved.IsSuccess)
+        do! (first :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        let! resumed =
+            Circuit.resume Helpers.runtime definition saved.Value ResumeOptions.Default CancellationToken.None
+
+        let! resumedEvents = Helpers.collectEvents resumed
+
+        let replayed =
+            resumedEvents
+            |> Array.choose (function
+                | OutputProduced(_, response) -> Some response
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.False(replayed.IsSuccess)
+        Assert.Equal(initial.Failure.Code, replayed.Failure.Code)
+        Assert.Equal(initial.Failure.Message, replayed.Failure.Message)
+        Assert.Equal(initial.Failure.RequestId, replayed.Failure.RequestId)
+        Assert.Equal(initial.Metadata.NodePath, replayed.Metadata.NodePath)
+        Assert.Equal(initial.Metadata.StartedAt, replayed.Metadata.StartedAt)
+        Assert.Equal(initial.Metadata.CompletedAt, replayed.Metadata.CompletedAt)
+        Assert.Equal(1, predicates)
+        Assert.Equal(1, bodies)
+        do! (resumed :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``dynamic scheduler reports upstream duplicate depth node and handler failures`` () =
+    task {
+        let controlledFailure =
+            CircuitFailure.Create(CircuitFailureCode.Provider, "upstream failed")
+
+        let mutable upstreamFactories = 0
+
+        let failedUpstream: Circuit<unit, int> =
+            Circuit.code "dynamic-failed-upstream" "1.0.0" (fun context _ ->
+                Response.fail context controlledFailure |> Task.FromResult)
+
+        let propagated =
+            failedUpstream
+            |> Circuit.thenDynamic "dynamic-after-failure" "1.0.0" string 1 (fun value ->
+                Interlocked.Increment(&upstreamFactories) |> ignore
+                Circuit.value value)
+
+        let! upstreamResult = Circuit.collect Helpers.runtime propagated () Helpers.options CancellationToken.None
+
+        Assert.True(upstreamResult.IsSuccess)
+        let propagatedFailure = Assert.Single(upstreamResult.Value)
+        Assert.False(propagatedFailure.IsSuccess)
+        Assert.Equal(CircuitFailureCode.Provider, propagatedFailure.Failure.Code)
+        Assert.Equal(0, upstreamFactories)
+
+        let duplicateInputs =
+            [| Circuit.value 1; Circuit.value 1 |] :> IReadOnlyList<Circuit<unit, int>>
+
+        let duplicate =
+            Circuit.merge "duplicate-dynamic-inputs" "1.0.0" 2 duplicateInputs
+            |> Circuit.thenDynamic "duplicate-dynamic" "1.0.0" (fun _ -> "same") 2 Circuit.value
+
+        let! duplicateResult = Circuit.collect Helpers.runtime duplicate () Helpers.options CancellationToken.None
+
+        Assert.False(duplicateResult.IsSuccess)
+        Assert.Equal(CircuitFailureCode.GeneratedGraphIntegrity, duplicateResult.Failure.Code)
+        Assert.Contains("dynamic Circuit", duplicateResult.Failure.Message, StringComparison.OrdinalIgnoreCase)
+
+        let innerSeed =
+            Circuit.code "inner-dynamic-seed" "1.0.0" (fun context value -> Helpers.success context value)
+
+        let nested =
+            Circuit.code "outer-dynamic-seed" "1.0.0" (fun context (_: unit) -> Helpers.success context 1)
+            |> Circuit.thenDynamic "outer-dynamic" "1.0.0" string 1 (fun _ ->
+                innerSeed
+                |> Circuit.thenDynamic "inner-dynamic" "1.0.0" string 1 (fun value -> Circuit.value value))
+
+        let depthOptions =
+            Helpers.options.WithLimits(
+                1,
+                Helpers.options.MaxDynamicNodes,
+                Helpers.options.MaxApprovalRounds,
+                Helpers.options.MaxSourcePageSize,
+                Helpers.options.MaxSourcePages
+            )
+
+        let! depthResult = Circuit.collect Helpers.runtime nested () depthOptions CancellationToken.None
+
+        Assert.False(depthResult.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ResourceLimit, depthResult.Failure.Code)
+        Assert.Contains("depth limit", depthResult.Failure.Message, StringComparison.OrdinalIgnoreCase)
+
+        let generatedBranches =
+            [| Circuit.value 1; Circuit.value 2 |] :> IReadOnlyList<Circuit<int, int>>
+
+        let tooManyNodes =
+            Circuit.code "node-limit-seed" "1.0.0" (fun context (_: unit) -> Helpers.success context 1)
+            |> Circuit.thenDynamic "node-limit-dynamic" "1.0.0" string 1 (fun _ ->
+                Circuit.merge "generated-node-limit-merge" "1.0.0" 1 generatedBranches)
+
+        let nodeOptions =
+            Helpers.options.WithLimits(
+                Helpers.options.MaxDynamicDepth,
+                1,
+                Helpers.options.MaxApprovalRounds,
+                Helpers.options.MaxSourcePageSize,
+                Helpers.options.MaxSourcePages
+            )
+
+        let! nodeResult = Circuit.collect Helpers.runtime tooManyNodes () nodeOptions CancellationToken.None
+
+        Assert.False(nodeResult.IsSuccess)
+        Assert.Equal(CircuitFailureCode.ResourceLimit, nodeResult.Failure.Code)
+        Assert.Contains("generated-node limit", nodeResult.Failure.Message, StringComparison.OrdinalIgnoreCase)
+
+        let keyFailure =
+            Circuit.code "key-failure-seed" "1.0.0" (fun context (_: unit) -> Helpers.success context 1)
+            |> Circuit.thenDynamic
+                "key-failure-dynamic"
+                "1.0.0"
+                (fun _ -> raise (InvalidOperationException("key failed")))
+                1
+                Circuit.value
+
+        let! keyResult = Circuit.collect Helpers.runtime keyFailure () Helpers.options CancellationToken.None
+
+        Assert.False(keyResult.IsSuccess)
+        Assert.Equal(CircuitFailureCode.GeneratedGraphIntegrity, keyResult.Failure.Code)
+        Assert.Contains("key failed", string keyResult.Failure.Exception.Value)
+
+        let factoryFailure =
+            Circuit.code "factory-failure-seed" "1.0.0" (fun context (_: unit) -> Helpers.success context 1)
+            |> Circuit.thenDynamic "factory-failure-dynamic" "1.0.0" string 1 (fun _ ->
+                raise (InvalidOperationException("factory failed")))
+
+        let! factoryResult = Circuit.collect Helpers.runtime factoryFailure () Helpers.options CancellationToken.None
+
+        Assert.False(factoryResult.IsSuccess)
+        Assert.Equal(CircuitFailureCode.GeneratedGraphIntegrity, factoryResult.Failure.Code)
+        Assert.Contains("factory failed", string factoryResult.Failure.Exception.Value)
+    }

@@ -21,6 +21,77 @@ module private ProjectionHelpers =
             ValueNone
         )
 
+    let projectionMetadata runId path =
+        let now = DateTimeOffset.UtcNow
+
+        ResponseMetadata(
+            ValueNone,
+            ValueNone,
+            Array.empty,
+            runId,
+            path,
+            RunUsage(0, 0),
+            ValueNone,
+            1,
+            now,
+            now,
+            "projection"
+        )
+
+    let collectionResult runId path (results: IReadOnlyList<Response<'Output>>) approval terminal =
+        match approval, terminal with
+        | ValueSome request, _ ->
+            let metadata = projectionMetadata runId path
+
+            Response<IReadOnlyList<Response<'Output>>>.Create(Failed(approvalFailure request metadata), metadata)
+        | ValueNone, ValueSome(completed: Response<RunSummary>) ->
+            match completed.Outcome with
+            | Failed failure -> Response<IReadOnlyList<Response<'Output>>>.Create(Failed failure, completed.Metadata)
+            | Succeeded _ -> Response<IReadOnlyList<Response<'Output>>>.Create(Succeeded results, completed.Metadata)
+        | _ ->
+            let metadata = projectionMetadata runId path
+
+            Response<IReadOnlyList<Response<'Output>>>
+                .Create(
+                    Failed(
+                        failure
+                            CircuitFailureCode.Engine
+                            metadata
+                            "The Circuit event stream ended without a terminal event."
+                    ),
+                    metadata
+                )
+
+    let withAsyncDisposal (resource: IAsyncDisposable) (work: unit -> Task<'Result>) =
+        let workTask =
+            try
+                work ()
+            with ex ->
+                Task.FromException<'Result>(ex)
+
+        workTask
+            .ContinueWith(
+                (fun (completed: Task<'Result>) ->
+                    let disposal =
+                        try
+                            resource.DisposeAsync().AsTask()
+                        with ex ->
+                            Task.FromException(ex)
+
+                    disposal.ContinueWith(
+                        (fun (disposed: Task) ->
+                            disposed.GetAwaiter().GetResult()
+                            completed.GetAwaiter().GetResult()),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default
+            )
+            .Unwrap()
+
     type StreamEnumerator<'Input, 'Output>
         (
             runtime: ICircuitRuntime,
@@ -238,91 +309,39 @@ module Circuit =
             let mutable terminal: Response<RunSummary> voption = ValueNone
             let mutable approval: ApprovalRequest voption = ValueNone
 
-            try
-                // Cancellation is delivered to the scheduler. The reader stays alive long enough
-                // to receive its typed Cancelled terminal response.
-                let enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
-                let mutable more = true
+            let readEvents () =
+                task {
+                    // Cancellation is delivered to the scheduler. The reader stays alive long enough
+                    // to receive its typed Cancelled terminal response.
+                    use enumerator = run.Events.GetAsyncEnumerator(CancellationToken.None)
+                    let mutable more = true
 
-                while more && approval.IsNone do
-                    let! available = enumerator.MoveNextAsync().AsTask()
-                    more <- available
+                    while more && approval.IsNone do
+                        let! available = enumerator.MoveNextAsync().AsTask()
+                        more <- available
 
-                    if available then
-                        match enumerator.Current with
-                        | OutputProduced(_, response) -> results.Add response
-                        | ApprovalRequested request -> approval <- ValueSome request
-                        | RunCompleted response -> terminal <- ValueSome response
-                        | _ -> ()
+                        if available then
+                            match enumerator.Current with
+                            | OutputProduced(_, response) -> results.Add response
+                            | ApprovalRequested request -> approval <- ValueSome request
+                            | RunCompleted response -> terminal <- ValueSome response
+                            | _ -> ()
+                }
 
-                do! enumerator.DisposeAsync().AsTask()
+            let collectRun () =
+                task {
+                    do! readEvents ()
 
-                let result =
-                    match approval, terminal with
-                    | ValueSome request, _ ->
-                        let now = DateTimeOffset.UtcNow
+                    return
+                        ProjectionHelpers.collectionResult
+                            run.RunId
+                            circuit.Id.Value
+                            (results.ToArray() :> IReadOnlyList<Response<'Output>>)
+                            approval
+                            terminal
+                }
 
-                        let metadata =
-                            ResponseMetadata(
-                                ValueNone,
-                                ValueNone,
-                                Array.empty,
-                                run.RunId,
-                                circuit.Id.Value,
-                                RunUsage(0, 0),
-                                ValueNone,
-                                1,
-                                now,
-                                now,
-                                "projection"
-                            )
-
-                        Response<IReadOnlyList<Response<'Output>>>
-                            .Create(Failed(ProjectionHelpers.approvalFailure request metadata), metadata)
-                    | ValueNone, ValueSome completed ->
-                        match completed.Outcome with
-                        | Failed failure ->
-                            Response<IReadOnlyList<Response<'Output>>>.Create(Failed failure, completed.Metadata)
-                        | Succeeded _ ->
-                            Response<IReadOnlyList<Response<'Output>>>
-                                .Create(
-                                    Succeeded(results.ToArray() :> IReadOnlyList<Response<'Output>>),
-                                    completed.Metadata
-                                )
-                    | _ ->
-                        let now = DateTimeOffset.UtcNow
-
-                        let metadata =
-                            ResponseMetadata(
-                                ValueNone,
-                                ValueNone,
-                                Array.empty,
-                                run.RunId,
-                                circuit.Id.Value,
-                                RunUsage(0, 0),
-                                ValueNone,
-                                1,
-                                now,
-                                now,
-                                "projection"
-                            )
-
-                        Response<IReadOnlyList<Response<'Output>>>
-                            .Create(
-                                Failed(
-                                    ProjectionHelpers.failure
-                                        CircuitFailureCode.Engine
-                                        metadata
-                                        "The Circuit event stream ended without a terminal event."
-                                ),
-                                metadata
-                            )
-
-                do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
-                return result
-            with ex ->
-                do! (run :> IAsyncDisposable).DisposeAsync().AsTask()
-                return raise ex
+            return! ProjectionHelpers.withAsyncDisposal (run :> IAsyncDisposable) collectRun
         }
 
     /// Collects root responses and resequences them lexicographically by the full hierarchical source order.

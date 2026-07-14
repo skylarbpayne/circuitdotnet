@@ -143,17 +143,287 @@ module internal SchedulerInternals =
     exception ResourceLimitExceeded of string
     exception CheckpointFingerprintMismatch of string
 
+    type BranchSelection =
+        | ExactBranch of string * Node
+        | DefaultBranch of Node
+        | MissingBranch of string
+        | BranchSelectionFailed of exn
+
+    let selectBranch (handler: IBranchHandler) input =
+        try
+            let selected = handler.Select input
+
+            match handler.Cases.TryGetValue selected with
+            | true, child -> ExactBranch(selected, child)
+            | _ ->
+                match handler.Default with
+                | ValueSome child -> DefaultBranch child
+                | ValueNone -> MissingBranch selected
+        with ex ->
+            BranchSelectionFailed ex
+
+    type BranchExecutionPlan =
+        | EvaluateBranch of Node * string
+        | EmitBranchFailure of CircuitFailure
+
+    let planBranchExecution runId selectedPath selection =
+        match selection with
+        | ExactBranch(selected, child) -> EvaluateBranch(child, $"{selectedPath}[{selected}]")
+        | DefaultBranch child -> EvaluateBranch(child, selectedPath + "[default]")
+        | MissingBranch selected ->
+            EmitBranchFailure(
+                SchedulerFailure.engine runId selectedPath $"No branch matched key '{selected}'." ValueNone
+            )
+        | BranchSelectionFailed ex ->
+            EmitBranchFailure(SchedulerFailure.engine runId selectedPath "The branch selector failed." (ValueSome ex))
+
+    type ErasedHandlerOutcome =
+        | HandlerSucceeded of obj
+        | HandlerFailed of CircuitFailure
+
+    let eraseHandlerResponse (typed: obj) =
+        let outcome = typed.GetType().GetProperty("Outcome").GetValue(typed)
+
+        let case, fields =
+            FSharp.Reflection.FSharpValue.GetUnionFields(outcome, outcome.GetType())
+
+        if case.Name = "Succeeded" then
+            HandlerSucceeded fields[0]
+        else
+            HandlerFailed(fields[0] :?> CircuitFailure)
+
+    type HandlerExecutionResult =
+        | HandlerExecutionSucceeded of obj * CircuitFailure voption
+        | HandlerExecutionFailed of exn
+
+    let invokeRecoveryHandler invoke failure =
+        try
+            HandlerExecutionSucceeded(invoke failure, ValueNone)
+        with ex ->
+            HandlerExecutionFailed ex
+
+    let invokeCodeHandler (handler: ICodeHandler) context input =
+        task {
+            try
+                let! typed = handler.InvokeAsync(context, input)
+
+                if isNull typed then
+                    raise (InvalidOperationException("A code node returned null instead of a Response."))
+
+                return
+                    match eraseHandlerResponse typed with
+                    | HandlerSucceeded value -> HandlerExecutionSucceeded(value, ValueNone)
+                    | HandlerFailed failure -> HandlerExecutionSucceeded(null, ValueSome failure)
+            with ex ->
+                return HandlerExecutionFailed ex
+        }
+
+    let invokeAggregateHandler (handler: IAggregateHandler) context values cancellationToken =
+        task {
+            try
+                let! typed = handler.InvokeAsync(context, values, cancellationToken)
+
+                return
+                    match eraseHandlerResponse typed with
+                    | HandlerSucceeded value -> HandlerExecutionSucceeded(value, ValueNone)
+                    | HandlerFailed failure -> HandlerExecutionSucceeded(null, ValueSome failure)
+            with ex ->
+                return HandlerExecutionFailed ex
+        }
+
     type ErasedResponse =
         { Value: obj
           Failure: CircuitFailure voption
           Metadata: ResponseMetadata
           Typed: obj }
 
+    type LoopBodyDecision =
+        | ContinueLoop of ErasedResponse
+        | PropagateLoopFailure of ErasedResponse
+
+    let classifyLoopBody (responses: IReadOnlyList<ErasedResponse>) =
+        if responses.Count <> 1 then
+            raise (InvalidOperationException("A loop body must emit exactly one response per iteration."))
+
+        let response = responses[0]
+
+        match response.Failure with
+        | ValueSome _ -> PropagateLoopFailure response
+        | ValueNone -> ContinueLoop response
+
+    type LoopTerminalPlan =
+        | EmitLoopResourceLimit
+        | EmitLoopSuccess of obj
+        | EmitLoopFailure of ErasedResponse
+
+    type RecoveryPlan =
+        | PassThroughRecovery of ErasedResponse
+        | InvokeRecovery of CircuitFailure
+
+    let planRecovery (response: ErasedResponse) =
+        match response.Failure with
+        | ValueNone -> PassThroughRecovery response
+        | ValueSome failure -> InvokeRecovery failure
+
     type Lane =
         { Key: ItemKey voption
           Ordinal: int64 voption
           Order: int64 list
           Identity: string }
+
+    let selectEffectiveSession restored configured =
+        match restored with
+        | ValueSome session -> ValueSome session
+        | ValueNone -> configured
+
+    type SessionAgentAdmission =
+        | RegisterSessionAgent
+        | ReuseSessionAgent
+        | RejectSessionAgentSharing of string
+
+    let planSessionAgentAdmission existing current =
+        match existing with
+        | None -> RegisterSessionAgent
+        | Some value when StringComparer.Ordinal.Equals(value, current) -> ReuseSessionAgent
+        | Some value -> RejectSessionAgentSharing value
+
+    type SerializedSessionAdmission =
+        | DeserializeSerializedSession of AgentDefinition
+        | RejectUnknownSerializedSession
+        | RejectSerializedSessionOwner of string
+
+    let planSerializedSessionAdmission candidate expectedAgentId =
+        match candidate with
+        | None -> RejectUnknownSerializedSession
+        | Some(agent: AgentDefinition) ->
+            let actualAgentId = agent.Id.Value + "@" + agent.Version.ToString()
+
+            if StringComparer.Ordinal.Equals(expectedAgentId, actualAgentId) then
+                DeserializeSerializedSession agent
+            else
+                RejectSerializedSessionOwner actualAgentId
+
+    type SessionAliasAdmission =
+        | BindSessionAlias of CircuitSession * AgentDefinition
+        | RejectSessionAlias
+
+    let planSessionAliasAdmission restoredSession candidate =
+        match restoredSession, candidate with
+        | Some session, Some(agent: AgentDefinition) -> BindSessionAlias(session, agent)
+        | _ -> RejectSessionAlias
+
+    let deserializeSessionCheckedAsync sessionKey deserialize =
+        task {
+            let! session = deserialize ()
+
+            if isNull (box session) then
+                raise (JsonException($"Checkpoint session '{sessionKey}' was restored to null by its agent adapter."))
+
+            return session
+        }
+
+    let continueTask (pending: Task<'Value>) (continuation: 'Value -> Task) : Task =
+        pending
+            .ContinueWith(
+                (fun (completed: Task<'Value>) ->
+                    let value = completed.GetAwaiter().GetResult()
+
+                    try
+                        continuation value
+                    with ex ->
+                        Task.FromException(ex)),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default
+            )
+            .Unwrap()
+
+    let continueUnitTask (pending: Task) (continuation: unit -> Task) : Task =
+        pending
+            .ContinueWith(
+                (fun (completed: Task) ->
+                    completed.GetAwaiter().GetResult()
+
+                    try
+                        continuation ()
+                    with ex ->
+                        Task.FromException(ex)),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default
+            )
+            .Unwrap()
+
+    let runWithAsyncDisposal (work: unit -> Task) (dispose: unit -> Task) : Task =
+        let workTask =
+            try
+                work ()
+            with ex ->
+                Task.FromException(ex)
+
+        workTask
+            .ContinueWith(
+                (fun (completed: Task) ->
+                    let disposal =
+                        try
+                            dispose ()
+                        with ex ->
+                            Task.FromException(ex)
+
+                    disposal.ContinueWith(
+                        (fun (disposed: Task) ->
+                            disposed.GetAwaiter().GetResult()
+                            completed.GetAwaiter().GetResult()),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default
+                    )),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default
+            )
+            .Unwrap()
+
+    let withOptionalPermitAsync
+        (permit: SemaphoreSlim voption)
+        (cancellationToken: CancellationToken)
+        (work: unit -> Task)
+        =
+        task {
+            match permit with
+            | ValueSome(semaphore: SemaphoreSlim) -> do! semaphore.WaitAsync(cancellationToken)
+            | ValueNone -> ()
+
+            try
+                do! work ()
+            finally
+                match permit with
+                | ValueSome semaphore -> semaphore.Release() |> ignore
+                | ValueNone -> ()
+        }
+
+    type ApprovalExecutionResult =
+        | ApprovalAccepted of ApprovalResponse
+        | ApprovalLimitReached of string
+
+    let requestApprovalHandledAsync requestApproval request =
+        task {
+            try
+                let! response = requestApproval request
+                return ApprovalAccepted response
+            with :? InvalidOperationException as ex when
+                ex.Message.Contains("approval-round limit", StringComparison.Ordinal) ->
+                return ApprovalLimitReached ex.Message
+        }
+
+    type RunOutcomePlan =
+        | EmitFailedRun of CircuitFailure
+        | EmitSucceededRun of total: int * succeeded: int
+
+    let planRunOutcome failure total succeeded =
+        match failure with
+        | ValueSome value -> EmitFailedRun value
+        | ValueNone -> EmitSucceededRun(total, succeeded)
 
     type SessionIdentityComparer() =
         interface IEqualityComparer<CircuitSession> with
@@ -220,6 +490,80 @@ module internal SchedulerInternals =
           GeneratedNodeCount = 0
           ApprovalRoundCount = 0
           SnapshotFailures = ResizeArray() }
+
+    type SerializedSessionRestoreStep =
+        { SessionKey: string
+          Agent: AgentDefinition
+          AdapterState: JsonElement }
+
+    let matchingSessionAgent (agents: Dictionary<string, AgentDefinition>) (sessionKey: string) =
+        agents
+        |> Seq.filter (fun candidate -> sessionKey.StartsWith(candidate.Key + "|", StringComparison.Ordinal))
+        |> Seq.sortByDescending (fun candidate -> candidate.Key.Length)
+        |> Seq.tryHead
+        |> Option.map (fun candidate -> candidate.Value)
+
+    let planSerializedSessionRestores (agents: Dictionary<string, AgentDefinition>) (state: ResumeState) =
+        state.SerializedSessions
+        |> Seq.map (fun item ->
+            let struct (expectedAgentId, adapterState) = item.Value
+            let candidate = matchingSessionAgent agents item.Key
+
+            match planSerializedSessionAdmission candidate expectedAgentId with
+            | RejectUnknownSerializedSession ->
+                raise (JsonException($"Checkpoint session '{item.Key}' does not match an agent node in the Circuit."))
+            | RejectSerializedSessionOwner _ ->
+                raise (JsonException($"Checkpoint session '{item.Key}' belongs to a different agent definition."))
+            | DeserializeSerializedSession agent ->
+                { SessionKey = item.Key
+                  Agent = agent
+                  AdapterState = adapterState })
+        |> Seq.toArray
+
+    let restoreSerializedSessionGroupsAsync
+        (steps: SerializedSessionRestoreStep array)
+        (deserialize: AgentDefinition -> JsonElement -> Task<CircuitSession>)
+        =
+        let restored = Dictionary<string, CircuitSession>(StringComparer.Ordinal)
+
+        let rec restore index =
+            task {
+                if index < steps.Length then
+                    let step: SerializedSessionRestoreStep = steps[index]
+
+                    let! session =
+                        deserializeSessionCheckedAsync step.SessionKey (fun () ->
+                            deserialize step.Agent step.AdapterState)
+
+                    restored[step.SessionKey] <- session
+                    return! restore (index + 1)
+                else
+                    return restored
+            }
+
+        restore 0
+
+    let bindSerializedSessionAliases
+        (agents: Dictionary<string, AgentDefinition>)
+        (state: ResumeState)
+        (restoredGroups: Dictionary<string, CircuitSession>)
+        =
+        for alias in state.SessionAliases do
+            let restoredSession =
+                match restoredGroups.TryGetValue alias.Value with
+                | true, session -> Some session
+                | _ -> None
+
+            let candidate = matchingSessionAgent agents alias.Key
+
+            match planSessionAliasAdmission restoredSession candidate with
+            | BindSessionAlias(session, agent) ->
+                state.Sessions[alias.Key] <- session
+                state.SessionAgents[alias.Key] <- agent
+            | RejectSessionAlias ->
+                raise (
+                    JsonException($"Checkpoint session binding '{alias.Key}' references an unknown serialized session.")
+                )
 
     let hash (value: string) =
         let bytes: byte[] = Text.Encoding.UTF8.GetBytes(value)
@@ -1606,79 +1950,60 @@ module internal SchedulerInternals =
                             })
                 }
             | Recover(id, _, handler, previous) ->
-                task {
-                    do!
-                        eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
-                            task {
-                                match response.Failure with
-                                | ValueNone -> do! emit response
-                                | ValueSome failure ->
-                                    let recoveryPath = path + "/" + id
+                eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
+                    match planRecovery response with
+                    | PassThroughRecovery successful -> emit successful
+                    | InvokeRecovery failure ->
+                        let recoveryPath = path + "/" + id
 
-                                    let responseLane =
-                                        laneFromMetadata
-                                            response.Metadata.ItemKey
-                                            response.Metadata.SourceOrdinal
-                                            response.Metadata.SourceOrder
+                        let responseLane =
+                            laneFromMetadata
+                                response.Metadata.ItemKey
+                                response.Metadata.SourceOrdinal
+                                response.Metadata.SourceOrder
 
-                                    match restore recoveryPath responseLane handler.OutputType with
-                                    | ValueSome cached -> do! emit cached
-                                    | ValueNone ->
-                                        let! started = startNode node recoveryPath responseLane
+                        match restore recoveryPath responseLane handler.OutputType with
+                        | ValueSome cached -> emit cached
+                        | ValueNone ->
+                            continueTask (startNode node recoveryPath responseLane) (fun started ->
+                                let value, recoveryFailure =
+                                    match invokeRecoveryHandler handler.Invoke failure with
+                                    | HandlerExecutionSucceeded(value, _) -> value, ValueNone
+                                    | HandlerExecutionFailed ex ->
+                                        null,
+                                        ValueSome(
+                                            SchedulerFailure.engine
+                                                runId
+                                                recoveryPath
+                                                "A recovery handler failed."
+                                                (ValueSome ex)
+                                        )
 
-                                        try
-                                            let value = handler.Invoke failure
+                                let completed =
+                                    finishNode
+                                        node
+                                        recoveryPath
+                                        responseLane
+                                        started
+                                        value
+                                        recoveryFailure
+                                        (RunUsage(0, 0))
+                                        ValueNone
 
-                                            let! recovered =
-                                                finishNode
-                                                    node
-                                                    recoveryPath
-                                                    responseLane
-                                                    started
-                                                    value
-                                                    ValueNone
-                                                    (RunUsage(0, 0))
-                                                    ValueNone
-
-                                            do! emit recovered
-                                        with ex ->
-                                            let failure =
-                                                SchedulerFailure.engine
-                                                    runId
-                                                    recoveryPath
-                                                    "A recovery handler failed."
-                                                    (ValueSome ex)
-
-                                            let! failed =
-                                                finishNode
-                                                    node
-                                                    recoveryPath
-                                                    responseLane
-                                                    started
-                                                    null
-                                                    (ValueSome failure)
-                                                    (RunUsage(0, 0))
-                                                    ValueNone
-
-                                            do! emit failed
-                            })
-                }
+                                continueTask completed emit))
             | Aggregate(id, _, handler, previous) ->
-                task {
-                    let captured = ResizeArray<obj>()
+                let captured = ResizeArray<obj>()
+                let aggregatePath = path + "/" + id
 
-                    do!
-                        eval previous (path + "/previous") lane inputValue dynamicDepth (fun response ->
-                            task { lock captured (fun () -> captured.Add response.Typed) })
+                let capture response =
+                    lock captured (fun () -> captured.Add response.Typed)
+                    Task.CompletedTask
 
-                    let aggregatePath = path + "/" + id
-
+                let executeAggregate () =
                     match restore aggregatePath lane handler.OutputType with
-                    | ValueSome cached -> do! emit cached
+                    | ValueSome cached -> emit cached
                     | ValueNone ->
-                        let! started = startNode node aggregatePath lane
-
-                        try
+                        continueTask (startNode node aggregatePath lane) (fun started ->
                             let metadata =
                                 createMetadata
                                     runId
@@ -1701,46 +2026,39 @@ module internal SchedulerInternals =
                                     linkedCts.Token
                                 )
 
-                            let! typed = handler.InvokeAsync(context, captured.ToArray(), linkedCts.Token)
-                            let outcome = typed.GetType().GetProperty("Outcome").GetValue(typed)
+                            let invocation =
+                                invokeAggregateHandler handler context (captured.ToArray()) linkedCts.Token
 
-                            let case, fields =
-                                FSharp.Reflection.FSharpValue.GetUnionFields(outcome, outcome.GetType())
+                            continueTask invocation (fun handlerResult ->
+                                let value, failure =
+                                    match handlerResult with
+                                    | HandlerExecutionSucceeded(value, failure) -> value, failure
+                                    | HandlerExecutionFailed ex ->
+                                        null,
+                                        ValueSome(
+                                            SchedulerFailure.engine
+                                                runId
+                                                aggregatePath
+                                                "The aggregate handler failed."
+                                                (ValueSome ex)
+                                        )
 
-                            let isSucceeded = case.Name = "Succeeded"
-                            let value = if isSucceeded then fields[0] else null
+                                let completed =
+                                    finishNode
+                                        node
+                                        aggregatePath
+                                        lane
+                                        started
+                                        value
+                                        failure
+                                        (RunUsage(0, 0))
+                                        ValueNone
 
-                            let failure =
-                                if isSucceeded then
-                                    ValueNone
-                                else
-                                    ValueSome(fields[0] :?> CircuitFailure)
+                                continueTask completed emit))
 
-                            let! response =
-                                finishNode node aggregatePath lane started value failure (RunUsage(0, 0)) ValueNone
-
-                            do! emit response
-                        with ex ->
-                            let failure =
-                                SchedulerFailure.engine
-                                    runId
-                                    aggregatePath
-                                    "The aggregate handler failed."
-                                    (ValueSome ex)
-
-                            let! response =
-                                finishNode
-                                    node
-                                    aggregatePath
-                                    lane
-                                    started
-                                    null
-                                    (ValueSome failure)
-                                    (RunUsage(0, 0))
-                                    ValueNone
-
-                            do! emit response
-                }
+                continueUnitTask
+                    (eval previous (path + "/previous") lane inputValue dynamicDepth capture)
+                    executeAggregate
             | Items(id, _, handler) ->
                 task {
                     let stagePath = path + "/" + id
@@ -1829,63 +2147,44 @@ module internal SchedulerInternals =
                     do! Task.WhenAll(tasks.ToArray())
                 }
             | AsyncSource(id, _, handler) ->
-                task {
-                    let stagePath = path + "/" + id
-                    let sourcePath = scopedSourcePath path id lane
-                    let stageSemaphore = admissionSemaphore stagePath
-                    let enumerator = handler.GetAsyncEnumerator(inputValue, linkedCts.Token)
-                    let tasks = ResizeArray<Task>()
-                    let mutable ordinal = 0L
-                    let mutable more = true
+                let stagePath = path + "/" + id
+                let sourcePath = scopedSourcePath path id lane
+                let stageSemaphore = admissionSemaphore stagePath
+                let enumerator = handler.GetAsyncEnumerator(inputValue, linkedCts.Token)
+                let tasks = ResizeArray<Task>()
 
-                    try
-                        while more do
-                            // Reserve stage capacity before pulling so async sources cannot run
-                            // ahead of admitted lanes.
-                            do! stageSemaphore.WaitAsync(linkedCts.Token)
-                            let! hasValue = enumerator.MoveNextAsync()
-                            more <- hasValue
+                let runItem value itemLane itemOrdinal =
+                    task {
+                        try
+                            let itemPath = $"{sourcePath}[{itemOrdinal}]"
+                            let! started = startNode node itemPath itemLane
 
-                            if hasValue then
-                                let value = enumerator.Current
-                                let itemLane = childLane lane (string ordinal) ordinal
+                            let! response =
+                                finishNode node itemPath itemLane started value ValueNone (RunUsage(0, 0)) ValueNone
 
-                                let itemOrdinal = ordinal
-                                ordinal <- ordinal + 1L
+                            do! emit response
+                        finally
+                            stageSemaphore.Release() |> ignore
+                    }
 
-                                let work =
-                                    task {
-                                        try
-                                            let itemPath = $"{sourcePath}[{itemOrdinal}]"
-                                            let! started = startNode node itemPath itemLane
+                let rec pull ordinal =
+                    task {
+                        // Reserve stage capacity before pulling so async sources cannot run
+                        // ahead of admitted lanes.
+                        do! stageSemaphore.WaitAsync(linkedCts.Token)
+                        let! hasValue = enumerator.MoveNextAsync()
 
-                                            let! response =
-                                                finishNode
-                                                    node
-                                                    itemPath
-                                                    itemLane
-                                                    started
-                                                    value
-                                                    ValueNone
-                                                    (RunUsage(0, 0))
-                                                    ValueNone
+                        if hasValue then
+                            let value = enumerator.Current
+                            let itemLane = childLane lane (string ordinal) ordinal
+                            tasks.Add(runItem value itemLane ordinal)
+                            return! pull (ordinal + 1L)
+                        else
+                            stageSemaphore.Release() |> ignore
+                            do! Task.WhenAll(tasks.ToArray())
+                    }
 
-                                            do! emit response
-                                        finally
-                                            stageSemaphore.Release() |> ignore
-                                    }
-
-                                tasks.Add work
-                            else
-                                stageSemaphore.Release() |> ignore
-
-                        do! Task.WhenAll(tasks.ToArray())
-                    with ex ->
-                        do! enumerator.DisposeAsync()
-                        return raise ex
-
-                    do! enumerator.DisposeAsync()
-                }
+                runWithAsyncDisposal (fun () -> pull 0L :> Task) enumerator.DisposeAsync
             | ResumableSource(id, _, handler) ->
                 task {
                     let stagePath = path + "/" + id
@@ -2060,61 +2359,8 @@ module internal SchedulerInternals =
                                 resumeState.SourcePendingCursors.Remove sourcePath |> ignore
                                 resumeState.SourcePendingCompleted.Remove sourcePath |> ignore)
                 }
-            | Branch(id, _, handler) ->
-                task {
-                    let selectedPath = path + "/" + id
-
-                    try
-                        let selected = handler.Select inputValue
-
-                        match handler.Cases.TryGetValue selected with
-                        | true, child ->
-                            do! eval child ($"{selectedPath}[{selected}]") lane inputValue dynamicDepth emit
-                        | _ ->
-                            match handler.Default with
-                            | ValueSome child ->
-                                do! eval child (selectedPath + "[default]") lane inputValue dynamicDepth emit
-                            | ValueNone ->
-                                let failure =
-                                    SchedulerFailure.engine
-                                        runId
-                                        selectedPath
-                                        $"No branch matched key '{selected}'."
-                                        ValueNone
-
-                                let! started = startNode node selectedPath lane
-
-                                let! response =
-                                    finishNode
-                                        node
-                                        selectedPath
-                                        lane
-                                        started
-                                        null
-                                        (ValueSome failure)
-                                        (RunUsage(0, 0))
-                                        ValueNone
-
-                                do! emit response
-                    with ex ->
-                        let failure =
-                            SchedulerFailure.engine runId selectedPath "The branch selector failed." (ValueSome ex)
-
-                        let! started = startNode node selectedPath lane
-
-                        let! response =
-                            finishNode
-                                node
-                                selectedPath
-                                lane
-                                started
-                                null
-                                (ValueSome failure)
-                                (RunUsage(0, 0))
-                                ValueNone
-
-                        do! emit response
-                }
+            | (Branch(id, _, handler) as branchNode) ->
+                evalBranch branchNode id handler path lane inputValue dynamicDepth emit
             | Merge(id, _, maximum, branches) ->
                 task {
                     use semaphore = new SemaphoreSlim(maximum, maximum)
@@ -2135,17 +2381,18 @@ module internal SchedulerInternals =
                     ()
                 }
             | Loop(id, _, maximum, handler) ->
-                task {
-                    let loopPath = path + "/" + id
-                    let mutable value = inputValue
-                    let mutable response = Unchecked.defaultof<ErasedResponse>
-                    let mutable iteration = 0
-                    let mutable keepGoing = true
+                let loopPath = path + "/" + id
 
-                    while keepGoing && iteration < maximum do
-                        keepGoing <- handler.Continue value
-
-                        if keepGoing then
+                let rec iterate value iteration =
+                    task {
+                        if iteration >= maximum then
+                            if handler.Continue value then
+                                return EmitLoopResourceLimit
+                            else
+                                return EmitLoopSuccess value
+                        elif not (handler.Continue value) then
+                            return EmitLoopSuccess value
+                        else
                             let captured = ResizeArray<ErasedResponse>()
 
                             do!
@@ -2157,66 +2404,47 @@ module internal SchedulerInternals =
                                     dynamicDepth
                                     (fun item -> task { captured.Add item })
 
-                            if captured.Count <> 1 then
-                                raise (
-                                    InvalidOperationException(
-                                        "A loop body must emit exactly one response per iteration."
-                                    )
-                                )
+                            match classifyLoopBody captured with
+                            | PropagateLoopFailure response -> return EmitLoopFailure response
+                            | ContinueLoop response -> return! iterate response.Value (iteration + 1)
+                    }
 
-                            response <- captured[0]
+                let finishLoop value failure =
+                    continueTask (startNode node loopPath lane) (fun started ->
+                        let completed =
+                            finishNode node loopPath lane started value failure (RunUsage(0, 0)) ValueNone
 
-                            if response.Failure.IsSome then
-                                keepGoing <- false
-                            else
-                                value <- response.Value
+                        continueTask completed emit)
 
-                            iteration <- iteration + 1
+                match restore loopPath lane handler.ValueType with
+                | ValueSome cached -> emit cached
+                | ValueNone ->
+                    task {
+                        let! terminal = iterate inputValue 0
 
-                    let exhausted =
-                        iteration >= maximum
-                        && not (isNull (box response))
-                        && response.Failure.IsNone
-                        && handler.Continue value
+                        match terminal with
+                        | EmitLoopResourceLimit ->
+                            let failure =
+                                SchedulerFailure.create
+                                    CircuitFailureCode.ResourceLimit
+                                    runId
+                                    (ValueSome loopPath)
+                                    ValueNone
+                                    $"Loop '{id}' exhausted its maximum of {maximum} iterations."
+                                    ValueNone
 
-                    if exhausted then
-                        let failure =
-                            SchedulerFailure.create
-                                CircuitFailureCode.ResourceLimit
-                                runId
-                                (ValueSome loopPath)
-                                ValueNone
-                                $"Loop '{id}' exhausted its maximum of {maximum} iterations."
-                                ValueNone
-
-                        let! started = startNode node loopPath lane
-
-                        let! failed =
-                            finishNode node loopPath lane started null (ValueSome failure) (RunUsage(0, 0)) ValueNone
-
-                        do! emit failed
-                    elif isNull (box response) || response.Failure.IsNone then
-                        match restore loopPath lane handler.ValueType with
-                        | ValueSome cached -> do! emit cached
-                        | ValueNone ->
-                            let! started = startNode node loopPath lane
-
-                            let! finalResponse =
-                                finishNode node loopPath lane started value ValueNone (RunUsage(0, 0)) ValueNone
-
-                            do! emit finalResponse
-                    else
-                        do! emit response
-                }
+                            do! finishLoop null (ValueSome failure)
+                        | EmitLoopSuccess value -> do! finishLoop value ValueNone
+                        | EmitLoopFailure response -> do! finishLoop null response.Failure
+                    }
             | Approval(id, _, handler) ->
-                task {
-                    let approvalPath = path + "/" + id
+                let approvalPath = path + "/" + id
 
-                    match restore approvalPath lane typeof<ApprovalResponse> with
-                    | ValueSome cached -> do! emit cached
-                    | ValueNone ->
+                match restore approvalPath lane typeof<ApprovalResponse> with
+                | ValueSome cached -> emit cached
+                | ValueNone ->
+                    task {
                         let! started = startNode node approvalPath lane
-
                         let prompt = handler.Invoke inputValue
 
                         let requestId =
@@ -2226,159 +2454,130 @@ module internal SchedulerInternals =
                         let request =
                             ApprovalRequest(requestId, prompt.Title, ValueSome prompt.Message, ValueSome prompt)
 
-                        try
-                            let! approved = requestApproval request
+                        let! approval = requestApprovalHandledAsync requestApproval request
 
-                            let! response =
-                                finishNode
-                                    node
-                                    approvalPath
-                                    lane
-                                    started
-                                    (box approved)
-                                    ValueNone
-                                    (RunUsage(0, 0))
-                                    ValueNone
+                        let value, failure =
+                            match approval with
+                            | ApprovalAccepted response -> box response, ValueNone
+                            | ApprovalLimitReached message ->
+                                null,
+                                ValueSome(
+                                    SchedulerFailure.create
+                                        CircuitFailureCode.ResourceLimit
+                                        runId
+                                        (ValueSome approvalPath)
+                                        ValueNone
+                                        message
+                                        ValueNone
+                                )
 
-                            do! emit response
-                        with :? InvalidOperationException as ex when
-                            ex.Message.Contains("approval-round limit", StringComparison.Ordinal) ->
-                            let failure =
-                                SchedulerFailure.create
-                                    CircuitFailureCode.ResourceLimit
-                                    runId
-                                    (ValueSome approvalPath)
-                                    ValueNone
-                                    ex.Message
-                                    ValueNone
+                        let! response =
+                            finishNode node approvalPath lane started value failure (RunUsage(0, 0)) ValueNone
 
-                            let! response =
-                                finishNode
-                                    node
-                                    approvalPath
-                                    lane
-                                    started
-                                    null
-                                    (ValueSome failure)
-                                    (RunUsage(0, 0))
-                                    ValueNone
-
-                            do! emit response
-                }
+                        do! emit response
+                    }
             | Named(id, child) -> task { do! eval child (path + "/" + id) lane inputValue dynamicDepth emit }
             | Agent(id, _, handler) ->
-                task {
-                    let nodePath = path + "/" + id
-                    let sessionKey = journalKey nodePath lane
+                let nodePath = path + "/" + id
+                let sessionKey = journalKey nodePath lane
 
-                    let effectiveSession =
-                        lock stateGate (fun () ->
+                let effectiveSession =
+                    lock stateGate (fun () ->
+                        let restored =
                             match resumeState.Sessions.TryGetValue sessionKey with
                             | true, session -> ValueSome session
-                            | _ -> options.Session)
+                            | _ -> ValueNone
 
-                    let sessionGroupKey =
-                        match effectiveSession with
-                        | ValueSome session -> sessionGroupKeys.GetOrAdd(session, fun _ -> sessionKey)
-                        | ValueNone -> sessionKey
+                        selectEffectiveSession restored options.Session)
 
-                    if effectiveSession.IsSome then
-                        let currentAgent = handler.Agent.Id.Value + "@" + handler.Agent.Version.ToString()
+                let sessionGroupKey =
+                    match effectiveSession with
+                    | ValueSome session -> sessionGroupKeys.GetOrAdd(session, fun _ -> sessionKey)
+                    | ValueNone -> sessionKey
+
+                if effectiveSession.IsSome then
+                    let currentAgent = handler.Agent.Id.Value + "@" + handler.Agent.Version.ToString()
+
+                    lock stateGate (fun () ->
+                        match planSessionAgentAdmission sessionAgentId currentAgent with
+                        | RegisterSessionAgent -> sessionAgentId <- Some currentAgent
+                        | ReuseSessionAgent -> ()
+                        | RejectSessionAgentSharing _ ->
+                            raise (
+                                InvalidOperationException(
+                                    "One Circuit session cannot be shared by different agent definitions in the same run."
+                                )
+                            )
+
+                        resumeState.Sessions[sessionKey] <- effectiveSession.Value
+                        resumeState.SessionAgents[sessionKey] <- handler.Agent
+                        resumeState.SessionAliases[sessionKey] <- sessionGroupKey)
+
+                let agentOptions =
+                    match effectiveSession with
+                    | ValueSome session -> options.WithSession session
+                    | ValueNone -> options
+
+                let sessionPermit =
+                    effectiveSession
+                    |> ValueOption.map (fun session ->
+                        sessionSemaphores.GetOrAdd(session, fun _ -> new SemaphoreSlim(1, 1)))
+
+                let publishSession (session: CircuitSession) =
+                    task {
+                        let! adapterState =
+                            executor.SerializeSessionAsync(handler.Agent, session, options, linkedCts.Token).AsTask()
+
+                        sessionGroupKeys[session] <- sessionGroupKey
 
                         lock stateGate (fun () ->
-                            match sessionAgentId with
-                            | None -> sessionAgentId <- Some currentAgent
-                            | Some existing when not (StringComparer.Ordinal.Equals(existing, currentAgent)) ->
-                                raise (
-                                    InvalidOperationException(
-                                        "One Circuit session cannot be shared by different agent definitions in the same run."
-                                    )
-                                )
-                            | _ -> ()
-
-                            resumeState.Sessions[sessionKey] <- effectiveSession.Value
+                            resumeState.Sessions[sessionKey] <- session
                             resumeState.SessionAgents[sessionKey] <- handler.Agent
-                            resumeState.SessionAliases[sessionKey] <- sessionGroupKey)
+                            resumeState.SessionAliases[sessionKey] <- sessionGroupKey
 
-                    let agentOptions =
-                        match effectiveSession with
-                        | ValueSome session -> options.WithSession session
-                        | ValueNone -> options
+                            resumeState.SerializedSessions[sessionGroupKey] <-
+                                struct (handler.Agent.Id.Value + "@" + handler.Agent.Version.ToString(),
+                                        adapterState.Clone()))
+                    }
 
-                    let sessionPermit =
-                        effectiveSession
-                        |> ValueOption.map (fun session ->
-                            sessionSemaphores.GetOrAdd(session, fun _ -> new SemaphoreSlim(1, 1)))
+                let publishOptional session =
+                    match session with
+                    | ValueSome value -> publishSession value :> Task
+                    | ValueNone -> Task.CompletedTask
 
-                    match sessionPermit with
-                    | ValueSome permit -> do! permit.WaitAsync(linkedCts.Token)
-                    | ValueNone -> ()
+                let mutable leafApprovalOrdinal = 0
 
-                    try
-                        match restore nodePath lane handler.OutputType with
-                        | ValueSome cached -> do! emit cached
-                        | ValueNone ->
-                            let! started = startNode node nodePath lane
+                let approveLeaf (request: ApprovalRequest) =
+                    task {
+                        let ordinal = Interlocked.Increment(&leafApprovalOrdinal)
 
-                            let metadata =
-                                createMetadata
-                                    runId
-                                    lineageId
-                                    nodePath
-                                    lane
-                                    options
-                                    started
-                                    started
-                                    (RunUsage(0, 0))
-                                    ValueNone
+                        let publicId =
+                            hash $"{lineageId}|{nodePath}|{laneToken lane}|approval|{ordinal}|{request.ToolName}"
+                            |> fun value -> value.Substring(0, 24)
 
-                            let mutable leafApprovalOrdinal = 0
+                        let publicRequest =
+                            ApprovalRequest(publicId, request.ToolName, request.ArgumentsJson, request.Prompt)
 
-                            let publishSession (session: CircuitSession) =
-                                task {
-                                    let! adapterState =
-                                        executor
-                                            .SerializeSessionAsync(handler.Agent, session, options, linkedCts.Token)
-                                            .AsTask()
+                        let! response = requestApproval publicRequest
+                        return ApprovalResponse(request.RequestId, response.Approved, response.Note)
+                    }
 
-                                    sessionGroupKeys[session] <- sessionGroupKey
+                let executeAgent () =
+                    continueTask (startNode node nodePath lane) (fun started ->
+                        let metadata =
+                            createMetadata
+                                runId
+                                lineageId
+                                nodePath
+                                lane
+                                options
+                                started
+                                started
+                                (RunUsage(0, 0))
+                                ValueNone
 
-                                    lock stateGate (fun () ->
-                                        resumeState.Sessions[sessionKey] <- session
-                                        resumeState.SessionAgents[sessionKey] <- handler.Agent
-                                        resumeState.SessionAliases[sessionKey] <- sessionGroupKey
-
-                                        resumeState.SerializedSessions[sessionGroupKey] <-
-                                            struct (handler.Agent.Id.Value + "@" + handler.Agent.Version.ToString(),
-                                                    adapterState.Clone()))
-                                }
-
-                            match effectiveSession with
-                            | ValueSome continued -> do! publishSession continued
-                            | ValueNone -> ()
-
-                            let approveLeaf (request: ApprovalRequest) =
-                                task {
-                                    let ordinal = Interlocked.Increment(&leafApprovalOrdinal)
-
-                                    let publicId =
-                                        hash
-                                            $"{lineageId}|{nodePath}|{laneToken lane}|approval|{ordinal}|{request.ToolName}"
-                                        |> fun value -> value.Substring(0, 24)
-
-                                    let publicRequest =
-                                        ApprovalRequest(
-                                            publicId,
-                                            request.ToolName,
-                                            request.ArgumentsJson,
-                                            request.Prompt
-                                        )
-
-                                    let! response = requestApproval publicRequest
-                                    return ApprovalResponse(request.RequestId, response.Approved, response.Note)
-                                }
-
-                            let! value, failure, usage, session =
+                        continueUnitTask (publishOptional effectiveSession) (fun () ->
+                            let invocation =
                                 invokeAgent
                                     executor
                                     runId
@@ -2397,120 +2596,148 @@ module internal SchedulerInternals =
                                     (fun session -> publishSession session :> Task)
                                     linkedCts.Token
 
-                            let correlatedFailure =
-                                failure |> ValueOption.map (SchedulerFailure.restamp runId nodePath)
+                            continueTask invocation (fun (value, failure, usage, session) ->
+                                let correlatedFailure =
+                                    failure |> ValueOption.map (SchedulerFailure.restamp runId nodePath)
 
-                            match session with
-                            | ValueSome value -> do! publishSession value
-                            | ValueNone -> ()
+                                continueUnitTask (publishOptional session) (fun () ->
+                                    let completed =
+                                        finishNode node nodePath lane started value correlatedFailure usage session
 
-                            let! response = finishNode node nodePath lane started value correlatedFailure usage session
+                                    continueTask completed emit))))
 
-                            do! emit response
-                    finally
-                        match sessionPermit with
-                        | ValueSome permit -> permit.Release() |> ignore
-                        | ValueNone -> ()
-                }
-            | Code(id, _, handler) ->
-                task {
-                    let nodePath = path + "/" + id
-
+                let executeOrReplay () : Task =
                     match restore nodePath lane handler.OutputType with
-                    | ValueSome cached -> do! emit cached
-                    | ValueNone ->
-                        let! started = startNode node nodePath lane
+                    | ValueSome cached -> emit cached
+                    | ValueNone -> executeAgent ()
 
-                        try
-                            let metadata =
-                                createMetadata
-                                    runId
-                                    lineageId
-                                    nodePath
-                                    lane
-                                    options
-                                    started
-                                    started
-                                    (RunUsage(0, 0))
-                                    ValueNone
+                withOptionalPermitAsync sessionPermit linkedCts.Token executeOrReplay
+            | Code(id, _, handler) ->
+                let nodePath = path + "/" + id
 
-                            let context =
-                                CircuitContext(
-                                    runId,
-                                    nodePath,
-                                    lane.Key,
-                                    metadata.IdempotencyKey,
-                                    options,
-                                    linkedCts.Token
-                                )
+                match restore nodePath lane handler.OutputType with
+                | ValueSome cached -> emit cached
+                | ValueNone ->
+                    continueTask (startNode node nodePath lane) (fun started ->
+                        let metadata =
+                            createMetadata
+                                runId
+                                lineageId
+                                nodePath
+                                lane
+                                options
+                                started
+                                started
+                                (RunUsage(0, 0))
+                                ValueNone
 
-                            let! typed = handler.InvokeAsync(context, inputValue)
+                        let context =
+                            CircuitContext(
+                                runId,
+                                nodePath,
+                                lane.Key,
+                                metadata.IdempotencyKey,
+                                options,
+                                linkedCts.Token
+                            )
 
-                            if isNull typed then
-                                raise (InvalidOperationException("A code node returned null instead of a Response."))
+                        continueTask (invokeCodeHandler handler context inputValue) (fun handlerResult ->
+                            let value, failure =
+                                match handlerResult with
+                                | HandlerExecutionSucceeded(value, failure) -> value, failure
+                                | HandlerExecutionFailed ex ->
+                                    let failure =
+                                        if linkedCts.IsCancellationRequested then
+                                            SchedulerFailure.cancelled runId nodePath
+                                        else
+                                            SchedulerFailure.engine
+                                                runId
+                                                nodePath
+                                                $"Code node '{id}' failed."
+                                                (ValueSome ex)
 
-                            let outcome = typed.GetType().GetProperty("Outcome").GetValue(typed)
+                                    null, ValueSome failure
 
-                            let case, fields =
-                                FSharp.Reflection.FSharpValue.GetUnionFields(outcome, outcome.GetType())
-
-                            let success = case.Name = "Succeeded"
-                            let value = if success then fields[0] else null
-
-                            let failure =
-                                if success then
-                                    ValueNone
-                                else
-                                    ValueSome(fields[0] :?> CircuitFailure)
-
-                            let! response =
+                            let completed =
                                 finishNode node nodePath lane started value failure (RunUsage(0, 0)) ValueNone
 
-                            do! emit response
-                        with ex ->
-                            let failure =
-                                if linkedCts.IsCancellationRequested then
-                                    SchedulerFailure.cancelled runId nodePath
-                                else
-                                    SchedulerFailure.engine runId nodePath $"Code node '{id}' failed." (ValueSome ex)
-
-                            let! response =
-                                finishNode
-                                    node
-                                    nodePath
-                                    lane
-                                    started
-                                    null
-                                    (ValueSome failure)
-                                    (RunUsage(0, 0))
-                                    ValueNone
-
-                            do! emit response
-                }
+                            continueTask completed emit))
             | Value(id, outputType, serializedValue) ->
-                task {
-                    let nodePath = path + "/" + id
+                let nodePath = path + "/" + id
 
-                    match restore nodePath lane outputType with
-                    | ValueSome cached -> do! emit cached
-                    | ValueNone ->
-                        let! started = startNode node nodePath lane
+                match restore nodePath lane outputType with
+                | ValueSome cached -> emit cached
+                | ValueNone ->
+                    continueTask (startNode node nodePath lane) (fun started ->
                         let value = JsonSerializer.Deserialize(serializedValue, outputType)
-                        let! response = finishNode node nodePath lane started value ValueNone (RunUsage(0, 0)) ValueNone
-                        do! emit response
-                }
+
+                        let completed =
+                            finishNode node nodePath lane started value ValueNone (RunUsage(0, 0)) ValueNone
+
+                        continueTask completed emit)
+
+        and evalBranch branchNode id handler path lane inputValue dynamicDepth emit =
+            let selectedPath = path + "/" + id
+
+            match selectBranch handler inputValue |> planBranchExecution runId selectedPath with
+            | EvaluateBranch(child, childPath) -> eval child childPath lane inputValue dynamicDepth emit
+            | EmitBranchFailure failure ->
+                continueTask (startNode branchNode selectedPath lane) (fun started ->
+                    let completed =
+                        finishNode
+                            branchNode
+                            selectedPath
+                            lane
+                            started
+                            null
+                            (ValueSome failure)
+                            (RunUsage(0, 0))
+                            ValueNone
+
+                    continueTask completed emit)
+
+        let writeTerminalIgnoringFailure terminal =
+            task {
+                try
+                    do! events.Writer.WriteAsync(terminal).AsTask()
+                with _ ->
+                    ()
+            }
+
+        let installTerminal terminal =
+            if linkedCts.IsCancellationRequested then
+                // Disposal must still leave one observable typed terminal even when the
+                // bounded buffer is full and no reader has consumed it. Structural writes
+                // have already been cancelled, so replace unread pre-terminal events until
+                // the reserved terminal can be installed.
+                let mutable dropped = Unchecked.defaultof<CircuitEvent<'Output>>
+                let mutable written = events.Writer.TryWrite terminal
+
+                while not written && events.Reader.TryRead(&dropped) do
+                    written <- events.Writer.TryWrite terminal
+
+                if not written then
+                    written <- events.Writer.TryWrite terminal
+
+                if written then
+                    Task.CompletedTask
+                else
+                    writeTerminalIgnoringFailure terminal
+            else
+                writeTerminalIgnoringFailure terminal
 
         let writeTerminal () =
             task {
                 if Interlocked.CompareExchange(&terminalWritten, 1, 0) = 0 then
                     let completed = DateTimeOffset.UtcNow
 
-                    let usage =
+                    let usage, failure =
                         lock stateGate (fun () ->
                             RunUsage(
                                 usageEntries.Values |> Seq.sumBy _.InputTokens,
                                 usageEntries.Values |> Seq.sumBy _.OutputTokens
-                            ))
+                            ),
+                            runFailure)
 
                     let metadata =
                         createMetadata
@@ -2525,21 +2752,18 @@ module internal SchedulerInternals =
                             ValueNone
 
                     let outcome =
-                        match runFailure with
+                        match failure with
                         | ValueSome failure -> Failed failure
                         | ValueNone ->
-                            let succeeded = outputs |> Seq.filter _.IsSuccess |> Seq.length
+                            let total, succeeded =
+                                lock outputs (fun () -> outputs.Count, outputs |> Seq.filter _.IsSuccess |> Seq.length)
 
-                            Succeeded(
-                                RunSummary(
-                                    outputs.Count,
-                                    succeeded,
-                                    outputs.Count - succeeded,
-                                    usage,
-                                    startedAt,
-                                    completed
+                            match planRunOutcome ValueNone total succeeded with
+                            | EmitFailedRun failure -> Failed failure
+                            | EmitSucceededRun(total, successful) ->
+                                Succeeded(
+                                    RunSummary(total, successful, total - successful, usage, startedAt, completed)
                                 )
-                            )
 
                     let response = Response<RunSummary>.Create(outcome, metadata)
 
@@ -2548,36 +2772,15 @@ module internal SchedulerInternals =
                         | Failed failure -> ValueSome failure
                         | Succeeded _ -> ValueNone
 
-                    do! observe (CircuitRunCompleted(runId, terminalFailure, usage, startedAt, completed))
-
                     let terminal = RunCompleted response
-
-                    if linkedCts.IsCancellationRequested then
-                        // Disposal must still leave one observable typed terminal even when the
-                        // bounded buffer is full and no reader has consumed it. Structural writes
-                        // have already been cancelled, so replace unread pre-terminal events until
-                        // the reserved terminal can be installed.
-                        let mutable dropped = Unchecked.defaultof<CircuitEvent<'Output>>
-                        let mutable written = events.Writer.TryWrite terminal
-
-                        while not written && events.Reader.TryRead(&dropped) do
-                            written <- events.Writer.TryWrite terminal
-
-                        if not written then
-                            written <- events.Writer.TryWrite terminal
-
-                        if not written then
-                            try
-                                do! events.Writer.WriteAsync(terminal).AsTask()
-                            with _ ->
-                                ()
-                    else
-                        try
-                            do! events.Writer.WriteAsync(terminal).AsTask()
-                        with _ ->
-                            ()
-
+                    do! installTerminal terminal
                     events.Writer.TryComplete() |> ignore
+
+                    // External observers cannot control terminal publication or channel closure.
+                    // observe isolates both synchronous and asynchronous observer failures, and
+                    // this terminal notification is deliberately fire-and-forget so disposal stays bounded.
+                    observe (CircuitRunCompleted(runId, terminalFailure, usage, startedAt, completed))
+                    |> ignore
             }
 
         member _.Start() =
@@ -3056,36 +3259,12 @@ type CircuitRuntime() =
                         let agents =
                             SchedulerInternals.validateDynamicResume circuit.Node circuit.Id.Value state restoredOptions
 
-                        let matchingAgent (sessionKey: string) =
-                            agents
-                            |> Seq.filter (fun candidate ->
-                                sessionKey.StartsWith(candidate.Key + "|", StringComparison.Ordinal))
-                            |> Seq.sortByDescending (fun candidate -> candidate.Key.Length)
-                            |> Seq.tryHead
+                        let restoreSteps = SchedulerInternals.planSerializedSessionRestores agents state
 
-                        let restoredGroups = Dictionary<string, CircuitSession>(StringComparer.Ordinal)
-
-                        for item in state.SerializedSessions do
-                            match matchingAgent item.Key with
-                            | None ->
-                                raise (
-                                    JsonException(
-                                        $"Checkpoint session '{item.Key}' does not match an agent node in the Circuit."
-                                    )
-                                )
-                            | Some candidate ->
-                                let struct (expectedAgentId, adapterState) = item.Value
-                                let agent = candidate.Value
-                                let actualAgentId = agent.Id.Value + "@" + agent.Version.ToString()
-
-                                if not (StringComparer.Ordinal.Equals(expectedAgentId, actualAgentId)) then
-                                    raise (
-                                        JsonException(
-                                            $"Checkpoint session '{item.Key}' belongs to a different agent definition."
-                                        )
-                                    )
-
-                                let! restoredSession =
+                        let! restoredGroups =
+                            SchedulerInternals.restoreSerializedSessionGroupsAsync
+                                restoreSteps
+                                (fun agent adapterState ->
                                     this
                                         .DeserializeSessionCoreAsync(
                                             agent,
@@ -3093,21 +3272,9 @@ type CircuitRuntime() =
                                             restoredOptions,
                                             cancellationToken
                                         )
-                                        .AsTask()
+                                        .AsTask())
 
-                                restoredGroups[item.Key] <- restoredSession
-
-                        for alias in state.SessionAliases do
-                            match restoredGroups.TryGetValue alias.Value, matchingAgent alias.Key with
-                            | (true, restoredSession), Some candidate ->
-                                state.Sessions[alias.Key] <- restoredSession
-                                state.SessionAgents[alias.Key] <- candidate.Value
-                            | _ ->
-                                raise (
-                                    JsonException(
-                                        $"Checkpoint session binding '{alias.Key}' references an unknown serialized session."
-                                    )
-                                )
+                        SchedulerInternals.bindSerializedSessionAliases agents state restoredGroups
                     with
                     | SchedulerInternals.ResourceLimitExceeded message ->
                         failure <-
